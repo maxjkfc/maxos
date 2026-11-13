@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:18.7-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: maxos
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: maxos
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      # PostgreSQL 18+ images keep PGDATA at /var/lib/postgresql/18/docker, so
+      # the volume is mounted one level up.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U maxos -d maxos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  maxos:
+    build: .
+    restart: unless-stopped
+    environment:
+      MAXOS_DATABASE_URL: postgres://maxos:${POSTGRES_PASSWORD}@postgres:5432/maxos?sslmode=disable
+      MAXOS_HTTP_ADDR: ":8080"
+      MAXOS_ACCESS_TEAM_DOMAIN: ${MAXOS_ACCESS_TEAM_DOMAIN:-}
+      MAXOS_ACCESS_AUD: ${MAXOS_ACCESS_AUD:-}
+    entrypoint: ["sh", "-c", "maxos migrate && exec maxos serve"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.4
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      - maxos
+
+volumes:
+  pgdata:

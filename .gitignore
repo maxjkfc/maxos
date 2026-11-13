@@ -1,0 +1,6 @@
+.env
+/bin/
+/maxos
+*.test
+*.out
+.DS_Store
