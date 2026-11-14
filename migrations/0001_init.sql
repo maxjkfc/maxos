@@ -6,9 +6,7 @@ CREATE TABLE inbox_item (
     actor           text NOT NULL,
     kind            text NOT NULL,
     idempotency_key text NOT NULL UNIQUE,
-    payload         jsonb NOT NULL,
-    status          text NOT NULL DEFAULT 'received'
-        CHECK (status IN ('received', 'processed', 'rejected'))
+    payload         jsonb NOT NULL
 );
 
 CREATE INDEX inbox_item_received_at_idx ON inbox_item (received_at DESC);
@@ -32,14 +30,9 @@ CREATE TABLE catalog_area (
 );
 
 CREATE TABLE catalog_project (
-    id           uuid PRIMARY KEY,
-    name         text NOT NULL UNIQUE,
-    starts_on    date,
-    ends_on      date,
-    status       text NOT NULL DEFAULT 'active'
-        CHECK (status IN ('active', 'done', 'archived')),
-    external_ref text,
-    created_at   timestamptz NOT NULL DEFAULT now()
+    id         uuid PRIMARY KEY,
+    name       text NOT NULL UNIQUE,
+    created_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE catalog_link (

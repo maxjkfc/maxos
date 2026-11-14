@@ -89,7 +89,7 @@ func TestListRecentKeepsRepoOrderAndMapsItems(t *testing.T) {
 		if got.ID != want.ID || !got.ReceivedAt.Equal(want.ReceivedAt) {
 			t.Errorf("items[%d] = %+v, want id %s at %s", i, got, want.ID, want.ReceivedAt)
 		}
-		if got.Text != want.Text() || got.Source != "mcp-http" || got.Actor != "max@example.com" || got.Kind != "note" || got.Status != "received" {
+		if got.Text != want.Text() || got.Source != "mcp-http" || got.Actor != "max@example.com" || got.Kind != "note" {
 			t.Errorf("items[%d] = %+v", i, got)
 		}
 	}

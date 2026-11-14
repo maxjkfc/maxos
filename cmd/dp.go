@@ -89,22 +89,8 @@ func AccessModule() fx.Option {
 	return fx.Provide(newAccessVerifier)
 }
 
-func newAccessVerifier(lc fx.Lifecycle, cfg config.Config, logger *slog.Logger) (*cfaccess.Verifier, error) {
-	// The verifier keeps fetching signing keys for as long as it lives, so its
-	// context must outlast construction: it ends when the app stops.
-	ctx, cancel := context.WithCancel(context.Background())
-	verifier, err := cfaccess.NewVerifier(ctx, cfg.AccessTeamDomain, cfg.AccessAUD, logger)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	lc.Append(fx.Hook{
-		OnStop: func(context.Context) error {
-			cancel()
-			return nil
-		},
-	})
-	return verifier, nil
+func newAccessVerifier(cfg config.Config, logger *slog.Logger) (*cfaccess.Verifier, error) {
+	return cfaccess.NewVerifier(cfg.AccessTeamDomain, cfg.AccessAUD, logger)
 }
 
 // runOnce starts app, whose OnStart hooks do the command's work, and then stops

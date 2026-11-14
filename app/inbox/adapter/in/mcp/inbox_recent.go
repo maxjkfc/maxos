@@ -19,7 +19,6 @@ type recentEntry struct {
 	Source     string `json:"source" jsonschema:"Channel the entry arrived through, for example mcp-http."`
 	Actor      string `json:"actor" jsonschema:"Identity that captured the entry."`
 	Kind       string `json:"kind" jsonschema:"Entry type, for example note."`
-	Status     string `json:"status" jsonschema:"Processing state: received, processed, or rejected."`
 	Text       string `json:"text" jsonschema:"The note text when the entry has one, otherwise empty."`
 }
 
@@ -51,7 +50,6 @@ func addInboxRecentTool(s *sdk.Server, recent usecase.ListRecent) {
 				Source:     item.Source,
 				Actor:      item.Actor,
 				Kind:       item.Kind,
-				Status:     item.Status,
 				Text:       item.Text,
 			})
 		}

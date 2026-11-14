@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
@@ -15,6 +16,11 @@ import (
 const (
 	assertionHeader = "Cf-Access-Jwt-Assertion"
 	certsPath       = "/cdn-cgi/access/certs"
+
+	// jwksTimeout bounds one fetch of the signing keys. go-oidc keeps fetching
+	// in a goroutine that ignores context cancellation, so a stalled endpoint
+	// would otherwise hold that fetch (and every request waiting on it) forever.
+	jwksTimeout = 10 * time.Second
 )
 
 // Identity is the authenticated caller extracted from an Access token.
@@ -49,13 +55,22 @@ type Verifier struct {
 }
 
 // NewVerifier builds a Verifier that fetches signing keys from
-// teamDomain + "/cdn-cgi/access/certs". Both arguments are required so the
-// server cannot start unauthenticated. Rejected requests are logged to logger.
-func NewVerifier(ctx context.Context, teamDomain, aud string, logger *slog.Logger) (*Verifier, error) {
+// teamDomain + "/cdn-cgi/access/certs", giving up on a fetch after 10 seconds.
+// Both arguments are required so the server cannot start unauthenticated.
+// Rejected requests are logged to logger.
+func NewVerifier(teamDomain, aud string, logger *slog.Logger) (*Verifier, error) {
+	return newVerifier(teamDomain, aud, logger, &http.Client{Timeout: jwksTimeout})
+}
+
+// newVerifier is NewVerifier with the client that fetches the keys. go-oidc
+// ignores the cancellation of the context given to NewRemoteKeySet and takes
+// only its values, so the client's timeout is the sole bound on a fetch.
+func newVerifier(teamDomain, aud string, logger *slog.Logger, client *http.Client) (*Verifier, error) {
 	teamDomain = normalizeDomain(teamDomain)
 	if teamDomain == "" || aud == "" {
 		return nil, errors.New("access: team domain and audience are both required")
 	}
+	ctx := oidc.ClientContext(context.Background(), client)
 	return NewVerifierWithKeySet(teamDomain, aud, oidc.NewRemoteKeySet(ctx, teamDomain+certsPath), logger), nil
 }
 

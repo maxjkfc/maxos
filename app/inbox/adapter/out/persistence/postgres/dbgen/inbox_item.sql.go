@@ -12,7 +12,7 @@ import (
 )
 
 const getInboxItemByKey = `-- name: GetInboxItemByKey :one
-SELECT id, received_at, source, actor, kind, idempotency_key, payload, status FROM inbox_item WHERE idempotency_key = $1
+SELECT id, received_at, source, actor, kind, idempotency_key, payload FROM inbox_item WHERE idempotency_key = $1
 `
 
 func (q *Queries) GetInboxItemByKey(ctx context.Context, idempotencyKey string) (InboxItem, error) {
@@ -26,7 +26,6 @@ func (q *Queries) GetInboxItemByKey(ctx context.Context, idempotencyKey string) 
 		&i.Kind,
 		&i.IdempotencyKey,
 		&i.Payload,
-		&i.Status,
 	)
 	return i, err
 }
@@ -35,7 +34,7 @@ const insertInboxItem = `-- name: InsertInboxItem :one
 INSERT INTO inbox_item (id, source, actor, kind, idempotency_key, payload)
 VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id, received_at, source, actor, kind, idempotency_key, payload, status
+RETURNING id, received_at, source, actor, kind, idempotency_key, payload
 `
 
 type InsertInboxItemParams struct {
@@ -66,13 +65,12 @@ func (q *Queries) InsertInboxItem(ctx context.Context, arg InsertInboxItemParams
 		&i.Kind,
 		&i.IdempotencyKey,
 		&i.Payload,
-		&i.Status,
 	)
 	return i, err
 }
 
 const listRecentInboxItems = `-- name: ListRecentInboxItems :many
-SELECT id, received_at, source, actor, kind, idempotency_key, payload, status FROM inbox_item ORDER BY received_at DESC, id DESC LIMIT $1
+SELECT id, received_at, source, actor, kind, idempotency_key, payload FROM inbox_item ORDER BY received_at DESC, id DESC LIMIT $1
 `
 
 func (q *Queries) ListRecentInboxItems(ctx context.Context, limit int32) ([]InboxItem, error) {
@@ -92,7 +90,6 @@ func (q *Queries) ListRecentInboxItems(ctx context.Context, limit int32) ([]Inbo
 			&i.Kind,
 			&i.IdempotencyKey,
 			&i.Payload,
-			&i.Status,
 		); err != nil {
 			return nil, err
 		}

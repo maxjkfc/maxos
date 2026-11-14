@@ -188,7 +188,6 @@ func TestInboxRecentToolListsItemsInUseCaseOrder(t *testing.T) {
 		Source:     "mcp-http",
 		Actor:      "max@example.com",
 		Kind:       "note",
-		Status:     "received",
 		Text:       "newest",
 	}
 	older := newest
@@ -200,8 +199,8 @@ func TestInboxRecentToolListsItemsInUseCaseOrder(t *testing.T) {
 	out := decode[recentOutput](t, call(t, cs, "inbox_recent", map[string]any{}))
 
 	want := []recentEntry{
-		{ID: newest.ID.String(), ReceivedAt: "2026-01-02T03:04:05Z", Source: "mcp-http", Actor: "max@example.com", Kind: "note", Status: "received", Text: "newest"},
-		{ID: older.ID.String(), ReceivedAt: "2026-01-01T00:00:00Z", Source: "mcp-http", Actor: "max@example.com", Kind: "note", Status: "received", Text: "older"},
+		{ID: newest.ID.String(), ReceivedAt: "2026-01-02T03:04:05Z", Source: "mcp-http", Actor: "max@example.com", Kind: "note", Text: "newest"},
+		{ID: older.ID.String(), ReceivedAt: "2026-01-01T00:00:00Z", Source: "mcp-http", Actor: "max@example.com", Kind: "note", Text: "older"},
 	}
 	if len(out.Entries) != len(want) {
 		t.Fatalf("got %d entries, want %d", len(out.Entries), len(want))

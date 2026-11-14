@@ -1,13 +1,16 @@
 SQLC_IMAGE := sqlc/sqlc:1.31.1
 # sqlc writes each context's generated code into a directory named dbgen.
 SQLC_GENERATED := ':(glob)app/**/dbgen/**'
-TEST_DB_URL := postgres://maxos:$${POSTGRES_PASSWORD}@127.0.0.1:55432/maxos_test?sslmode=disable
-DEV_DB_URL := postgres://maxos:$${POSTGRES_PASSWORD}@127.0.0.1:55432/maxos?sslmode=disable
+# The URLs carry no password: a password containing "/", "@" or "%" would break
+# URL parsing. pgx reads it from PGPASSWORD, which LOAD_ENV sets.
+TEST_DB_URL := postgres://maxos@127.0.0.1:55432/maxos_test?sslmode=disable
+DEV_DB_URL := postgres://maxos@127.0.0.1:55432/maxos?sslmode=disable
 
-# Load .env (if present) for every recipe.
+# Load .env (if present) for every recipe and hand its POSTGRES_PASSWORD to
+# libpq-style clients (pgx, psql) as PGPASSWORD.
 SHELL := /bin/bash
 .SHELLFLAGS := -euo pipefail -c
-LOAD_ENV := set -a; [ -f .env ] && . ./.env; set +a;
+LOAD_ENV := set -a; [ -f .env ] && . ./.env; set +a; export PGPASSWORD="$$POSTGRES_PASSWORD";
 
 .PHONY: up down migrate sqlc sqlc-check test-db check tunnel-up
 

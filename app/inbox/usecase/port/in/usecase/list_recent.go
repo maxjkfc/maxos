@@ -33,8 +33,6 @@ type RecentItem struct {
 	// Actor is the identity that sent the item.
 	Actor string
 	Kind  string
-	// Status is the processing state: received, processed or rejected.
-	Status string
 	// Text is the note text when the item has one, otherwise empty.
 	Text string
 }

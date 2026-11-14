@@ -27,16 +27,6 @@ type Kind string
 // KindNote is free text taken down verbatim from the owner.
 const KindNote Kind = "note"
 
-// Status is where an inbox item stands in its processing.
-type Status string
-
-// The states of an inbox item. Items start out received.
-const (
-	StatusReceived  Status = "received"
-	StatusProcessed Status = "processed"
-	StatusRejected  Status = "rejected"
-)
-
 // InboxItem is one raw input received from outside, kept for later
 // verification.
 type InboxItem struct {
@@ -53,7 +43,6 @@ type InboxItem struct {
 	IdempotencyKey string
 	// Payload is the raw content as JSON; its shape depends on Kind.
 	Payload json.RawMessage
-	Status  Status
 }
 
 // notePayload is the payload of a KindNote item.
@@ -98,7 +87,6 @@ func NewNote(p NewNoteParams) (InboxItem, error) {
 		Kind:           KindNote,
 		IdempotencyKey: key,
 		Payload:        payload,
-		Status:         StatusReceived,
 	}, nil
 }
 

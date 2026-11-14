@@ -43,7 +43,6 @@ func (s *Service) ListRecent(ctx context.Context, in usecase.ListRecentInput) (u
 			Source:     item.Source,
 			Actor:      item.Actor,
 			Kind:       string(item.Kind),
-			Status:     string(item.Status),
 			Text:       item.Text(),
 		})
 	}

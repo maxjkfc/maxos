@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -191,5 +192,61 @@ func TestMiddleware(t *testing.T) {
 				t.Errorf("Actor() = %q, want %q", actor, tt.wantActor)
 			}
 		})
+	}
+}
+
+// A JWKS endpoint that accepts the request and never answers must make
+// verification fail once the fetch timeout passes, not hang. The request
+// context here has no deadline: only the key-fetch client can end the wait.
+func TestStalledJWKSFailsWithinTimeout(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	releaseAll := func() { once.Do(func() { close(release) }) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	// Cleanups run last-in first-out: release the stalled handler before Close waits for it.
+	t.Cleanup(srv.Close)
+	t.Cleanup(releaseAll)
+
+	const timeout = 200 * time.Millisecond
+	v, err := newVerifier(srv.URL, testAUD, slog.New(slog.DiscardHandler), &http.Client{Timeout: timeout})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	key := newKey(t)
+	now := time.Now()
+	raw := sign(t, key, map[string]any{
+		"aud": []string{testAUD},
+		"iss": srv.URL,
+		"sub": "user",
+		"iat": now.Add(-time.Minute).Unix(),
+		"nbf": now.Add(-time.Minute).Unix(),
+		"exp": now.Add(time.Hour).Unix(),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set(assertionHeader, raw)
+
+	done := make(chan int, 1)
+	start := time.Now()
+	go func() {
+		rec := httptest.NewRecorder()
+		v.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Error("next handler was called although the keys could not be fetched")
+		})).ServeHTTP(rec, req)
+		done <- rec.Code
+	}()
+
+	select {
+	case code := <-done:
+		if code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d", code, http.StatusUnauthorized)
+		}
+		if elapsed := time.Since(start); elapsed < timeout {
+			t.Fatalf("failed after %v, before the %v fetch timeout", elapsed, timeout)
+		}
+	case <-time.After(10 * timeout):
+		t.Fatalf("verification still blocked after %v; the JWKS fetch has no effective timeout", 10*timeout)
 	}
 }

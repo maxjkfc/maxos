@@ -18,5 +18,4 @@ type InboxItem struct {
 	Kind           string
 	IdempotencyKey string
 	Payload        []byte
-	Status         string
 }

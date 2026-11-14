@@ -80,6 +80,5 @@ func toModel(row dbgen.InboxItem) model.InboxItem {
 		Kind:           model.Kind(row.Kind),
 		IdempotencyKey: row.IdempotencyKey,
 		Payload:        row.Payload,
-		Status:         model.Status(row.Status),
 	}
 }

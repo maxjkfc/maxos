@@ -61,6 +61,32 @@ linters:
               desc: domain must not depend on use cases
             - pkg: github.com/maxjkfc/maxos/app/inbox/adapter/
               desc: domain must not depend on adapters
+        # domain/ is pure: the standard library, uuid and its own packages only
+        # (conventions section 3). Add a decimal library here only once go.mod
+        # has one and the domain needs it.
+        inbox-domain-allowlist:
+          list-mode: strict
+          files:
+            - "${config-path}/app/inbox/domain/**"
+          allow:
+            - $gostd
+            - github.com/google/uuid
+            - github.com/maxjkfc/maxos/app/inbox/domain/
+        # Use case implementations (tests excluded: a use case's own external
+        # test package imports it) see the inbox domain and the ports, nothing
+        # else; in particular not each other. fx is the one framework they may
+        # touch, for their Module().
+        inbox-usecase-allowlist:
+          list-mode: strict
+          files:
+            - "${config-path}/app/inbox/usecase/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/google/uuid
+            - go.uber.org/fx
+            - github.com/maxjkfc/maxos/app/inbox/domain/
+            - github.com/maxjkfc/maxos/app/inbox/usecase/port/
         inbox-usecase:
           list-mode: lax
           files:
@@ -77,6 +103,22 @@ linters:
           deny:
             - pkg: github.com/maxjkfc/maxos/app/inbox/usecase/
               desc: adapters depend on usecase/port only; cmd/ injects the implementations
+            - pkg: github.com/maxjkfc/maxos/app/inbox/domain/service
+              desc: adapters must not call domain services; go through a use case port
+        inbox-adapter-in:
+          list-mode: lax
+          files:
+            - "${config-path}/app/inbox/adapter/in/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/inbox/adapter/out/
+              desc: inbound adapters must not depend on outbound adapters
+        inbox-adapter-out:
+          list-mode: lax
+          files:
+            - "${config-path}/app/inbox/adapter/out/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/inbox/adapter/in/
+              desc: outbound adapters must not depend on inbound adapters
 
         # Other contexts reach the inbox through its in-ports only.
         inbox-boundary:

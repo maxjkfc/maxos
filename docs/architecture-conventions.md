@@ -6,7 +6,7 @@ maxos 的分層、依賴規則與技術選型。所有開發（含 subagent 派�
 
 - 單一使用者的個人系統，跑在一台 Mac mini 上。
 - 一個 Go binary（modular monolith）加一個 PostgreSQL。
-- 領域依序加入：finance、health、project。領域之間會互相關聯。
+- Context 依序加入：finance、health、project。Context 之間會互相關聯。
 - 對外只有 MCP 端點，經 Cloudflare Tunnel 與 Cloudflare Access；其餘只在本機或 Tailscale 內。
 
 ## 2. 目錄結構
@@ -21,8 +21,8 @@ cmd/                             Cobra 子指令與 FX 組裝
 app/
   <context>/
     domain/
-      model/                     entity、value object、領域錯誤
-      service/                   跨 entity 的領域規則（需要時才建）
+      model/                     entity、value object、domain 錯誤
+      service/                   跨 entity 的 domain 規則（需要時才建）
     usecase/
       <name>/                    use case 實作；new.go 提供 Module()
       port/
@@ -33,7 +33,7 @@ app/
       out/
         persistence/postgres/    repo 實作、sqlc 查詢與產生碼
         <kind>/                  其他對外實作
-pkg/                             與領域無關的技術元件
+pkg/                             與業務無關的技術元件
   config/  log/  postgres/  cfaccess/  mcpserver/
 migrations/                      goose 的 SQL migration（Go package，內嵌進 binary）
 internal/testpg/                 整合測試用的資料庫輔助
@@ -45,7 +45,7 @@ docs/
 | Context | 職責 | 狀態 |
 |---|---|---|
 | `inbox` | 所有外部輸入的原始紀錄與冪等 | M0 |
-| `catalog` | project、area、party、tag、link（跨領域關聯） | M0 建表，M1 起使用 |
+| `catalog` | project、area、party、tag、link（跨 context 關聯） | M0 建表，M1 起使用 |
 | `finance` | 帳本、匯入、報表、投資 | M1 起 |
 | `health` | 待定 | M6 之後 |
 | `project` | 待定；可能是外部系統，以 `external_ref` 對接 | 待評估 |
@@ -135,7 +135,7 @@ adapter  →  usecase  →  domain
 1. 每次寫入都帶冪等鍵，重複呼叫回傳既有結果。
 2. 原始輸入先進 `inbox`，記下來源與身分。
 3. 由模型辨識出的資料先存成草稿，使用者確認後才生效。
-4. 工具是領域動作，不提供任意寫入資料表的工具。
+4. 工具是業務動作，不提供任意寫入資料表的工具。
 5. 驗證失敗時回傳可讓模型自行修正的錯誤訊息。
 
 ## 9. 與 admin-service 的差異
@@ -143,7 +143,7 @@ adapter  →  usecase  →  domain
 | 項目 | admin-service | maxos | 理由 |
 |---|---|---|---|
 | SQL | 手寫 `queries.go` | sqlc 為主 | 程式碼由 agent 撰寫，需要產生階段的 schema 檢查；帳本的表寬，手寫 `Scan` 錯位的後果嚴重 |
-| 跨 context 依賴 | 允許 import 對方的 model 與 adapter | 只能 import 對方的 `usecase/port/in` | 領域之間的關聯是 maxos 的核心需求，依賴不設限會快速糾結 |
+| 跨 context 依賴 | 允許 import 對方的 model 與 adapter | 只能 import 對方的 `usecase/port/in` | Context 之間的關聯是 maxos 的核心需求，依賴不設限會快速糾結 |
 | 日誌 | Zap | `slog` | 功能夠用，少一個依賴 |
 | 設定 | Viper + `config.yaml` | 環境變數 | 設定項少，跑在 Compose |
 | Migration | 放在外部 repo | goose 內嵌 | 單一 repo，沒有共用 schema 的其他服務 |
