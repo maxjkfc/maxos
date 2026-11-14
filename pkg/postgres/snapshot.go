@@ -20,8 +20,11 @@ import (
 //
 // A context that already carries a transaction (see WithinTx) has one to read
 // in, which is what it must see, uncommitted writes included: fn runs in it, and
-// what it sees is what that transaction sees, which is a snapshot only if the
-// transaction is REPEATABLE READ or stricter.
+// what it sees is what that transaction sees. Call WithinSnapshot outside a
+// database transaction, or inside one that is REPEATABLE READ or stricter: under
+// READ COMMITTED each statement reads a snapshot of its own, and a read of
+// several statements can find between them that a row it listed is gone, or
+// changed.
 func (db *DB) WithinSnapshot(ctx context.Context, fn func(ctx context.Context) error) error {
 	if _, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
 		return fn(ctx)

@@ -76,8 +76,11 @@ type TransactionRepo interface {
 	// snapshot, so that what it returns is what the filter matched at one moment,
 	// each transaction as it was then: one that is deleted or changed while List
 	// runs does not make the page short, and is not in it with a status the
-	// filter does not allow. Inside a database transaction, the isolation of that
-	// transaction decides what List sees.
+	// filter does not allow. Call List outside a database transaction, or inside
+	// one that is REPEATABLE READ or stricter: under READ COMMITTED each
+	// statement reads a snapshot of its own, a transaction deleted while List
+	// runs makes it return an error, and one whose status changes can be returned
+	// with a status the filter does not allow.
 	List(ctx context.Context, filter TransactionFilter) ([]model.Transaction, error)
 	// Balances returns what each account holds of each instrument, from the
 	// postings of the confirmed transactions only, by account name and then
