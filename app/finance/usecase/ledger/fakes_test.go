@@ -1,0 +1,394 @@
+package ledger_test
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/google/uuid"
+
+	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
+	"github.com/maxjkfc/maxos/app/finance/domain/model"
+	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
+)
+
+var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// txKey marks a context that belongs to a database transaction.
+type txKey struct{}
+
+// errNotInTx is what the fake repos return for a write that was not made in a
+// database transaction: the use cases must make all their writes in one.
+var errNotInTx = errors.New("the write was made outside a database transaction")
+
+func inTx(ctx context.Context) bool {
+	_, ok := ctx.Value(txKey{}).(struct{})
+	return ok
+}
+
+// fakeTx is a tx.Transactor that runs the function at once and marks the context
+// it passes, so that the fake repos can tell a write made inside the database
+// transaction from one made outside. It does not undo anything on an error: the
+// use cases must not rely on a rollback for what they can check before they
+// write.
+type fakeTx struct {
+	// calls is how many database transactions were opened.
+	calls int
+}
+
+func (f *fakeTx) WithinTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	f.calls++
+	return fn(context.WithValue(ctx, txKey{}, struct{}{}))
+}
+
+// fakeTransactions is an in-memory repo.TransactionRepo.
+type fakeTransactions struct {
+	byID map[uuid.UUID]model.Transaction
+
+	// inserts counts the transactions stored; locked lists the ids GetForUpdate
+	// was asked for, in order; statusSet lists the ids SetStatus was called for;
+	// deleted lists those deleted.
+	inserts   int
+	locked    []uuid.UUID
+	statusSet []uuid.UUID
+	deleted   []uuid.UUID
+
+	// insertErr, when set, is what Insert returns.
+	insertErr error
+	// concurrent is a transaction that another call records under the key while
+	// this one is being recorded: it is not there when the key is looked up, and
+	// Insert finds the key taken by it.
+	concurrent *model.Transaction
+
+	// listed is the filter List was last called with, and lists how often it was
+	// called; listResult is what it returns, cut to the limit of the filter.
+	listed     repo.TransactionFilter
+	lists      int
+	listResult []model.Transaction
+	// balancesFor is the account Balances was last asked for; balanceRows what it
+	// returns.
+	balancesFor *uuid.UUID
+	balanceRows []model.Balance
+}
+
+func newFakeTransactions() *fakeTransactions {
+	return &fakeTransactions{byID: map[uuid.UUID]model.Transaction{}}
+}
+
+func (f *fakeTransactions) stamp() time.Time {
+	return epoch.Add(time.Duration(len(f.byID)+1) * time.Second)
+}
+
+func (f *fakeTransactions) Insert(ctx context.Context, txn model.Transaction) (model.Transaction, error) {
+	if !inTx(ctx) {
+		return model.Transaction{}, errNotInTx
+	}
+	if f.insertErr != nil {
+		return model.Transaction{}, f.insertErr
+	}
+	if f.concurrent != nil {
+		f.byID[f.concurrent.ID] = *f.concurrent
+		f.concurrent = nil
+		return model.Transaction{}, repo.ErrDuplicateKey
+	}
+	for _, stored := range f.byID {
+		if stored.IdempotencyKey == txn.IdempotencyKey {
+			return model.Transaction{}, repo.ErrDuplicateKey
+		}
+	}
+	txn.CreatedAt = f.stamp()
+	if txn.Status == model.StatusConfirmed {
+		at := txn.CreatedAt
+		txn.ConfirmedAt = &at
+	}
+	f.byID[txn.ID] = txn
+	f.inserts++
+	return txn, nil
+}
+
+func (f *fakeTransactions) Get(_ context.Context, id uuid.UUID) (model.Transaction, error) {
+	txn, ok := f.byID[id]
+	if !ok {
+		return model.Transaction{}, model.ErrNotFound
+	}
+	return txn, nil
+}
+
+func (f *fakeTransactions) GetForUpdate(ctx context.Context, id uuid.UUID) (model.Transaction, error) {
+	if !inTx(ctx) {
+		return model.Transaction{}, errNotInTx
+	}
+	f.locked = append(f.locked, id)
+	return f.Get(ctx, id)
+}
+
+func (f *fakeTransactions) GetByIdempotencyKey(_ context.Context, key string) (model.Transaction, error) {
+	for _, stored := range f.byID {
+		if stored.IdempotencyKey == key {
+			return stored, nil
+		}
+	}
+	return model.Transaction{}, model.ErrNotFound
+}
+
+func (f *fakeTransactions) SetStatus(ctx context.Context, id uuid.UUID, status model.Status) (model.Transaction, error) {
+	if !inTx(ctx) {
+		return model.Transaction{}, errNotInTx
+	}
+	txn, ok := f.byID[id]
+	if !ok {
+		return model.Transaction{}, model.ErrNotFound
+	}
+	at := epoch.Add(time.Hour)
+	txn.Status = status
+	switch status {
+	case model.StatusConfirmed:
+		txn.ConfirmedAt = &at
+	case model.StatusVoid:
+		txn.VoidedAt = &at
+	}
+	f.byID[id] = txn
+	f.statusSet = append(f.statusSet, id)
+	return txn, nil
+}
+
+func (f *fakeTransactions) Delete(ctx context.Context, id uuid.UUID) error {
+	if !inTx(ctx) {
+		return errNotInTx
+	}
+	if _, ok := f.byID[id]; !ok {
+		return model.ErrNotFound
+	}
+	delete(f.byID, id)
+	f.deleted = append(f.deleted, id)
+	return nil
+}
+
+func (f *fakeTransactions) List(_ context.Context, filter repo.TransactionFilter) ([]model.Transaction, error) {
+	f.listed = filter
+	f.lists++
+	out := f.listResult
+	if len(out) > filter.Limit {
+		out = out[:filter.Limit]
+	}
+	return out, nil
+}
+
+func (f *fakeTransactions) Balances(_ context.Context, accountID *uuid.UUID) ([]model.Balance, error) {
+	f.balancesFor = accountID
+	return f.balanceRows, nil
+}
+
+// fakeAccounts is an in-memory repo.AccountRepo of which only Get is used.
+type fakeAccounts struct {
+	repo.AccountRepo
+
+	accounts map[uuid.UUID]model.Account
+}
+
+func newFakeAccounts() *fakeAccounts {
+	return &fakeAccounts{accounts: map[uuid.UUID]model.Account{}}
+}
+
+func (f *fakeAccounts) add(name string) model.Account {
+	a := model.Account{ID: uuid.Must(uuid.NewV7()), Name: name, Kind: model.AccountKindCash}
+	f.accounts[a.ID] = a
+	return a
+}
+
+func (f *fakeAccounts) archive(id uuid.UUID) {
+	a := f.accounts[id]
+	a.ArchivedAt = &epoch
+	f.accounts[id] = a
+}
+
+func (f *fakeAccounts) Get(_ context.Context, id uuid.UUID) (model.Account, error) {
+	a, ok := f.accounts[id]
+	if !ok {
+		return model.Account{}, model.ErrNotFound
+	}
+	return a, nil
+}
+
+// fakeInstruments is an in-memory repo.InstrumentRepo of which only Get is used.
+type fakeInstruments struct {
+	repo.InstrumentRepo
+
+	instruments map[uuid.UUID]model.Instrument
+}
+
+func newFakeInstruments() *fakeInstruments {
+	return &fakeInstruments{instruments: map[uuid.UUID]model.Instrument{}}
+}
+
+func (f *fakeInstruments) add(i model.Instrument) model.Instrument {
+	f.instruments[i.ID] = i
+	return i
+}
+
+func (f *fakeInstruments) archive(id uuid.UUID) {
+	i := f.instruments[id]
+	i.ArchivedAt = &epoch
+	f.instruments[id] = i
+}
+
+func (f *fakeInstruments) Get(_ context.Context, id uuid.UUID) (model.Instrument, error) {
+	i, ok := f.instruments[id]
+	if !ok {
+		return model.Instrument{}, model.ErrNotFound
+	}
+	return i, nil
+}
+
+// fakeCategories is an in-memory repo.CategoryRepo of which only Get is used.
+type fakeCategories struct {
+	repo.CategoryRepo
+
+	categories map[uuid.UUID]model.Category
+	// gets counts the calls of Get.
+	gets int
+}
+
+func newFakeCategories() *fakeCategories {
+	return &fakeCategories{categories: map[uuid.UUID]model.Category{}}
+}
+
+func (f *fakeCategories) add(direction model.Direction, name string) model.Category {
+	c := model.Category{ID: uuid.Must(uuid.NewV7()), Direction: direction, Name: name}
+	f.categories[c.ID] = c
+	return c
+}
+
+func (f *fakeCategories) archive(id uuid.UUID) {
+	c := f.categories[id]
+	c.ArchivedAt = &epoch
+	f.categories[id] = c
+}
+
+func (f *fakeCategories) Get(_ context.Context, id uuid.UUID) (model.Category, error) {
+	f.gets++
+	c, ok := f.categories[id]
+	if !ok {
+		return model.Category{}, model.ErrNotFound
+	}
+	return c, nil
+}
+
+// errCatalogNotFound is what the fake catalog returns for an id it does not know
+// when it is asked to get one.
+var errCatalogNotFound = errors.New("the catalog has no such entry")
+
+// fakeReferences is the catalog as the ledger sees it, with some projects, areas
+// and tags. As a catalogusecase.VerifyReferences, an id it does not know is not
+// found and one it knows as archived is archived. As a catalogusecase.GetProject
+// and a catalogusecase.GetArea, it returns the project or the area, archived or
+// not, with the default area it was given.
+type fakeReferences struct {
+	// projects, areas and tags map each id the catalog has to whether it is
+	// archived.
+	projects, areas, tags map[uuid.UUID]bool
+	// defaultAreas maps the projects that have a default area to it.
+	defaultAreas map[uuid.UUID]uuid.UUID
+	calls        []catalogusecase.VerifyReferencesInput
+	// getErr, when set, is what GetProject and GetArea return.
+	getErr error
+}
+
+func newFakeReferences() *fakeReferences {
+	return &fakeReferences{
+		projects:     map[uuid.UUID]bool{},
+		areas:        map[uuid.UUID]bool{},
+		tags:         map[uuid.UUID]bool{},
+		defaultAreas: map[uuid.UUID]uuid.UUID{},
+	}
+}
+
+func (f *fakeReferences) addProject(archived bool) uuid.UUID {
+	id := uuid.Must(uuid.NewV7())
+	f.projects[id] = archived
+	return id
+}
+
+func (f *fakeReferences) addArea(archived bool) uuid.UUID {
+	id := uuid.Must(uuid.NewV7())
+	f.areas[id] = archived
+	return id
+}
+
+func (f *fakeReferences) addTag(archived bool) uuid.UUID {
+	id := uuid.Must(uuid.NewV7())
+	f.tags[id] = archived
+	return id
+}
+
+// setDefaultArea makes area the default area of project.
+func (f *fakeReferences) setDefaultArea(project, area uuid.UUID) {
+	f.defaultAreas[project] = area
+}
+
+func (f *fakeReferences) VerifyReferences(_ context.Context, in catalogusecase.VerifyReferencesInput) error {
+	f.calls = append(f.calls, in)
+	var problems []catalogusecase.ReferenceProblem
+	check := func(kind catalogusecase.ReferenceKind, known map[uuid.UUID]bool, ids []uuid.UUID) {
+		for _, id := range ids {
+			archived, exists := known[id]
+			if exists && !archived {
+				continue
+			}
+			problems = append(problems, catalogusecase.ReferenceProblem{Kind: kind, ID: id, Archived: exists})
+		}
+	}
+	check(catalogusecase.ReferenceProject, f.projects, in.ProjectIDs)
+	check(catalogusecase.ReferenceArea, f.areas, in.AreaIDs)
+	check(catalogusecase.ReferenceTag, f.tags, in.TagIDs)
+	if len(problems) > 0 {
+		return &catalogusecase.ReferenceError{Problems: problems}
+	}
+	return nil
+}
+
+func (f *fakeReferences) GetProject(_ context.Context, id uuid.UUID) (catalogusecase.Project, error) {
+	if f.getErr != nil {
+		return catalogusecase.Project{}, f.getErr
+	}
+	archived, exists := f.projects[id]
+	if !exists {
+		return catalogusecase.Project{}, errCatalogNotFound
+	}
+	project := catalogusecase.Project{ID: id}
+	if archived {
+		project.ArchivedAt = &epoch
+	}
+	if area, ok := f.defaultAreas[id]; ok {
+		project.DefaultAreaID = &area
+	}
+	return project, nil
+}
+
+func (f *fakeReferences) GetArea(_ context.Context, id uuid.UUID) (catalogusecase.Area, error) {
+	if f.getErr != nil {
+		return catalogusecase.Area{}, f.getErr
+	}
+	archived, exists := f.areas[id]
+	if !exists {
+		return catalogusecase.Area{}, errCatalogNotFound
+	}
+	area := catalogusecase.Area{ID: id}
+	if archived {
+		area.ArchivedAt = &epoch
+	}
+	return area, nil
+}
+
+// fakeProjects is a catalogusecase.ResolveProjectDefaults that returns what it is
+// given, and notes the days it was asked about.
+type fakeProjects struct {
+	out  catalogusecase.ResolveProjectDefaultsOutput
+	err  error
+	days []time.Time
+}
+
+func (f *fakeProjects) ResolveProjectDefaults(_ context.Context, in catalogusecase.ResolveProjectDefaultsInput) (catalogusecase.ResolveProjectDefaultsOutput, error) {
+	f.days = append(f.days, in.Date)
+	return f.out, f.err
+}

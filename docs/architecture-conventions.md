@@ -45,8 +45,8 @@ docs/
 | Context | 職責 | 狀態 |
 |---|---|---|
 | `inbox` | 所有外部輸入的原始紀錄與冪等 | M0 |
-| `catalog` | project、area、party、tag、link（跨 context 關聯） | M0 建表，M1 起使用 |
-| `finance` | 帳本、匯入、報表、投資 | M1 起 |
+| `catalog` | 領域、專案、對象、標籤；link（種類不固定的多對多關聯） | M0 建表，M1a 起有程式 |
+| `finance` | 帳本、匯入、報表、投資 | M1 起（M1a 有標的、機構、帳戶、類別與帳本核心：支出、收入、轉帳、換匯、草稿與確認、餘額） |
 | `health` | 待定 | M6 之後 |
 | `project` | 待定；可能是外部系統，以外部參照對接（欄位待定） | 待評估 |
 
@@ -78,7 +78,7 @@ adapter  →  usecase  →  domain
 2. `usecase` 只依賴自己 context 的 `domain` 和 `usecase/port`。
 3. `adapter` 可以依賴自己 context 的 `usecase/port`、`domain/model` 和 `pkg`。
 4. **跨 context 只能 import 對方的 `usecase/port/in`。** 不能 import 對方的 `domain`、`adapter` 或 use case 實作。這比 admin-service 嚴格，原因見第 9 節。
-5. 跨 context 的資料關聯透過 `catalog` 的 link 表達，不在資料表之間加外鍵。
+5. 跨 context 的資料關聯用一般的 `uuid` 欄位存放對方的 id，不加外鍵；寫入前由 use case 經對方的 `usecase/port/in` 驗證存在（例如 `finance` 的 `project_id`、`area_id`、`party_id`、`tag_id`）。種類不固定的多對多關聯才用 `catalog_link`。同一個 context 內的資料表可以加外鍵。
 6. 只有 `cmd/` 知道具體實作，負責把 adapter 注入 port。
 
 以上規則由 golangci-lint 的 import 限制在 `make check` 檢查。
@@ -114,6 +114,10 @@ adapter  →  usecase  →  domain
   - `make check` 會重新產生並要求無差異。
 - **手寫 SQL 的例外**：有可選篩選條件的動態查詢，可以在同一個 adapter 裡手寫，集中在 `queries.go`。
 - **交易邊界**由 use case 決定，repo 不自行開交易。
+  - `pkg/postgres` 的 `DB` 是 repo 執行 SQL 的入口（`dbgen.New(postgres.NewDB(pool))`）：語句會自動加入 context 帶著的交易，沒有交易就直接走連線池，所以 repo 不需要知道交易的存在。
+  - `DB.WithinTx(ctx, fn)` 開啟交易，並把交易放進傳給 `fn` 的 context；`fn` 回傳 `nil` 才提交，回傳錯誤或 panic 就回滾；`fn` 內再呼叫 `WithinTx` 會用 savepoint。
+  - use case 不能 import `pkg/`：需要交易的 use case 在自己 context 的 `usecase/port/out/` 宣告只有 `WithinTx(ctx context.Context, fn func(ctx context.Context) error) error` 的介面（finance 的是 `usecase/port/out/tx` 的 `Transactor`），由 `cmd/` 把 `*postgres.DB` 注入。
+  - 一筆資料分多條語句寫入、且資料庫有延遲到提交才檢查的約束時（例如 finance 的分錄平衡檢查），該 repo 方法必須在資料庫交易內呼叫；repo 的 port 要寫明這點。
 
 ## 7. 測試慣例
 

@@ -8,6 +8,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	catalogpg "github.com/maxjkfc/maxos/app/catalog/adapter/out/persistence/postgres"
+	catalogarea "github.com/maxjkfc/maxos/app/catalog/usecase/area"
+	catalogparty "github.com/maxjkfc/maxos/app/catalog/usecase/party"
+	catalogrepo "github.com/maxjkfc/maxos/app/catalog/usecase/port/out/repo"
+	catalogproject "github.com/maxjkfc/maxos/app/catalog/usecase/project"
+	catalogreferences "github.com/maxjkfc/maxos/app/catalog/usecase/references"
+	catalogtag "github.com/maxjkfc/maxos/app/catalog/usecase/tag"
+	financepg "github.com/maxjkfc/maxos/app/finance/adapter/out/persistence/postgres"
+	financeaccount "github.com/maxjkfc/maxos/app/finance/usecase/account"
+	financecategory "github.com/maxjkfc/maxos/app/finance/usecase/category"
+	financeinstitution "github.com/maxjkfc/maxos/app/finance/usecase/institution"
+	financeinstrument "github.com/maxjkfc/maxos/app/finance/usecase/instrument"
+	financeledger "github.com/maxjkfc/maxos/app/finance/usecase/ledger"
+	financerepo "github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
+	financetx "github.com/maxjkfc/maxos/app/finance/usecase/port/out/tx"
 	inboxmcp "github.com/maxjkfc/maxos/app/inbox/adapter/in/mcp"
 	inboxpg "github.com/maxjkfc/maxos/app/inbox/adapter/out/persistence/postgres"
 	"github.com/maxjkfc/maxos/app/inbox/usecase/capture"
@@ -69,6 +84,47 @@ func InboxModule() fx.Option {
 		),
 		capture.Module(),
 		listrecent.Module(),
+	)
+}
+
+// CatalogModule wires the catalog context: its Postgres repos and its use cases.
+// The finance ledger calls VerifyReferences, ResolveProjectDefaults, GetProject
+// and GetArea; the MCP tools will use the rest.
+func CatalogModule() fx.Option {
+	return fx.Module("catalog",
+		fx.Provide(
+			fx.Annotate(catalogpg.NewAreaRepo, fx.As(new(catalogrepo.AreaRepo))),
+			fx.Annotate(catalogpg.NewProjectRepo, fx.As(new(catalogrepo.ProjectRepo))),
+			fx.Annotate(catalogpg.NewPartyRepo, fx.As(new(catalogrepo.PartyRepo))),
+			fx.Annotate(catalogpg.NewTagRepo, fx.As(new(catalogrepo.TagRepo))),
+		),
+		catalogarea.Module(),
+		catalogproject.Module(),
+		catalogparty.Module(),
+		catalogtag.Module(),
+		catalogreferences.Module(),
+	)
+}
+
+// FinanceModule wires the finance context: its Postgres repos and its use cases.
+// That is the reference data (instruments, institutions, accounts, categories) and
+// the ledger. The ledger opens its database transactions through the same pool as
+// the repos, and calls the catalog, so the app must include CatalogModule too.
+func FinanceModule() fx.Option {
+	return fx.Module("finance",
+		fx.Provide(
+			fx.Annotate(financepg.NewInstrumentRepo, fx.As(new(financerepo.InstrumentRepo))),
+			fx.Annotate(financepg.NewInstitutionRepo, fx.As(new(financerepo.InstitutionRepo))),
+			fx.Annotate(financepg.NewAccountRepo, fx.As(new(financerepo.AccountRepo))),
+			fx.Annotate(financepg.NewCategoryRepo, fx.As(new(financerepo.CategoryRepo))),
+			fx.Annotate(financepg.NewTransactionRepo, fx.As(new(financerepo.TransactionRepo))),
+			fx.Annotate(postgres.NewDB, fx.As(new(financetx.Transactor))),
+		),
+		financeinstrument.Module(),
+		financeinstitution.Module(),
+		financeaccount.Module(),
+		financecategory.Module(),
+		financeledger.Module(),
 	)
 }
 

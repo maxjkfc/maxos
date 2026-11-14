@@ -1,4 +1,20 @@
 version: "2"
+
+# One entry per context: its queries and its generated code both live in that
+# context's postgres adapter. The Go types a column maps to are the same in every
+# context, so they are written once (the anchor on the first entry's overrides).
+#
+# A type is mapped to what pgx/v5 scans and encodes without a custom codec:
+#   uuid, timestamptz, date  the stdlib/uuid types (pgx reads a date into a
+#                            time.Time at 00:00 UTC and writes the calendar day
+#                            of the time.Time it is given);
+#   numeric                  shopspring/decimal, through its sql.Scanner and
+#                            driver.Valuer (pgx goes through the text form, so no
+#                            float is involved). A NULL needs the Null variant.
+# A nullable timestamptz, date or boolean is a pointer, nil for NULL.
+#
+# sqlc names numeric and boolean pg_catalog.numeric and pg_catalog.bool: an
+# override keyed "numeric" or "boolean" matches nothing, without any warning.
 sql:
   - engine: postgresql
     schema: migrations
@@ -11,7 +27,7 @@ sql:
         # Only the structs this context's queries use; the other contexts' tables
         # get theirs from their own entry.
         omit_unused_structs: true
-        overrides:
+        overrides: &overrides
           - db_type: uuid
             go_type: github.com/google/uuid.UUID
           - db_type: uuid
@@ -25,3 +41,43 @@ sql:
               import: time
               type: Time
               pointer: true
+          - db_type: date
+            go_type: time.Time
+          - db_type: date
+            nullable: true
+            go_type:
+              import: time
+              type: Time
+              pointer: true
+          - db_type: pg_catalog.numeric
+            go_type: github.com/shopspring/decimal.Decimal
+          - db_type: pg_catalog.numeric
+            nullable: true
+            go_type: github.com/shopspring/decimal.NullDecimal
+          - db_type: pg_catalog.bool
+            nullable: true
+            go_type:
+              type: bool
+              pointer: true
+
+  - engine: postgresql
+    schema: migrations
+    queries: app/catalog/adapter/out/persistence/postgres/queries
+    gen:
+      go:
+        package: dbgen
+        out: app/catalog/adapter/out/persistence/postgres/dbgen
+        sql_package: pgx/v5
+        omit_unused_structs: true
+        overrides: *overrides
+
+  - engine: postgresql
+    schema: migrations
+    queries: app/finance/adapter/out/persistence/postgres/queries
+    gen:
+      go:
+        package: dbgen
+        out: app/finance/adapter/out/persistence/postgres/dbgen
+        sql_package: pgx/v5
+        omit_unused_structs: true
+        overrides: *overrides

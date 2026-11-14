@@ -5,7 +5,10 @@
 # depguard matches an import against each entry as a plain string prefix, with
 # no wildcards in package paths, so the rules that name a context exist once per
 # context. When another context gets Go code, copy the inbox-* rules and change
-# the context name.
+# the context name. When an import matches both an allow and a deny entry of a
+# rule, the longer entry wins (an allow entry carves an exception out of a
+# shorter deny entry) and a tie is denied; an entry without a trailing slash
+# also matches the package itself, not only what is below it.
 #
 # File globs are anchored at this file's directory with ${config-path}.
 version: "2"
@@ -62,8 +65,8 @@ linters:
             - pkg: github.com/maxjkfc/maxos/app/inbox/adapter/
               desc: domain must not depend on adapters
         # domain/ is pure: the standard library, uuid and its own packages only
-        # (conventions section 3). Add a decimal library here only once go.mod
-        # has one and the domain needs it.
+        # (conventions section 3). A context whose domain needs the decimal
+        # library lists it here (see finance-domain-allowlist).
         inbox-domain-allowlist:
           list-mode: strict
           files:
@@ -119,6 +122,27 @@ linters:
           deny:
             - pkg: github.com/maxjkfc/maxos/app/inbox/adapter/in/
               desc: outbound adapters must not depend on inbound adapters
+        # Outbound adapters do not reach each other (conventions section 3: what
+        # an adapter generates or maps stays inside it). persistence/postgres
+        # is the one kind there is; an outbound adapter of another kind adds a
+        # rule like inbox-adapter-out-postgres for itself.
+        inbox-adapter-out-postgres:
+          list-mode: lax
+          files:
+            - "${config-path}/app/inbox/adapter/out/persistence/postgres/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/inbox/adapter/out/persistence/postgres
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/inbox/adapter/out/
+              desc: the Postgres adapter must not depend on another outbound adapter
+        inbox-adapter-out-others:
+          list-mode: lax
+          files:
+            - "${config-path}/app/inbox/adapter/out/**"
+            - "!${config-path}/app/inbox/adapter/out/persistence/postgres/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/inbox/adapter/out/persistence/postgres
+              desc: only the Postgres adapter may use its package and the sqlc types in dbgen
 
         # Other contexts reach the inbox through its in-ports only.
         inbox-boundary:
@@ -131,3 +155,189 @@ linters:
           deny:
             - pkg: github.com/maxjkfc/maxos/app/inbox/
               desc: other contexts may import only app/inbox/usecase/port/in
+
+        # Layers inside the catalog context (the inbox-* rules above, for catalog).
+        catalog-domain:
+          list-mode: lax
+          files:
+            - "${config-path}/app/catalog/domain/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/catalog/usecase/
+              desc: domain must not depend on use cases
+            - pkg: github.com/maxjkfc/maxos/app/catalog/adapter/
+              desc: domain must not depend on adapters
+        catalog-domain-allowlist:
+          list-mode: strict
+          files:
+            - "${config-path}/app/catalog/domain/**"
+          allow:
+            - $gostd
+            - github.com/google/uuid
+            - github.com/maxjkfc/maxos/app/catalog/domain/
+        catalog-usecase-allowlist:
+          list-mode: strict
+          files:
+            - "${config-path}/app/catalog/usecase/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/google/uuid
+            - go.uber.org/fx
+            - github.com/maxjkfc/maxos/app/catalog/domain/
+            - github.com/maxjkfc/maxos/app/catalog/usecase/port/
+        catalog-usecase:
+          list-mode: lax
+          files:
+            - "${config-path}/app/catalog/usecase/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/catalog/adapter/
+              desc: use cases must not depend on adapters; go through a port
+        catalog-adapter:
+          list-mode: lax
+          files:
+            - "${config-path}/app/catalog/adapter/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/catalog/usecase/port/
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/catalog/usecase/
+              desc: adapters depend on usecase/port only; cmd/ injects the implementations
+            - pkg: github.com/maxjkfc/maxos/app/catalog/domain/service
+              desc: adapters must not call domain services; go through a use case port
+        catalog-adapter-in:
+          list-mode: lax
+          files:
+            - "${config-path}/app/catalog/adapter/in/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/catalog/adapter/out/
+              desc: inbound adapters must not depend on outbound adapters
+        catalog-adapter-out:
+          list-mode: lax
+          files:
+            - "${config-path}/app/catalog/adapter/out/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/catalog/adapter/in/
+              desc: outbound adapters must not depend on inbound adapters
+        catalog-adapter-out-postgres:
+          list-mode: lax
+          files:
+            - "${config-path}/app/catalog/adapter/out/persistence/postgres/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/catalog/adapter/out/persistence/postgres
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/catalog/adapter/out/
+              desc: the Postgres adapter must not depend on another outbound adapter
+        catalog-adapter-out-others:
+          list-mode: lax
+          files:
+            - "${config-path}/app/catalog/adapter/out/**"
+            - "!${config-path}/app/catalog/adapter/out/persistence/postgres/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/catalog/adapter/out/persistence/postgres
+              desc: only the Postgres adapter may use its package and the sqlc types in dbgen
+        # Other contexts (finance's ledger, later health and project) reach the
+        # catalog through its in-ports only.
+        catalog-boundary:
+          list-mode: lax
+          files:
+            - "${config-path}/app/**"
+            - "!${config-path}/app/catalog/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/catalog/usecase/port/in/
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/catalog/
+              desc: other contexts may import only app/catalog/usecase/port/in
+
+        # Layers inside the finance context. Money and quantities are decimals,
+        # so the domain and the use cases may use shopspring/decimal.
+        finance-domain:
+          list-mode: lax
+          files:
+            - "${config-path}/app/finance/domain/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/finance/usecase/
+              desc: domain must not depend on use cases
+            - pkg: github.com/maxjkfc/maxos/app/finance/adapter/
+              desc: domain must not depend on adapters
+        finance-domain-allowlist:
+          list-mode: strict
+          files:
+            - "${config-path}/app/finance/domain/**"
+          allow:
+            - $gostd
+            - github.com/google/uuid
+            - github.com/shopspring/decimal
+            - github.com/maxjkfc/maxos/app/finance/domain/
+        # Besides its own domain and ports, a finance use case may call the
+        # catalog through its in-ports (conventions section 4, rule 4).
+        finance-usecase-allowlist:
+          list-mode: strict
+          files:
+            - "${config-path}/app/finance/usecase/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/google/uuid
+            - github.com/shopspring/decimal
+            - go.uber.org/fx
+            - github.com/maxjkfc/maxos/app/finance/domain/
+            - github.com/maxjkfc/maxos/app/finance/usecase/port/
+            - github.com/maxjkfc/maxos/app/catalog/usecase/port/in/
+        finance-usecase:
+          list-mode: lax
+          files:
+            - "${config-path}/app/finance/usecase/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/finance/adapter/
+              desc: use cases must not depend on adapters; go through a port
+        finance-adapter:
+          list-mode: lax
+          files:
+            - "${config-path}/app/finance/adapter/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/finance/usecase/port/
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/finance/usecase/
+              desc: adapters depend on usecase/port only; cmd/ injects the implementations
+            - pkg: github.com/maxjkfc/maxos/app/finance/domain/service
+              desc: adapters must not call domain services; go through a use case port
+        finance-adapter-in:
+          list-mode: lax
+          files:
+            - "${config-path}/app/finance/adapter/in/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/finance/adapter/out/
+              desc: inbound adapters must not depend on outbound adapters
+        finance-adapter-out:
+          list-mode: lax
+          files:
+            - "${config-path}/app/finance/adapter/out/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/finance/adapter/in/
+              desc: outbound adapters must not depend on inbound adapters
+        finance-adapter-out-postgres:
+          list-mode: lax
+          files:
+            - "${config-path}/app/finance/adapter/out/persistence/postgres/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/finance/adapter/out/persistence/postgres
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/finance/adapter/out/
+              desc: the Postgres adapter must not depend on another outbound adapter
+        finance-adapter-out-others:
+          list-mode: lax
+          files:
+            - "${config-path}/app/finance/adapter/out/**"
+            - "!${config-path}/app/finance/adapter/out/persistence/postgres/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/finance/adapter/out/persistence/postgres
+              desc: only the Postgres adapter may use its package and the sqlc types in dbgen
+        finance-boundary:
+          list-mode: lax
+          files:
+            - "${config-path}/app/**"
+            - "!${config-path}/app/finance/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/finance/usecase/port/in/
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/finance/
+              desc: other contexts may import only app/finance/usecase/port/in

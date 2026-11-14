@@ -25,6 +25,8 @@ func newMCPStdioCmd() *cobra.Command {
 				fx.Supply(cfg),
 				InfraModule(),
 				InboxModule(),
+				CatalogModule(),
+				FinanceModule(),
 				MCPModule(),
 				fx.Invoke(serveStdio),
 			))
