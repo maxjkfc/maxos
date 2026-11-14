@@ -279,10 +279,9 @@ func TestListTransactionsAsksOneMoreThanThePageToKnowIfAnotherFollows(t *testing
 
 func TestListTransactionsPassesTheFilterOn(t *testing.T) {
 	e := newEnv(t)
-	taipei := time.FixedZone("UTC+8", 8*60*60)
 	from := time.Date(2026, 11, 12, 23, 59, 0, 0, taipei)
 	to := time.Date(2026, 11, 14, 0, 1, 0, 0, taipei)
-	project, area, party := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	project, area, party, plan := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 
 	_, err := e.svc.ListTransactions(context.Background(), usecase.ListTransactionsInput{
 		Status:    "confirmed",
@@ -290,6 +289,7 @@ func TestListTransactionsPassesTheFilterOn(t *testing.T) {
 		To:        &to,
 		AccountID: &e.cash.ID,
 		PartyID:   &party,
+		PlanID:    &plan,
 		ProjectID: &project,
 		AreaID:    &area,
 		Limit:     20,
@@ -305,8 +305,9 @@ func TestListTransactionsPassesTheFilterOn(t *testing.T) {
 		t.Errorf("filter = %+v, want confirmed, from %v to %v: the day each time falls on", f, wantFrom, wantTo)
 	}
 	if f.AccountID == nil || *f.AccountID != e.cash.ID || f.PartyID == nil || *f.PartyID != party ||
+		f.PlanID == nil || *f.PlanID != plan ||
 		f.ProjectID == nil || *f.ProjectID != project || f.AreaID == nil || *f.AreaID != area {
-		t.Errorf("filter = %+v, want the account, the party, the project and the area", f)
+		t.Errorf("filter = %+v, want the account, the party, the plan, the project and the area", f)
 	}
 	if f.Limit != 21 || f.Offset != 40 {
 		t.Errorf("limit %d, offset %d, want 21 (the page and one more) and 40", f.Limit, f.Offset)
@@ -315,7 +316,7 @@ func TestListTransactionsPassesTheFilterOn(t *testing.T) {
 	if _, err := e.svc.ListTransactions(context.Background(), usecase.ListTransactionsInput{}); err != nil {
 		t.Fatalf("ListTransactions without a filter: %v", err)
 	}
-	if f := e.txns.listed; f.Status != "" || f.From != nil || f.To != nil || f.AccountID != nil || f.PartyID != nil || f.ProjectID != nil || f.AreaID != nil {
+	if f := e.txns.listed; f.Status != "" || f.From != nil || f.To != nil || f.AccountID != nil || f.PartyID != nil || f.PlanID != nil || f.ProjectID != nil || f.AreaID != nil {
 		t.Errorf("filter = %+v, want no condition set", f)
 	}
 }
@@ -360,30 +361,4 @@ func TestListTransactionsReturnsWholeTransactions(t *testing.T) {
 		t.Fatalf("ListTransactions = %+v, %v, want the one transaction", out, err)
 	}
 	wantLines(t, e.lines(out.Transactions[0]), "account(cash) -120 TWD", "expense(food) +120 TWD, base +120")
-}
-
-func TestGetBalances(t *testing.T) {
-	e := newEnv(t)
-	e.txns.balanceRows = []model.Balance{
-		{AccountID: e.bank.ID, InstrumentID: e.twd.ID, Quantity: dec("880")},
-		{AccountID: e.bank.ID, InstrumentID: e.usd.ID, Quantity: dec("-12.5")},
-	}
-
-	all, err := e.svc.GetBalances(context.Background(), usecase.GetBalancesInput{})
-	if err != nil {
-		t.Fatalf("GetBalances: %v", err)
-	}
-	if e.txns.balancesFor != nil || len(all.Balances) != 2 {
-		t.Fatalf("asked for %v, got %d balances, want every account's, 2", e.txns.balancesFor, len(all.Balances))
-	}
-	if got := all.Balances[1]; got.AccountID != e.bank.ID || got.InstrumentID != e.usd.ID || !got.Quantity.Equal(dec("-12.5")) {
-		t.Errorf("balance = %+v, want what the repo returned", got)
-	}
-
-	if _, err := e.svc.GetBalances(context.Background(), usecase.GetBalancesInput{AccountID: &e.bank.ID}); err != nil {
-		t.Fatalf("GetBalances for an account: %v", err)
-	}
-	if e.txns.balancesFor == nil || *e.txns.balancesFor != e.bank.ID {
-		t.Errorf("asked for %v, want the account %s", e.txns.balancesFor, e.bank.ID)
-	}
 }

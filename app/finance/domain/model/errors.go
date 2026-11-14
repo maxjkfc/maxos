@@ -3,6 +3,8 @@ package model
 import (
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -76,17 +78,20 @@ var (
 
 	// ErrAmountNotPositive is returned for an amount that is zero or negative
 	// where it must be greater than zero: the amount of an expense, an income, a
-	// transfer, an exchange, a dealing, a reward, a share or a fee, and a discount.
+	// transfer, an exchange, a dealing, a reward, a share or a fee, the quantity
+	// and the amount of a trade, the principal and the interest of a period of an
+	// instalment plan, and a discount.
 	ErrAmountNotPositive = errors.New("the amount must be greater than zero")
 
 	// ErrAmountZero is returned for an opening balance of nothing, and for a
 	// difference of nothing to reconcile.
 	ErrAmountZero = errors.New("the amount must not be zero")
 
-	// ErrBaseAmountRequired is returned for an expense, an income, a reward or a
-	// fee in an instrument other than the base currency that comes without the
-	// amount in the base currency, and for the difference of a reconciliation of
-	// such a currency (see DifferenceBaseAmountRequiredError).
+	// ErrBaseAmountRequired is returned for an expense, an income, a reward, a fee
+	// or the interest of an instalment period in an instrument other than the base
+	// currency that comes without the amount in the base currency, and for the
+	// difference of a reconciliation of such a currency (see
+	// DifferenceBaseAmountRequiredError).
 	ErrBaseAmountRequired = errors.New("the amount in the base currency is required")
 
 	// ErrBaseAmountNotPositive is returned for an amount in the base currency that
@@ -105,11 +110,17 @@ var (
 	// ErrSameAccount is returned for a transfer from an account to itself.
 	ErrSameAccount = errors.New("a transfer needs two different accounts")
 
-	// ErrNotCurrency is returned for an exchange, a dealing, or an expense that has
-	// shares or was paid by a party, whose instrument is not a currency: what a
-	// party owes is counted in a currency. Buying and selling such an instrument is
-	// a trade.
+	// ErrNotCurrency is returned for an exchange, a dealing, an instalment plan, a
+	// trade's payment, or an expense that has shares or was paid by a party, whose
+	// instrument is not a currency: what a party owes, what a plan splits and what
+	// a trade is paid in are counted in a currency. Buying and selling such an
+	// instrument is a trade.
 	ErrNotCurrency = errors.New("the instrument must be a currency")
+
+	// ErrIsCurrency is returned for a trade of an instrument that is a currency:
+	// what is bought or sold is not one, and changing one currency into another is
+	// an exchange.
+	ErrIsCurrency = errors.New("the instrument must not be a currency")
 
 	// ErrSameInstrument is returned for an exchange between an instrument and
 	// itself. Moving an instrument between accounts is a transfer.
@@ -197,6 +208,64 @@ var (
 	// account that has drafts waiting: what it holds is not known until they are
 	// confirmed or discarded.
 	ErrPendingDrafts = errors.New("drafts are waiting to be confirmed or discarded")
+
+	// ErrInvalidTradeDirection is returned for a trade whose direction is neither
+	// buy nor sell.
+	ErrInvalidTradeDirection = errors.New("invalid trade direction")
+
+	// ErrMalformedPlan is returned for a transaction whose place in an instalment
+	// plan cannot be: only an instalment, which is always part of a plan, and the
+	// expense that is paid in instalments, as its origin, are part of one.
+	ErrMalformedPlan = errors.New("malformed instalment plan membership")
+
+	// ErrPartOfPlan is returned for confirming, discarding or voiding a period of an
+	// instalment plan by itself: a plan is acted on as a whole, through its origin.
+	ErrPartOfPlan = errors.New("the transaction is a period of an instalment plan")
+
+	// ErrInstalmentsWithPaidBy is returned for an expense that a party paid and that
+	// is to be paid in instalments: a plan is of the account that is charged, which
+	// a party paying on my behalf has none.
+	ErrInstalmentsWithPaidBy = errors.New("an expense paid by a party is not paid in instalments")
+
+	// ErrNoPeriods is returned for an instalment plan with no period.
+	ErrNoPeriods = errors.New("an instalment plan needs at least one period")
+
+	// ErrDueDatesNotIncreasing is returned for an instalment plan whose periods do
+	// not fall due on later and later days.
+	ErrDueDatesNotIncreasing = errors.New("the periods of an instalment plan must fall due on later and later days")
+
+	// ErrFirstDueTooEarly is returned for an instalment plan whose first period
+	// falls due before the day of its origin, which is the day of the purchase or of
+	// the conversion.
+	ErrFirstDueTooEarly = errors.New("the first period of an instalment plan cannot fall due before its origin")
+
+	// ErrPrincipalMismatch is returned for an instalment plan whose periods do not
+	// charge exactly the amount that is split.
+	ErrPrincipalMismatch = errors.New("the principals of the periods must add up to the amount that is split")
+
+	// ErrInterestCategoryRequired is returned for an instalment plan with interest
+	// and no category to book it to.
+	ErrInterestCategoryRequired = errors.New("interest needs the expense category it is booked to")
+
+	// ErrInterestBaseAmountWithoutInterest is returned for a period that comes with
+	// the amount of its interest in the base currency and has no interest.
+	ErrInterestBaseAmountWithoutInterest = errors.New("the interest in the base currency is for a period that has interest")
+
+	// ErrReservedIdempotencyKey is returned for an idempotency key in the form the
+	// keys of the periods of an instalment plan are made in. The ledger makes those,
+	// one for each period, so a request that gave one would be answered with that
+	// period, as a duplicate.
+	ErrReservedIdempotencyKey = errors.New("idempotency key is reserved for the periods of instalment plans")
+
+	// ErrPlanVoid is returned for rescheduling an instalment plan that is void: it
+	// counts for nothing any more, so there is no schedule of it left to change.
+	ErrPlanVoid = errors.New("the instalment plan is void")
+
+	// ErrPastPeriodsChanged is returned for rescheduling an instalment plan so that
+	// the periods that fell due before today are not as they were, when the
+	// reschedule was not given leave to change them. It comes as a
+	// *PastPeriodsChangedError, which says which.
+	ErrPastPeriodsChanged = errors.New("the new schedule changes periods that have fallen due")
 )
 
 // PendingDraftsError is what reconciling an account returns while drafts that
@@ -245,3 +314,64 @@ type IdempotencyKeyLengthError struct {
 func (e *IdempotencyKeyLengthError) Error() string {
 	return fmt.Sprintf("idempotency key must be %d to %d characters (got %d)", e.Min, e.Max, e.Runes)
 }
+
+// PrincipalMismatchError is returned for an instalment schedule whose periods do
+// not charge exactly the amount that is split. It is an ErrPrincipalMismatch.
+type PrincipalMismatchError struct {
+	// Principals is what the principals of the periods add up to.
+	Principals decimal.Decimal
+	// Amount is what is split: the amount of the purchase or the conversion, which
+	// for a plan that is made already is the principal of its origin.
+	Amount decimal.Decimal
+	// InstrumentCode is the code of the instrument both are in.
+	InstrumentCode string
+}
+
+func (e *PrincipalMismatchError) Error() string {
+	return fmt.Sprintf("%v: they add up to %s, and %s %s is split", ErrPrincipalMismatch, e.Principals, e.Amount, e.InstrumentCode)
+}
+
+func (e *PrincipalMismatchError) Unwrap() error { return ErrPrincipalMismatch }
+
+// PastPeriodDifference is one way the new schedule of an instalment plan is not the
+// old one in the periods that fell due before today.
+type PastPeriodDifference struct {
+	// Seq is the position of the period in the old schedule, for a period that the
+	// new schedule drops or changes, and the position the new schedule gives it for
+	// one that it adds.
+	Seq int
+	// DueOn is the day the period fell due in the old schedule, or, for one that is
+	// added, the day the new schedule gives it.
+	DueOn time.Time
+	// Change says what is different: "dropped", "added", or "changed" and what, out
+	// of "day", "principal", "interest" and "interest in the base currency".
+	Change string
+}
+
+// PastPeriodsChangedError is returned for rescheduling an instalment plan so that
+// the periods that fell due before today are not as they were, when the reschedule
+// was not given leave to change them. It is an ErrPastPeriodsChanged.
+type PastPeriodsChangedError struct {
+	// Today is the day the periods fell due before.
+	Today time.Time
+	// Differences are the periods that are not as they were, in the order of their
+	// positions.
+	Differences []PastPeriodDifference
+	// InterestCategoryChanged is that the interest of the periods that fell due is
+	// booked to another category in the new schedule than the one it was booked to.
+	InterestCategoryChanged bool
+}
+
+func (e *PastPeriodsChangedError) Error() string {
+	parts := make([]string, 0, len(e.Differences)+1)
+	for _, d := range e.Differences {
+		parts = append(parts, fmt.Sprintf("period %d (%s) %s", d.Seq, d.DueOn.Format(time.DateOnly), d.Change))
+	}
+	if e.InterestCategoryChanged {
+		parts = append(parts, "the category of the interest")
+	}
+	return fmt.Sprintf("%v before %s: %s; what has fallen due is changed only with ChangePast",
+		ErrPastPeriodsChanged, e.Today.Format(time.DateOnly), strings.Join(parts, "; "))
+}
+
+func (e *PastPeriodsChangedError) Unwrap() error { return ErrPastPeriodsChanged }

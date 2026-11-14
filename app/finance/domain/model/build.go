@@ -58,6 +58,19 @@ func normalizeHeader(h Header) (Header, error) {
 // in the order given. It returns what Validate finds wrong with it, which for
 // postings made by the constructors below can only be a mistake in them.
 func newTransaction(kind Kind, h Header, postings []Posting) (Transaction, error) {
+	return newPlanTransaction(kind, h, nil, postings)
+}
+
+// planRef is a place in an instalment plan: the plan, which is the id of its
+// origin, and the position in it.
+type planRef struct {
+	id  uuid.UUID
+	seq int
+}
+
+// newPlanTransaction is newTransaction for a transaction that is part of an
+// instalment plan, at the place plan says; plan is nil for one that is in none.
+func newPlanTransaction(kind Kind, h Header, plan *planRef, postings []Posting) (Transaction, error) {
 	for i := range postings {
 		postings[i].Seq = i + 1
 	}
@@ -74,6 +87,9 @@ func newTransaction(kind Kind, h Header, postings []Posting) (Transaction, error
 		IdempotencyKey: h.IdempotencyKey,
 		TagIDs:         h.TagIDs,
 		Postings:       postings,
+	}
+	if plan != nil {
+		t.PlanID, t.PlanSeq = new(plan.id), new(plan.seq)
 	}
 	if err := t.Validate(); err != nil {
 		return Transaction{}, err
@@ -179,39 +195,54 @@ type ExpenseParams struct {
 //	dealing   -(sum of the lines)
 //	expense   +line, base amount, discount     (one per line)
 func NewExpense(p ExpenseParams) (Transaction, error) {
-	h, err := normalizeHeader(p.Header)
+	h, postings, _, err := expensePostings(p, BookAccount)
 	if err != nil {
 		return Transaction{}, err
 	}
+	return newTransaction(KindExpense, h, postings)
+}
+
+// expensePostings checks the expense and returns its header as a transaction
+// keeps it, its postings, and what the payer pays: the sum of the lines and of
+// the shares. The posting of the payer is the first. An account that pays is
+// charged in chargedTo: BookAccount when it pays at once, and BookInstalment for
+// the origin of an instalment plan, where the same amount is owed and not yet
+// charged to it. A party that paid has a dealing posting in its place, whatever
+// chargedTo is.
+func expensePostings(p ExpenseParams, chargedTo Book) (Header, []Posting, decimal.Decimal, error) {
+	h, err := normalizeHeader(p.Header)
+	if err != nil {
+		return Header{}, nil, decimal.Zero, err
+	}
 	switch {
 	case p.Account == nil && p.PaidBy == nil:
-		return Transaction{}, ErrNoPayer
+		return Header{}, nil, decimal.Zero, ErrNoPayer
 	case p.Account != nil && p.PaidBy != nil:
-		return Transaction{}, ErrTwoPayers
+		return Header{}, nil, decimal.Zero, ErrTwoPayers
 	case p.PaidBy != nil && len(p.Shares) > 0:
-		return Transaction{}, ErrSharesWithPaidBy
+		return Header{}, nil, decimal.Zero, ErrSharesWithPaidBy
 	}
 	if len(p.Lines) == 0 {
 		if len(p.Shares) > 0 {
-			return Transaction{}, fmt.Errorf("%w: money spent only for others is a dealing, not an expense", ErrNoLines)
+			return Header{}, nil, decimal.Zero, fmt.Errorf("%w: money spent only for others is a dealing, not an expense", ErrNoLines)
 		}
-		return Transaction{}, ErrNoLines
+		return Header{}, nil, decimal.Zero, ErrNoLines
 	}
 	if (len(p.Shares) > 0 || p.PaidBy != nil) && !p.Instrument.IsCurrency {
-		return Transaction{}, fmt.Errorf("%w: a dealing is counted in a currency, and %s is not one", ErrNotCurrency, p.Instrument.Code)
+		return Header{}, nil, decimal.Zero, fmt.Errorf("%w: a dealing is counted in a currency, and %s is not one", ErrNotCurrency, p.Instrument.Code)
 	}
 	if p.Account != nil {
 		if err := checkAccount(*p.Account); err != nil {
-			return Transaction{}, err
+			return Header{}, nil, decimal.Zero, err
 		}
 	}
 	if err := checkInstrument(p.Instrument); err != nil {
-		return Transaction{}, err
+		return Header{}, nil, decimal.Zero, err
 	}
 
 	lines, total, err := categoryPostings(KindExpense, p.Instrument, p.BaseCurrency, p.Lines)
 	if err != nil {
-		return Transaction{}, err
+		return Header{}, nil, decimal.Zero, err
 	}
 	postings := make([]Posting, 1, 1+len(lines)+len(p.Shares)) // the payer's, put in once the shares are added up
 	postings = append(postings, lines...)
@@ -220,11 +251,11 @@ func NewExpense(p ExpenseParams) (Transaction, error) {
 	for i, share := range p.Shares {
 		n := i + 1
 		if _, repeated := seen[share.PartyID]; repeated {
-			return Transaction{}, fmt.Errorf("share %d: %w: party %s", n, ErrDuplicateParty, share.PartyID)
+			return Header{}, nil, decimal.Zero, fmt.Errorf("share %d: %w: party %s", n, ErrDuplicateParty, share.PartyID)
 		}
 		seen[share.PartyID] = struct{}{}
 		if err := checkAmount(p.Instrument, share.Amount); err != nil {
-			return Transaction{}, fmt.Errorf("share %d: %w", n, err)
+			return Header{}, nil, decimal.Zero, fmt.Errorf("share %d: %w", n, err)
 		}
 		partyID := share.PartyID
 		postings = append(postings, Posting{
@@ -240,13 +271,13 @@ func NewExpense(p ExpenseParams) (Transaction, error) {
 	payer := Posting{InstrumentID: p.Instrument.ID, Quantity: total.Neg()}
 	if p.Account != nil {
 		accountID := p.Account.ID
-		payer.Book, payer.AccountID = BookAccount, &accountID
+		payer.Book, payer.AccountID = chargedTo, &accountID
 	} else {
 		partyID := *p.PaidBy
 		payer.Book, payer.PartyID = BookDealing, &partyID
 	}
 	postings[0] = payer
-	return newTransaction(KindExpense, h, postings)
+	return h, postings, total, nil
 }
 
 // IncomeParams is the input of NewIncome.

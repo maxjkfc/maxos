@@ -54,6 +54,7 @@ func listFilter(in usecase.ListTransactionsInput) (repo.TransactionFilter, int, 
 	filter := repo.TransactionFilter{
 		AccountID: in.AccountID,
 		PartyID:   in.PartyID,
+		PlanID:    in.PlanID,
 		ProjectID: in.ProjectID,
 		AreaID:    in.AreaID,
 		Offset:    in.Offset,
@@ -90,22 +91,30 @@ func listFilter(in usecase.ListTransactionsInput) (repo.TransactionFilter, int, 
 	return filter, limit, nil
 }
 
-// GetBalances returns what the accounts hold. It counts the confirmed
-// transactions only, which is the repo's to do.
+// GetBalances returns what the accounts hold on a day: the day the request names,
+// and today when it names none. It counts the confirmed transactions that
+// happened on or before the day, which is the repo's to do, and returns beside
+// each balance the principal of instalment plans that has not fallen due by then.
 func (s *Service) GetBalances(ctx context.Context, in usecase.GetBalancesInput) (usecase.GetBalancesOutput, error) {
-	balances, err := s.transactions.Balances(ctx, in.AccountID)
+	balances, err := s.transactions.Balances(ctx, repo.BalanceFilter{AccountID: in.AccountID, Day: s.day(in.AsOf)})
 	if err != nil {
 		return usecase.GetBalancesOutput{}, fmt.Errorf("get balances: %w", err)
 	}
 	out := usecase.GetBalancesOutput{Balances: make([]usecase.Balance, len(balances))}
 	for i, b := range balances {
-		out.Balances[i] = usecase.Balance{AccountID: b.AccountID, InstrumentID: b.InstrumentID, Quantity: b.Quantity}
+		out.Balances[i] = usecase.Balance{
+			AccountID:          b.AccountID,
+			InstrumentID:       b.InstrumentID,
+			Quantity:           b.Quantity,
+			UnbilledInstalment: b.UnbilledInstalment,
+		}
 	}
 	return out, nil
 }
 
-// GetDealings returns what the parties owe me. Adding up the confirmed dealing
-// postings is the repo's to do, and it lists them by party id and then
+// GetDealings returns what the parties owe me on a day, the one the request names,
+// or today. Adding up the confirmed dealing postings that happened on or before it
+// is the repo's to do, and it lists them by party id and then
 // instrument code. The names of the parties are the catalog's, so for all the
 // parties the use case puts them in the order the catalog lists them, by name,
 // and keeps the instruments of each in the order of the repo.
@@ -120,7 +129,7 @@ func (s *Service) GetDealings(ctx context.Context, in usecase.GetDealingsInput) 
 			return usecase.GetDealingsOutput{}, err
 		}
 	}
-	dealings, err := s.transactions.Dealings(ctx, in.PartyID)
+	dealings, err := s.transactions.Dealings(ctx, in.PartyID, s.day(in.AsOf))
 	if err != nil {
 		return usecase.GetDealingsOutput{}, fmt.Errorf("get dealings: %w", err)
 	}

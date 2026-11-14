@@ -1,7 +1,9 @@
 // Package ledger implements the ledger use cases: recording expenses (with the
-// parts paid for others), incomes, transfers, exchanges, dealings, rewards and
-// opening balances as drafts, and reconciling accounts; confirming, discarding
-// and voiding the drafts; and reading transactions, balances and dealings.
+// parts paid for others, and paid in instalments), incomes, transfers, exchanges,
+// trades, dealings, rewards, opening balances and bill instalments as drafts, and
+// reconciling accounts; confirming, discarding and voiding the drafts, an
+// instalment plan as a whole; and reading transactions, instalment plans,
+// balances and dealings.
 package ledger
 
 import (
@@ -15,17 +17,20 @@ import (
 	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
+	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/clock"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/tx"
 )
 
 // Service implements usecase.RecordExpense, RecordIncome, RecordTransfer,
-// RecordExchange, RecordDealing, RecordReward, SetOpeningBalance, Reconcile,
-// ConfirmTransactions, DiscardDraft, VoidTransaction, GetTransaction,
-// ListTransactions, GetBalances and GetDealings.
+// RecordExchange, RecordTrade, RecordDealing, RecordReward, RecordBillInstalment,
+// SetOpeningBalance, Reconcile, ConfirmTransactions, DiscardDraft,
+// VoidTransaction, GetTransaction, ListTransactions, GetInstalmentPlan,
+// ListInstalmentPlans, GetBalances and GetDealings.
 //
 // Every use case that writes does all of it, the reads that check the request
-// included, in one database transaction.
+// included, in one database transaction. What today is, for the reads that count
+// up to it, is the clock's to say, and is not asked of anything else.
 type Service struct {
 	tx           tx.Transactor
 	transactions repo.TransactionRepo
@@ -36,24 +41,29 @@ type Service struct {
 	defaults     catalogusecase.ResolveProjectDefaults
 	projectAreas catalogusecase.ResolveProjectArea
 	listParties  catalogusecase.ListParties
+	clock        clock.Clock
 }
 
 var (
-	_ usecase.RecordExpense       = (*Service)(nil)
-	_ usecase.RecordIncome        = (*Service)(nil)
-	_ usecase.RecordTransfer      = (*Service)(nil)
-	_ usecase.RecordExchange      = (*Service)(nil)
-	_ usecase.RecordDealing       = (*Service)(nil)
-	_ usecase.RecordReward        = (*Service)(nil)
-	_ usecase.SetOpeningBalance   = (*Service)(nil)
-	_ usecase.Reconcile           = (*Service)(nil)
-	_ usecase.ConfirmTransactions = (*Service)(nil)
-	_ usecase.DiscardDraft        = (*Service)(nil)
-	_ usecase.VoidTransaction     = (*Service)(nil)
-	_ usecase.GetTransaction      = (*Service)(nil)
-	_ usecase.ListTransactions    = (*Service)(nil)
-	_ usecase.GetBalances         = (*Service)(nil)
-	_ usecase.GetDealings         = (*Service)(nil)
+	_ usecase.RecordExpense        = (*Service)(nil)
+	_ usecase.RecordIncome         = (*Service)(nil)
+	_ usecase.RecordTransfer       = (*Service)(nil)
+	_ usecase.RecordExchange       = (*Service)(nil)
+	_ usecase.RecordTrade          = (*Service)(nil)
+	_ usecase.RecordDealing        = (*Service)(nil)
+	_ usecase.RecordReward         = (*Service)(nil)
+	_ usecase.RecordBillInstalment = (*Service)(nil)
+	_ usecase.SetOpeningBalance    = (*Service)(nil)
+	_ usecase.Reconcile            = (*Service)(nil)
+	_ usecase.ConfirmTransactions  = (*Service)(nil)
+	_ usecase.DiscardDraft         = (*Service)(nil)
+	_ usecase.VoidTransaction      = (*Service)(nil)
+	_ usecase.GetTransaction       = (*Service)(nil)
+	_ usecase.ListTransactions     = (*Service)(nil)
+	_ usecase.GetInstalmentPlan    = (*Service)(nil)
+	_ usecase.ListInstalmentPlans  = (*Service)(nil)
+	_ usecase.GetBalances          = (*Service)(nil)
+	_ usecase.GetDealings          = (*Service)(nil)
 )
 
 // record is what the use cases that record a transaction have in common. build
@@ -70,6 +80,44 @@ func (s *Service) record(
 	ctx context.Context,
 	d usecase.RecordDetails,
 	build func(ctx context.Context, h model.Header) (model.Transaction, error),
+) (usecase.RecordOutput, error) {
+	return s.recordAll(ctx, d, func(ctx context.Context, h model.Header) ([]model.Transaction, error) {
+		txn, err := build(ctx, h)
+		if err != nil {
+			return nil, err
+		}
+		return []model.Transaction{txn}, nil
+	})
+}
+
+// recordPlan is record for what is recorded as an instalment plan: the origin and
+// each of the periods, in one database transaction, all of them drafts. The key
+// the caller gave is the origin's, and what is returned is the origin; the keys of
+// the periods are made by the domain from the plan, and never come from the
+// caller. A key that was used before returns the origin recorded under it, and
+// writes none of the periods.
+func (s *Service) recordPlan(
+	ctx context.Context,
+	d usecase.RecordDetails,
+	build func(ctx context.Context, h model.Header) (model.InstalmentPlan, error),
+) (usecase.RecordOutput, error) {
+	return s.recordAll(ctx, d, func(ctx context.Context, h model.Header) ([]model.Transaction, error) {
+		plan, err := build(ctx, h)
+		if err != nil {
+			return nil, err
+		}
+		return plan.Transactions(), nil
+	})
+}
+
+// recordAll is record for a request that records several transactions, the first
+// of which carries the key of the request and is what is returned. build makes
+// all of them before anything is written, so that a request that is refused leaves
+// nothing behind.
+func (s *Service) recordAll(
+	ctx context.Context,
+	d usecase.RecordDetails,
+	build func(ctx context.Context, h model.Header) ([]model.Transaction, error),
 ) (usecase.RecordOutput, error) {
 	key, id, err := identify(d)
 	if err != nil {
@@ -91,11 +139,11 @@ func (s *Service) record(
 		if err != nil {
 			return err
 		}
-		txn, err := build(ctx, h)
+		txns, err := build(ctx, h)
 		if err != nil {
 			return err
 		}
-		out, err = s.store(ctx, key, txn)
+		out, err = s.store(ctx, key, txns...)
 		return err
 	})
 	if err != nil {
@@ -132,11 +180,14 @@ func (s *Service) recordedUnder(ctx context.Context, key string) (model.Transact
 	}
 }
 
-// store inserts the draft. When another call recorded its key after the look-up
-// of recordedUnder, whose commit is what the insert waited for, it returns what
-// that call recorded, as a duplicate.
-func (s *Service) store(ctx context.Context, key string, txn model.Transaction) (usecase.RecordOutput, error) {
-	stored, err := s.transactions.Insert(ctx, txn)
+// store inserts the transactions, drafts, of which the first carries the key and
+// is what is returned; the others come with it, as the periods of an instalment
+// plan come with its origin, which they refer to. When another call recorded the
+// key after the look-up of recordedUnder, whose commit is what the insert of the
+// first waited for, it returns what that call recorded, as a duplicate, and
+// stores none of the others.
+func (s *Service) store(ctx context.Context, key string, txns ...model.Transaction) (usecase.RecordOutput, error) {
+	stored, err := s.transactions.Insert(ctx, txns[0])
 	if errors.Is(err, repo.ErrDuplicateKey) {
 		existing, err := s.transactions.GetByIdempotencyKey(ctx, key)
 		if err != nil {
@@ -147,7 +198,27 @@ func (s *Service) store(ctx context.Context, key string, txn model.Transaction) 
 	if err != nil {
 		return usecase.RecordOutput{}, fmt.Errorf("store transaction: %w", err)
 	}
+	for _, txn := range txns[1:] {
+		if _, err := s.transactions.Insert(ctx, txn); err != nil {
+			return usecase.RecordOutput{}, fmt.Errorf("store transaction %s, which comes with %s: %w", txn.ID, stored.ID, err)
+		}
+	}
 	return usecase.RecordOutput{Transaction: toTransaction(stored)}, nil
+}
+
+// today returns today: the day the clock says it is, in the timezone of the
+// application, as a date at midnight UTC.
+func (s *Service) today() time.Time {
+	return model.DateOf(s.clock.Now())
+}
+
+// day returns the day a read counts up to: the day asOf falls on, as its own
+// location reads it, and today when it is nil.
+func (s *Service) day(asOf *time.Time) time.Time {
+	if asOf != nil {
+		return model.DateOf(*asOf)
+	}
+	return s.today()
 }
 
 // header makes the header of a new transaction from what the caller gave. It

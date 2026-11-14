@@ -140,13 +140,25 @@ func wantSameSchema(t *testing.T, name string, got, want []string) {
 	t.Fatalf("%s is not the schema it should be:\n%s", name, strings.Join(diff, "\n"))
 }
 
-func TestMigration0005GoesDownToTheSchemaOf0004AndUpAgain(t *testing.T) {
-	ctx := context.Background()
+// atVersion5 returns a database that has the migrations up to 0005 applied, which
+// is where the tests of 0005 begin: the template has them all, so 0006 is rolled
+// back, as an empty ledger lets it be.
+func atVersion5(t *testing.T) (*pgxpool.Pool, *goose.Provider) {
+	t.Helper()
 	pool := testpg.New(t)
 	provider := newProvider(t, pool)
-	if v := version(t, provider); v != 5 {
-		t.Fatalf("the test database is at version %d, want 5: this test is about 0005", v)
+	if v := version(t, provider); v != 6 {
+		t.Fatalf("the test database is at version %d, want 6: the latest, which these tests roll back", v)
 	}
+	if _, err := provider.DownTo(context.Background(), 5); err != nil {
+		t.Fatalf("down to 0005: %v", err)
+	}
+	return pool, provider
+}
+
+func TestMigration0005GoesDownToTheSchemaOf0004AndUpAgain(t *testing.T) {
+	ctx := context.Background()
+	pool, provider := atVersion5(t)
 	atFive := schema(t, pool)
 
 	// What the migrations up to 0004 make, on their own: taken by going all the way
@@ -162,7 +174,7 @@ func TestMigration0005GoesDownToTheSchemaOf0004AndUpAgain(t *testing.T) {
 		t.Fatal("the schema at 0004 is the schema at 0005: the test sees nothing of the migration")
 	}
 
-	if _, err := provider.Up(ctx); err != nil {
+	if _, err := provider.UpTo(ctx, 5); err != nil {
 		t.Fatalf("up to 0005: %v", err)
 	}
 	wantSameSchema(t, "the schema after up", schema(t, pool), atFive)
@@ -175,7 +187,7 @@ func TestMigration0005GoesDownToTheSchemaOf0004AndUpAgain(t *testing.T) {
 	}
 	wantSameSchema(t, "the schema after down", schema(t, pool), atFour)
 
-	if _, err := provider.Up(ctx); err != nil {
+	if _, err := provider.UpTo(ctx, 5); err != nil {
 		t.Fatalf("up to 0005 again: %v", err)
 	}
 	wantSameSchema(t, "the schema after up again", schema(t, pool), atFive)
@@ -193,10 +205,27 @@ type posting struct {
 	systemCategory       string
 }
 
+// seeded is a transaction that seedTransactions stores: of a kind, with postings
+// and, when it is in an instalment plan, the place it has in it: "origin" for the
+// transaction the plan is named for, and "period" for each of those that follow
+// it, in the order they are given.
+type seeded struct {
+	kind     string
+	plan     string
+	postings []posting
+}
+
 // seedLedger stores, in a database at version 5, an account, a category of
 // expenses, and one transaction of the given kind with the given postings, all in
 // the base currency. The party of a posting is an id that no table knows.
 func seedLedger(t *testing.T, pool *pgxpool.Pool, kind string, postings ...posting) {
+	t.Helper()
+	seedTransactions(t, pool, seeded{kind: kind, postings: postings})
+}
+
+// seedTransactions stores what seedLedger stores, for several transactions, which
+// are in a plan when they say so: that needs a database at version 6.
+func seedTransactions(t *testing.T, pool *pgxpool.Pool, transactions ...seeded) {
 	t.Helper()
 	ctx := context.Background()
 	account, food, party, twd := uuid.New(), uuid.New(), uuid.New(), "00000000-0000-7000-8000-000000000001"
@@ -213,33 +242,50 @@ func seedLedger(t *testing.T, pool *pgxpool.Pool, kind string, postings ...posti
 	}
 	exec(`INSERT INTO fin_account (id, name, kind) VALUES ($1, 'cash', 'cash')`, account)
 	exec(`INSERT INTO fin_category (id, direction, name) VALUES ($1, 'expense', 'food')`, food)
-	txn := uuid.New()
-	exec(`INSERT INTO fin_transaction (id, kind, status, occurred_on, idempotency_key)
-		VALUES ($1, $2, 'draft', '2026-11-14', 'migration-test-key')`, txn, kind)
-	for i, p := range postings {
-		var accountID, categoryID, partyID, base, discount any
-		if p.account != "" {
-			accountID = account
+	var origin uuid.UUID
+	position := 0
+	for n, txn := range transactions {
+		id, key := uuid.New(), fmt.Sprintf("migration-test-%02d", n+1)
+		switch txn.plan {
+		case "":
+			exec(`INSERT INTO fin_transaction (id, kind, status, occurred_on, idempotency_key)
+				VALUES ($1, $2, 'draft', '2026-11-14', $3)`, id, txn.kind, key)
+		case "origin":
+			origin, position = id, 0
+			exec(`INSERT INTO fin_transaction (id, kind, status, occurred_on, idempotency_key, plan_id, plan_seq)
+				VALUES ($1, $2, 'draft', '2026-11-14', $3, $1, 0)`, id, txn.kind, key)
+		case "period":
+			position++
+			exec(`INSERT INTO fin_transaction (id, kind, status, occurred_on, idempotency_key, plan_id, plan_seq)
+				VALUES ($1, $2, 'draft', '2026-11-14', $3, $4, $5)`, id, txn.kind, key, origin, position)
+		default:
+			t.Fatalf("plan %q: want none, \"origin\" or \"period\"", txn.plan)
 		}
-		switch {
-		case p.systemCategory != "":
-			categoryID = p.systemCategory
-		case p.category != "":
-			categoryID = food
+		for i, p := range txn.postings {
+			var accountID, categoryID, partyID, base, discount any
+			if p.account != "" {
+				accountID = account
+			}
+			switch {
+			case p.systemCategory != "":
+				categoryID = p.systemCategory
+			case p.category != "":
+				categoryID = food
+			}
+			if p.party {
+				partyID = party
+			}
+			if p.baseAmount != "" {
+				base = p.baseAmount
+			}
+			if p.discount != "" {
+				discount = p.discount
+			}
+			exec(`INSERT INTO fin_posting (id, transaction_id, seq, book, account_id, category_id, party_id,
+					instrument_id, quantity, base_amount, discount)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::numeric, $10::numeric, $11::numeric)`,
+				uuid.New(), id, i+1, p.book, accountID, categoryID, partyID, twd, p.quantity, base, discount)
 		}
-		if p.party {
-			partyID = party
-		}
-		if p.baseAmount != "" {
-			base = p.baseAmount
-		}
-		if p.discount != "" {
-			discount = p.discount
-		}
-		exec(`INSERT INTO fin_posting (id, transaction_id, seq, book, account_id, category_id, party_id,
-				instrument_id, quantity, base_amount, discount)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::numeric, $10::numeric, $11::numeric)`,
-			uuid.New(), txn, i+1, p.book, accountID, categoryID, partyID, twd, p.quantity, base, discount)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit: %v", err)
@@ -286,8 +332,7 @@ func TestMigration0005RefusesToGoDownWhileTheLedgerHoldsWhatItAddedAndLeavesTheL
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pool := testpg.New(t)
-			provider := newProvider(t, pool)
+			pool, provider := atVersion5(t)
 			seedLedger(t, pool, tt.kind, tt.postings...)
 			before := schema(t, pool)
 
@@ -325,8 +370,7 @@ func TestMigration0005RefusesToGoDownWhileTheLedgerHoldsWhatItAddedAndLeavesTheL
 
 func TestMigration0005GoesDownOverOrdinaryExpensesAndTransfers(t *testing.T) {
 	ctx := context.Background()
-	pool := testpg.New(t)
-	provider := newProvider(t, pool)
+	pool, provider := atVersion5(t)
 	// What 0004 could hold, which the migration must not mistake for its own.
 	seedLedger(t, pool, "expense",
 		posting{book: "account", account: "cash", quantity: "-120"},
@@ -358,8 +402,7 @@ func TestMigration0005RefusesToGoDownWhileACategoryIsUnderASystemCategoryAndLeav
 		{"an income category", "income", unrecordedIncome},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			pool := testpg.New(t)
-			provider := newProvider(t, pool)
+			pool, provider := atVersion5(t)
 			exec := func(query string, args ...any) {
 				t.Helper()
 				if _, err := pool.Exec(ctx, query, args...); err != nil {
@@ -432,5 +475,159 @@ func TestMigration0005StopsWhereATopLevelCategoryIsAlreadyCalledUnrecorded(t *te
 				t.Errorf("%d of the new columns exist, want none: nothing of the migration is left", columns)
 			}
 		})
+	}
+}
+
+func TestMigration0006GoesDownToTheSchemaOf0005AndUpAgain(t *testing.T) {
+	ctx := context.Background()
+	pool := testpg.New(t)
+	provider := newProvider(t, pool)
+	if v := version(t, provider); v != 6 {
+		t.Fatalf("the test database is at version %d, want 6: this test is about 0006", v)
+	}
+	atSix := schema(t, pool)
+
+	// What the migrations up to 0005 make, on their own: taken by going all the way
+	// down and up again, so that it is a database where 0006 never was.
+	if _, err := provider.DownTo(ctx, 0); err != nil {
+		t.Fatalf("down to the start: %v", err)
+	}
+	if _, err := provider.UpTo(ctx, 5); err != nil {
+		t.Fatalf("up to 0005: %v", err)
+	}
+	atFive := schema(t, pool)
+	if slices.Equal(atFive, atSix) {
+		t.Fatal("the schema at 0005 is the schema at 0006: the test sees nothing of the migration")
+	}
+
+	if _, err := provider.Up(ctx); err != nil {
+		t.Fatalf("up to 0006: %v", err)
+	}
+	wantSameSchema(t, "the schema after up", schema(t, pool), atSix)
+
+	if _, err := provider.DownTo(ctx, 5); err != nil {
+		t.Fatalf("down to 0005: %v", err)
+	}
+	if v := version(t, provider); v != 5 {
+		t.Fatalf("version after down = %d, want 5", v)
+	}
+	wantSameSchema(t, "the schema after down", schema(t, pool), atFive)
+
+	if _, err := provider.Up(ctx); err != nil {
+		t.Fatalf("up to 0006 again: %v", err)
+	}
+	wantSameSchema(t, "the schema after up again", schema(t, pool), atSix)
+}
+
+func TestMigration0006RefusesToGoDownWhileTheLedgerHoldsWhatItAddedAndLeavesTheLedgerAlone(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name         string
+		transactions []seeded
+	}{
+		{"a trade", []seeded{{kind: "trade", postings: []posting{
+			{book: "account", account: "cash", quantity: "-100"},
+			{book: "conversion", quantity: "100"},
+		}}}},
+		{"an expense paid in instalments, which is the origin of a plan", []seeded{{kind: "expense", plan: "origin", postings: []posting{
+			{book: "instalment", account: "cash", quantity: "-1000"},
+			{book: "expense", category: "food", quantity: "1000", baseAmount: "1000"},
+		}}}},
+		{"a bill instalment and its period", []seeded{
+			{kind: "instalment", plan: "origin", postings: []posting{
+				{book: "account", account: "cash", quantity: "1000"},
+				{book: "instalment", account: "cash", quantity: "-1000"},
+			}},
+			{kind: "instalment", plan: "period", postings: []posting{
+				{book: "instalment", account: "cash", quantity: "1000"},
+				{book: "account", account: "cash", quantity: "-1000"},
+			}},
+		}},
+		{"an expense that is the origin of a plan, though it posts nothing to the instalment book", []seeded{{kind: "expense", plan: "origin", postings: []posting{
+			{book: "account", account: "cash", quantity: "-1000"},
+			{book: "expense", category: "food", quantity: "1000", baseAmount: "1000"},
+		}}}},
+		{"a posting to the instalment book of an expense that is in no plan", []seeded{{kind: "expense", postings: []posting{
+			{book: "instalment", account: "cash", quantity: "-1000"},
+			{book: "expense", category: "food", quantity: "1000", baseAmount: "1000"},
+		}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool := testpg.New(t)
+			provider := newProvider(t, pool)
+			seedTransactions(t, pool, tt.transactions...)
+			before := schema(t, pool)
+
+			_, err := provider.Down(ctx)
+
+			pgErr := pgError(t, err)
+			if pgErr.Code != "P0001" || !strings.Contains(pgErr.Message, "cannot roll back 0006_fin_instalments") || pgErr.Hint == "" {
+				t.Fatalf("err = %v, hint = %q, want the migration to refuse, say which migration, and say what to do", err, pgErr.Hint)
+			}
+			if v := version(t, provider); v != 6 {
+				t.Errorf("version = %d after the refused Down, want 6", v)
+			}
+			wantSameSchema(t, "the schema after the refused Down", schema(t, pool), before)
+			wantPostings := 0
+			for _, txn := range tt.transactions {
+				wantPostings += len(txn.postings)
+			}
+			var transactions, postings int
+			if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM fin_transaction), (SELECT count(*) FROM fin_posting)`).
+				Scan(&transactions, &postings); err != nil {
+				t.Fatalf("count: %v", err)
+			}
+			if transactions != len(tt.transactions) || postings != wantPostings {
+				t.Errorf("%d transactions and %d postings left, want the ledger untouched: %d and %d",
+					transactions, postings, len(tt.transactions), wantPostings)
+			}
+
+			// Once the ledger holds none of it, it goes down: the statement deletes the
+			// periods of a plan with their origin, which the foreign key lets it.
+			if _, err := pool.Exec(ctx, `DELETE FROM fin_transaction`); err != nil {
+				t.Fatalf("delete the transactions: %v", err)
+			}
+			if _, err := provider.Down(ctx); err != nil {
+				t.Fatalf("Down of a ledger that holds none of it: %v", err)
+			}
+			if v := version(t, provider); v != 5 {
+				t.Errorf("version = %d, want 5", v)
+			}
+		})
+	}
+}
+
+func TestMigration0006GoesDownOverWhatTheEarlierMigrationsHold(t *testing.T) {
+	ctx := context.Background()
+	pool := testpg.New(t)
+	provider := newProvider(t, pool)
+	// What 0005 could hold, which the migration must not mistake for its own.
+	seedTransactions(t, pool,
+		seeded{kind: "expense", postings: []posting{
+			{book: "account", account: "cash", quantity: "-450"},
+			{book: "expense", category: "food", quantity: "450", baseAmount: "450", discount: "50"},
+		}},
+		seeded{kind: "dealing", postings: []posting{
+			{book: "account", account: "cash", quantity: "-100"},
+			{book: "dealing", party: true, quantity: "100"},
+		}},
+		seeded{kind: "exchange", postings: []posting{
+			{book: "account", account: "cash", quantity: "-100"},
+			{book: "conversion", quantity: "100"},
+		}},
+	)
+
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("Down: %v, want it to go down: an expense, a dealing and an exchange are not what 0006 added", err)
+	}
+
+	var transactions, postings int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM fin_transaction), (SELECT count(*) FROM fin_posting)`).
+		Scan(&transactions, &postings); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if transactions != 3 || postings != 6 {
+		t.Errorf("%d transactions and %d postings left, want them kept: 3 and 6", transactions, postings)
 	}
 }

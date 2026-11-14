@@ -78,6 +78,8 @@ type FinTransaction struct {
 	CreatedAt      time.Time
 	ConfirmedAt    *time.Time
 	VoidedAt       *time.Time
+	PlanID         uuid.NullUUID
+	PlanSeq        *int32
 }
 
 type FinTransactionTag struct {

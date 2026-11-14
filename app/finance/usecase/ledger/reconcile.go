@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
+	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
 )
 
 // Reconcile works out what the ledger says the account held of the instrument on
@@ -36,13 +39,17 @@ import (
 // the account, and the account is looked at further down, where the request is
 // validated.
 //
-// The recorded balance counts the confirmed postings of the account and the
-// instrument up to and including the day, so it is not known while a draft is
-// dated on or before the day with a posting to them: the draft may be confirmed
-// and change it. Reconcile refuses with a *model.PendingDraftsError then. A
-// transaction dated on or before the day that is recorded and confirmed after the
-// draft of a reconciliation was made but before it is confirmed makes the draft
-// stale, and is not detected.
+// The recorded balance counts the confirmed account postings of the account and
+// the instrument up to and including the day, so it is not known while a draft is
+// dated on or before the day with an account posting to them: the draft may be
+// confirmed and change it. Reconcile refuses with a *model.PendingDraftsError
+// then. A transaction dated on or before the day that is recorded and confirmed
+// after the draft of a reconciliation was made but before it is confirmed makes
+// the draft stale, and is not detected. What an instalment plan has not charged
+// to the account yet is not what the account holds, so it is not in the balance:
+// the origin of an expense paid in instalments has no account posting, and a
+// period has one on the day it falls due, so the drafts of a plan keep the account
+// from being reconciled only for the periods that fall due on or before the day.
 //
 // A key that was used before returns the transaction recorded under it, as it
 // does for the use cases that record, and is answered right after the lock,
@@ -97,9 +104,15 @@ func (s *Service) Reconcile(ctx context.Context, in usecase.ReconcileInput) (use
 			return fmt.Errorf("reconcile account %q in %s on %s: %w", account.Name, instrument.Code, day.Format(time.DateOnly),
 				&model.PendingDraftsError{Count: pending})
 		}
-		recorded, err := s.transactions.BalanceAsOf(ctx, account.ID, instrument.ID, day)
+		balances, err := s.transactions.Balances(ctx, repo.BalanceFilter{AccountID: &account.ID, InstrumentID: &instrument.ID, Day: day})
 		if err != nil {
 			return fmt.Errorf("get the balance of account %s: %w", account.ID, err)
+		}
+		// There is a balance for each account and instrument, so none or one: what the
+		// account holds is the quantity, and not the unbilled instalment beside it.
+		recorded := decimal.Zero
+		for _, balance := range balances {
+			recorded = recorded.Add(balance.Quantity)
 		}
 
 		reconciliation, err := model.Reconcile(model.ReconcileParams{
