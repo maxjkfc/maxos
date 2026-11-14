@@ -796,7 +796,7 @@ func TestAScheduleIsReplacedInOneDatabaseTransactionWhateverTheStatusOfThePlan(t
 				t.Fatalf("GetPlan: %v", err)
 			}
 			schedule := e.newSchedule()
-			next, err := old.Reschedule(e.twd, e.twd, schedule)
+			next, err := old.Reschedule(model.RescheduleParams{Instrument: e.twd, BaseCurrency: e.twd, Schedule: schedule, Today: ledgerDay})
 			if err != nil {
 				t.Fatalf("Reschedule: %v", err)
 			}
@@ -869,7 +869,7 @@ func TestAScheduleWhosePeriodDoesNotBalanceLeavesTheOldScheduleWhole(t *testing.
 	if err != nil {
 		t.Fatalf("GetPlan: %v", err)
 	}
-	next, err := old.Reschedule(e.twd, e.twd, e.newSchedule())
+	next, err := old.Reschedule(model.RescheduleParams{Instrument: e.twd, BaseCurrency: e.twd, Schedule: e.newSchedule(), Today: ledgerDay})
 	if err != nil {
 		t.Fatalf("Reschedule: %v", err)
 	}

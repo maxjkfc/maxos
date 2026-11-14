@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -275,8 +274,10 @@ func unexpected(err error) string {
 }
 
 // together runs n calls that start at the same moment, as far as the scheduler goes,
-// and returns when all of them have finished.
-func together(n int, call func(i int)) {
+// and returns when all of them have finished. Each has a deadline of its own, so
+// that a call that waits for ever ends with an error that names it, and does not
+// hang the test to the timeout of go test.
+func together(n int, call func(ctx context.Context, i int)) {
 	var ready, done sync.WaitGroup
 	start := make(chan struct{})
 	for i := range n {
@@ -286,7 +287,9 @@ func together(n int, call func(i int)) {
 			defer done.Done()
 			ready.Done()
 			<-start
-			call(i)
+			ctx, cancel := context.WithTimeout(context.Background(), pollLimit)
+			defer cancel()
+			call(ctx, i)
 		}()
 	}
 	ready.Wait()
@@ -294,57 +297,12 @@ func together(n int, call func(i int)) {
 	done.Wait()
 }
 
-// heldTogether runs n calls, in the way reconcileTogether does for a
-// reconciliation: call 0 is held by the tracer right after the statement that
-// begins with the prefix of the tracer has been read, which is its first lock, and
-// the others start then. Call 0 is let go when each of the others has either
-// finished or is waiting for a lock, which PostgreSQL says, so that the overlap is
-// the same every time, however long anything takes. If a call is neither after
-// pollLimit, the test fails and names it, and call 0 goes on.
+// heldTogether runs n calls that overlap exactly, as heldCalls does: call 0 is held
+// right after the statement that the tracer waits for, which is its first lock.
 func (a *plansApp) heldTogether(t *testing.T, n int, run func(ctx context.Context, i int)) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*pollLimit)
-	t.Cleanup(cancel)
-	var (
-		others   sync.WaitGroup
-		finished = make([]atomic.Bool, n)
-	)
 	a.hold.prefix = a.holdPrefix
-	a.hold.hook = func() {
-		for i := 1; i < n; i++ {
-			others.Add(1)
-			go func() {
-				defer others.Done()
-				run(context.WithValue(ctx, callKey{}, i), i)
-				finished[i].Store(true)
-			}()
-		}
-		deadline := time.Now().Add(pollLimit)
-		for {
-			waiting, err := a.hold.waiting(ctx, a.direct)
-			if err != nil {
-				t.Errorf("ask PostgreSQL which calls are waiting for a lock: %v", err)
-				return
-			}
-			var neither []int
-			for i := 1; i < n; i++ {
-				if !finished[i].Load() && !waiting[i] {
-					neither = append(neither, i)
-				}
-			}
-			if len(neither) == 0 {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Errorf("%s after call 0 was held, calls %v are neither finished nor waiting for a lock", pollLimit, neither)
-				return
-			}
-			time.Sleep(pollEvery)
-		}
-	}
-
-	run(context.WithValue(ctx, callKey{}, 0), 0)
-	others.Wait()
+	heldCalls(t, a.hold, a.direct, n, func(i int) string { return fmt.Sprintf("call %d", i) }, run)
 }
 
 // Two calls confirm the same two plans, one asking for them the other way round
@@ -399,8 +357,7 @@ func TestConfirmingTwoPlansInOppositeOrdersWhileOneIsDiscardedAndOneVoidedNeverD
 		pb := a.plan(t, card, fmt.Sprintf("mixed-plan-b-%03d", round), 3)
 
 		errs := make([]error, 4)
-		together(4, func(i int) {
-			ctx := context.Background()
+		together(4, func(ctx context.Context, i int) {
 			switch i {
 			case 0:
 				_, errs[i] = a.l.Confirm.ConfirmTransactions(ctx, usecase.ConfirmTransactionsInput{IDs: []uuid.UUID{pa.ID, pb.ID}})
@@ -451,8 +408,7 @@ func TestConfirmVoidAndDiscardOfOnePlanAtOnceLeaveOneConsistentOutcome(t *testin
 		plan := a.plan(t, a.card(t), fmt.Sprintf("one-plan-%03d-xxxx", round), 3)
 
 		errs := make([]error, 4)
-		together(4, func(i int) {
-			ctx := context.Background()
+		together(4, func(ctx context.Context, i int) {
 			switch i {
 			case 0, 1:
 				_, errs[i] = a.l.Confirm.ConfirmTransactions(ctx, usecase.ConfirmTransactionsInput{IDs: []uuid.UUID{plan.ID}})
@@ -512,8 +468,7 @@ func TestConfirmingAPlanWhileItsAccountIsReconciledNeverReconcilesAgainstAStaleB
 			confirmErr, reconcileErr error
 			reconciled               usecase.ReconcileOutput
 		)
-		together(2, func(i int) {
-			ctx := context.Background()
+		together(2, func(ctx context.Context, i int) {
 			if i == 0 {
 				_, confirmErr = a.l.Confirm.ConfirmTransactions(ctx, usecase.ConfirmTransactionsInput{IDs: []uuid.UUID{plan.ID}})
 				return
@@ -605,11 +560,11 @@ func TestOverlappingConfirmsOfPlansAndOrdinaryDraftsConfirmEachOfThemOnceAtMost(
 		}
 
 		errs := make([]error, calls)
-		together(calls, func(i int) {
+		together(calls, func(ctx context.Context, i int) {
 			if len(asked[i].ids) == 0 {
 				return
 			}
-			_, errs[i] = a.l.Confirm.ConfirmTransactions(context.Background(), usecase.ConfirmTransactionsInput{IDs: asked[i].ids})
+			_, errs[i] = a.l.Confirm.ConfirmTransactions(ctx, usecase.ConfirmTransactionsInput{IDs: asked[i].ids})
 		})
 
 		for i, err := range errs {
@@ -739,6 +694,49 @@ func TestVoidingAPlanWhileItIsRescheduledVoidsTheNewPeriods(t *testing.T) {
 	}
 }
 
+// A caller that gives the origin of a plan and the periods of it waits for the origin
+// while the plan is rescheduled, and then the periods it gave are not the plan's any
+// more: they are gone, which it is told as it is for an id that never was. It is not
+// answered with transactions that are empty, and nothing is confirmed. The first call
+// is held with the origin locked, which is its first lock.
+func TestConfirmingThePeriodsOfAPlanWhileItIsRescheduledIsRefusedAndNotAnsweredWithEmptyTransactions(t *testing.T) {
+	a := newPlansApp(t, 4, lockStatement)
+	plan := a.plan(t, a.card(t), "reschedule-listed-01", 3)
+	old := ids(a.planOf(t, plan.ID).Periods...)
+
+	var confirmed usecase.ConfirmTransactionsOutput
+	errs := make([]error, 2)
+	a.heldTogether(t, 2, func(ctx context.Context, i int) {
+		if i == 0 {
+			_, errs[i] = a.l.RescheduleInstalment.RescheduleInstalment(ctx, a.two(plan.ID))
+			return
+		}
+		confirmed, errs[i] = a.l.Confirm.ConfirmTransactions(ctx, usecase.ConfirmTransactionsInput{IDs: append([]uuid.UUID{plan.ID}, old...)})
+	})
+
+	if errs[0] != nil {
+		t.Errorf("reschedule = %v, want it to succeed", errs[0])
+	}
+	if !errors.Is(errs[1], model.ErrNotFound) {
+		t.Fatalf("confirm = %v, want ErrNotFound: the periods it gave are gone", errs[1])
+	}
+	for _, id := range old {
+		if !strings.Contains(errs[1].Error(), id.String()) {
+			t.Errorf("confirm = %q, want it to name the period %s", errs[1], id)
+		}
+	}
+	if len(confirmed.Transactions) != 0 {
+		t.Errorf("confirm answered with %d transactions, want none: it is refused", len(confirmed.Transactions))
+	}
+	if status := a.statusOf(t, plan.ID); status != "draft" {
+		t.Errorf("the plan is %q, want it left a draft: a refused call confirms nothing", status)
+	}
+	if want := "2026-12-20 1500, 2027-01-20 1500"; scheduleKey(a.planOf(t, plan.ID)) != want {
+		t.Errorf("schedule = %q, want the new one, %q", scheduleKey(a.planOf(t, plan.ID)), want)
+	}
+	a.wantConfirmedOnce(t)
+}
+
 // Rescheduling twice, confirming and voiding one plan, started together over and
 // over. A reschedule that wins or loses to the others is not an error unless it
 // finds the plan void. The plan ends whole: of one status, of one of the schedules
@@ -751,8 +749,7 @@ func TestReschedulingAPlanWhileItIsConfirmedAndVoidedNeverDeadlocksAndLeavesOneS
 		original := scheduleKey(a.planOf(t, plan.ID))
 
 		errs := make([]error, 4)
-		together(4, func(i int) {
-			ctx := context.Background()
+		together(4, func(ctx context.Context, i int) {
 			switch i {
 			case 0:
 				_, errs[i] = a.l.Confirm.ConfirmTransactions(ctx, usecase.ConfirmTransactionsInput{IDs: []uuid.UUID{plan.ID}})

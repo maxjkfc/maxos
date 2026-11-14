@@ -481,7 +481,8 @@ func postingsOf(txn usecase.Transaction, book string) []usecase.Posting {
 // Three of the 12 periods of 1,000 have fallen due, and the card is paid off of the
 // other 9,000 in one period, next month, with interest of 270. What the card owes
 // today does not change, and the interest, which is an expense, is booked on the
-// day it is charged.
+// day it is charged. The three that fell due are sent as they were, which is what
+// takes no leave: the schedule is replaced as a whole.
 func TestPayingOffWhatRemainsOfAPlanInOnePeriodThroughTheRealUseCases(t *testing.T) {
 	ctx := context.Background()
 	clk := newTestClock(dateOn(2027, time.March, 1))
@@ -563,6 +564,58 @@ func TestPayingOffWhatRemainsOfAPlanInOnePeriodThroughTheRealUseCases(t *testing
 	}
 }
 
+// A reschedule leaves what has fallen due as it is, unless it says it is meant to
+// change it. The same payoff, with the interest of the first period typed as 33 and
+// not as the 30 that was charged, is refused with the period that differs, and the
+// plan, what the card holds, and the interest that was booked are as they were. With
+// ChangePast it is what is asked: the interest that was 30 is 33, and the card holds
+// 3 more.
+func TestReschedulingWhatFellDueTakesLeaveToChangeItThroughTheRealUseCases(t *testing.T) {
+	ctx := context.Background()
+	clk := newTestClock(dateOn(2027, time.March, 1))
+	l := newLedgerAppOn(t, testpg.New(t), clk)
+	p := l.cardPlan(t, "instalment-tv-0009", true)
+	payoff := func(firstInterest string, changePast bool) usecase.RescheduleInstalmentInput {
+		return usecase.RescheduleInstalmentInput{PlanID: p.origin.ID, ChangePast: changePast, Schedule: usecase.InstalmentSchedule{
+			InterestCategoryID: &p.interest,
+			Periods: []usecase.InstalmentPeriod{
+				{DueOn: dateOn(2026, time.December, 5), Principal: dec("1000"), Interest: new(dec(firstInterest))},
+				{DueOn: dateOn(2027, time.January, 5), Principal: dec("1000")},
+				{DueOn: dateOn(2027, time.February, 5), Principal: dec("1000")},
+				{DueOn: dateOn(2027, time.April, 5), Principal: dec("9000"), Interest: new(dec("270"))},
+			},
+		}}
+	}
+	before, err := l.GetInstalmentPlan.GetInstalmentPlan(ctx, p.origin.ID)
+	if err != nil {
+		t.Fatalf("GetInstalmentPlan: %v", err)
+	}
+	if expense := postingsOf(before.Periods[0], "expense"); len(expense) != 1 || !expense[0].Quantity.Equal(dec("30")) {
+		t.Fatalf("interest of the first period = %+v, want 30 of expense", expense)
+	}
+	l.wantOwed(t, "before", p, "-3030", "-9000")
+
+	_, err = l.RescheduleInstalment.RescheduleInstalment(ctx, payoff("33", false))
+	var changed *model.PastPeriodsChangedError
+	if !errors.Is(err, model.ErrPastPeriodsChanged) || !errors.As(err, &changed) || len(changed.Differences) != 1 || changed.Differences[0].Seq != 1 {
+		t.Fatalf("reschedule with the interest of a period that fell due changed: err = %v, want ErrPastPeriodsChanged with period 1 as the one that differs", err)
+	}
+	after, err := l.GetInstalmentPlan.GetInstalmentPlan(ctx, p.origin.ID)
+	if err != nil || !reflect.DeepEqual(after, before) {
+		t.Errorf("plan after the refusal = %+v, %v, want it as it was: %+v", after, err, before)
+	}
+	l.wantOwed(t, "after the refusal", p, "-3030", "-9000")
+
+	got, err := l.RescheduleInstalment.RescheduleInstalment(ctx, payoff("33", true))
+	if err != nil {
+		t.Fatalf("RescheduleInstalment with ChangePast: %v", err)
+	}
+	if expense := postingsOf(got.Periods[0], "expense"); len(expense) != 1 || !expense[0].Quantity.Equal(dec("33")) {
+		t.Errorf("interest of the first period = %+v, want the 33 that was asked, as an expense", expense)
+	}
+	l.wantOwed(t, "with the interest that fell due changed", p, "-3033", "-9000")
+}
+
 // A period that is moved across today moves what is owed between what the card
 // holds and what is unbilled on it, and what it owes in all stays the same: a
 // period that has no interest is moved, so that the interest does not move with it.
@@ -571,27 +624,38 @@ func TestMovingAPeriodAcrossTodayMovesWhatIsOwedBetweenTheBalanceAndTheUnbilledI
 	clk := newTestClock(dateOn(2026, time.December, 20))
 	l := newLedgerAppOn(t, testpg.New(t), clk)
 	p := l.cardPlan(t, "instalment-tv-0006", true)
-	reschedule := func(schedule *usecase.InstalmentSchedule) {
-		t.Helper()
-		if _, err := l.RescheduleInstalment.RescheduleInstalment(ctx, usecase.RescheduleInstalmentInput{PlanID: p.origin.ID, Schedule: *schedule}); err != nil {
-			t.Fatalf("RescheduleInstalment: %v", err)
-		}
+	reschedule := func(schedule *usecase.InstalmentSchedule, changePast bool) error {
+		_, err := l.RescheduleInstalment.RescheduleInstalment(ctx, usecase.RescheduleInstalmentInput{PlanID: p.origin.ID, Schedule: *schedule, ChangePast: changePast})
+		return err
 	}
 	l.wantOwed(t, "to begin with, with one period fallen due", p, "-1030", "-11000")
 
 	// A period that falls due after today is moved to before it: it is charged now,
-	// and 1,000 moves from unbilled to what the card holds.
+	// and 1,000 moves from unbilled to what the card holds. It makes a period that
+	// fell due that the plan did not have, which takes leave.
 	earlier := instalmentsOf(p.interest)
 	earlier.Periods[1].DueOn = dateOn(2026, time.December, 15)
-	reschedule(earlier)
+	if err := reschedule(earlier, false); !errors.Is(err, model.ErrPastPeriodsChanged) {
+		t.Fatalf("move a period to before today without leave: err = %v, want ErrPastPeriodsChanged", err)
+	}
+	l.wantOwed(t, "with the refused move", p, "-1030", "-11000")
+	if err := reschedule(earlier, true); err != nil {
+		t.Fatalf("move a period to before today with leave: %v", err)
+	}
 	l.wantOwed(t, "with a future period moved to before today", p, "-2030", "-10000")
 	if got, want := l.plans(t, false), []string{"12000 2000 10000 2027-02-05"}; !slices.Equal(got, want) {
 		t.Errorf("plans = %q, want %q", got, want)
 	}
 
 	// A period that fell due is moved to after today: it is not charged any more,
-	// and the 1,000 is unbilled again.
-	reschedule(instalmentsOf(p.interest))
+	// and the 1,000 is unbilled again. It drops a period that fell due, which takes
+	// leave too.
+	if err := reschedule(instalmentsOf(p.interest), false); !errors.Is(err, model.ErrPastPeriodsChanged) {
+		t.Fatalf("move a period that fell due to after today without leave: err = %v, want ErrPastPeriodsChanged", err)
+	}
+	if err := reschedule(instalmentsOf(p.interest), true); err != nil {
+		t.Fatalf("move a period that fell due to after today with leave: %v", err)
+	}
 	l.wantOwed(t, "with the period moved back to after today", p, "-1030", "-11000")
 
 	// A plan that is void is not rescheduled, and counts for nothing.
@@ -633,6 +697,51 @@ func TestReschedulingWhatItCannotDoLeavesThePlanAsItWasThroughTheRealUseCases(t 
 	after, err := l.GetInstalmentPlan.GetInstalmentPlan(ctx, p.origin.ID)
 	if err != nil || !reflect.DeepEqual(after, before) {
 		t.Errorf("plan after = %+v, %v, want it as it was: %+v", after, err, before)
+	}
+}
+
+// The category of the interest of a plan is archived after the plan was recorded: the
+// plan can still be rescheduled with it, as it can with no other archived category,
+// and with one that is in use. The category that is allowed is the one the periods of
+// the plan have now, so once the plan has moved to another, the one that is archived
+// is refused like any other.
+func TestReschedulingAPlanWhoseInterestCategoryIsArchivedKeepsThatCategoryThroughTheRealUseCases(t *testing.T) {
+	ctx := context.Background()
+	l := newLedgerApp(t)
+	p := l.cardPlan(t, "instalment-tv-0010", true)
+	category := func(name string, archive bool) uuid.UUID {
+		t.Helper()
+		c, err := l.CreateCategory.CreateCategory(ctx, usecase.CreateCategoryInput{Direction: "expense", Name: name})
+		if err != nil {
+			t.Fatalf("CreateCategory %s: %v", name, err)
+		}
+		if archive {
+			if _, err := l.ArchiveCat.ArchiveCategory(ctx, c.ID); err != nil {
+				t.Fatalf("ArchiveCategory %s: %v", name, err)
+			}
+		}
+		return c.ID
+	}
+	if _, err := l.ArchiveCat.ArchiveCategory(ctx, p.interest); err != nil {
+		t.Fatalf("ArchiveCategory of the interest: %v", err)
+	}
+	retired, fees := category("Retired", true), category("Fees", false)
+	reschedule := func(interest uuid.UUID) error {
+		_, err := l.RescheduleInstalment.RescheduleInstalment(ctx, usecase.RescheduleInstalmentInput{PlanID: p.origin.ID, Schedule: *instalmentsOf(interest)})
+		return err
+	}
+
+	if err := reschedule(p.interest); err != nil {
+		t.Errorf("with the archived category the periods have: %v, want it allowed", err)
+	}
+	if err := reschedule(retired); !errors.Is(err, model.ErrArchived) {
+		t.Errorf("with another archived category: err = %v, want ErrArchived", err)
+	}
+	if err := reschedule(fees); err != nil {
+		t.Errorf("with a category in use: %v, want it allowed", err)
+	}
+	if err := reschedule(p.interest); !errors.Is(err, model.ErrArchived) {
+		t.Errorf("with the archived category the periods no longer have: err = %v, want ErrArchived", err)
 	}
 }
 

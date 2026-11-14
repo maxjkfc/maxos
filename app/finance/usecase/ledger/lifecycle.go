@@ -60,7 +60,14 @@ func (s *Service) ConfirmTransactions(ctx context.Context, in usecase.ConfirmTra
 		}
 		out.Transactions = make([]usecase.Transaction, 0, len(ids))
 		for _, id := range ids {
-			out.Transactions = append(out.Transactions, toTransaction(stored[id]))
+			next, ok := stored[id]
+			if !ok {
+				// lockActed refuses what is not there once the locks are taken, so every id
+				// that gets here was confirmed. A transaction that was not is not to be
+				// answered with an empty one.
+				return fmt.Errorf("transaction %s was not confirmed: %w", id, model.ErrNotFound)
+			}
+			out.Transactions = append(out.Transactions, toTransaction(next))
 		}
 		return nil
 	})
@@ -177,6 +184,7 @@ func (s *Service) VoidTransaction(ctx context.Context, id uuid.UUID) (usecase.Tr
 func (s *Service) lockActed(ctx context.Context, ids []uuid.UUID) (acted []model.Transaction, problems []error, err error) {
 	asked := make([]model.Transaction, 0, len(ids))
 	origins := make(map[uuid.UUID]bool, len(ids))
+	covered := make(map[uuid.UUID][]uuid.UUID, len(ids))
 	for _, id := range ids {
 		txn, err := s.transactions.Get(ctx, id)
 		if errors.Is(err, model.ErrNotFound) {
@@ -200,7 +208,9 @@ func (s *Service) lockActed(ctx context.Context, ids []uuid.UUID) (acted []model
 		}
 		if origins[*txn.PlanID] {
 			// Covered by its origin, which is among the ids: it is acted on with the
-			// rest of the plan, once.
+			// rest of the plan, once. It is covered only if the plan has it once the
+			// origin is locked, which is looked at below.
+			covered[*txn.PlanID] = append(covered[*txn.PlanID], txn.ID)
 			continue
 		}
 		problems = append(problems, fmt.Errorf("%w: transaction %s is period %d of plan %s, whose origin is not among the ids: give the origin, which acts on all of the plan",
@@ -245,6 +255,15 @@ func (s *Service) lockActed(ctx context.Context, ids []uuid.UUID) (acted []model
 				return nil, nil, fmt.Errorf("get transaction %s: %w", id, err)
 			}
 			acted = append(acted, txn)
+		}
+		// A period that was asked for, as covered by its origin, has to be one of the
+		// periods the plan has now that its origin is locked: a reschedule that
+		// committed after the read that told it was one has put others in their place,
+		// and what was asked for is not there, as it is not for an id that never was.
+		for _, id := range covered[planID] {
+			if !slices.Contains(periods, id) {
+				problems = append(problems, fmt.Errorf("transaction %s: %w", id, model.ErrNotFound))
+			}
 		}
 	}
 	return acted, problems, nil

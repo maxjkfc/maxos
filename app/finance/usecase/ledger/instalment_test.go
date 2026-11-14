@@ -1207,3 +1207,204 @@ func TestRescheduleInstalmentToAnotherAmountSaysBothAmounts(t *testing.T) {
 		t.Fatalf("err = %v, want a mismatch of the 11999 the schedule adds up to and the 12000 of the plan", err)
 	}
 }
+
+// A period that is given beside its origin is covered by it only if the plan still
+// has it once the origin is locked. A reschedule that commits between the read that
+// told it was a period and the lock puts others in its place: what was asked for is
+// not there, and the call is refused as it is for an id that never was, and is not
+// answered with transactions that are empty.
+func TestConfirmTransactionsRefusesAPeriodThatARescheduleReplacedWhileItWaitedForTheOrigin(t *testing.T) {
+	e := newEnv(t)
+	origin := e.recordPlan("laptop-00000001")
+	old := ids(e.planOf(origin).Periods...)
+	rescheduled := false
+	e.txns.beforeLock = func(id uuid.UUID) {
+		if id != origin.ID || rescheduled {
+			return
+		}
+		rescheduled = true
+		if _, err := e.svc.RescheduleInstalment(context.Background(), e.rescheduleOf(origin.ID)); err != nil {
+			t.Errorf("RescheduleInstalment: %v", err)
+		}
+	}
+
+	out, err := e.svc.ConfirmTransactions(context.Background(), usecase.ConfirmTransactionsInput{IDs: []uuid.UUID{origin.ID, old[0], old[1], old[2]}})
+
+	if !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound: the periods that were asked for are gone", err)
+	}
+	for _, id := range old[:3] {
+		if !strings.Contains(err.Error(), id.String()) {
+			t.Errorf("err = %q, want it to name the period %s", err, id)
+		}
+	}
+	if len(out.Transactions) != 0 {
+		t.Errorf("answered with %d transactions, want none: the call is refused", len(out.Transactions))
+	}
+	for id, status := range e.statuses() {
+		if status != model.StatusDraft {
+			t.Errorf("transaction %s is %s, want everything left a draft: it is all or nothing", id, status)
+		}
+	}
+	if got := len(e.planOf(origin).Periods); got != 4 {
+		t.Errorf("%d periods, want the 4 that the reschedule left", got)
+	}
+}
+
+// payoff is the plan of instalmentExpense paid off when three periods of it have
+// fallen due, on the 20th of February 2027: the three as they were, with the 30 of
+// interest of the first, and the 9,000 that remains in one period on the 5th of
+// March with 270 of interest.
+func (e *env) payoff(planID uuid.UUID) usecase.RescheduleInstalmentInput {
+	e.clock.now = time.Date(2027, 2, 20, 8, 0, 0, 0, taipei)
+	schedule := e.schedule(4, "1000")
+	schedule.Periods[0].Interest = decPtr("30")
+	schedule.Periods[3].Principal = dec("9000")
+	schedule.Periods[3].Interest = decPtr("270")
+	return usecase.RescheduleInstalmentInput{PlanID: planID, Schedule: schedule}
+}
+
+func TestRescheduleInstalmentSendingWhatFellDueAsItWasNeedsNoLeaveWhateverTheStatusOfThePlan(t *testing.T) {
+	for _, confirm := range []bool{false, true} {
+		t.Run(map[bool]string{false: "a draft plan", true: "a confirmed plan"}[confirm], func(t *testing.T) {
+			e := newEnv(t)
+			origin := e.recordPlan("laptop-00000001")
+			if confirm {
+				e.confirm(origin)
+			}
+
+			got, err := e.svc.RescheduleInstalment(context.Background(), e.payoff(origin.ID))
+			if err != nil {
+				t.Fatalf("RescheduleInstalment: %v", err)
+			}
+
+			if len(got.Periods) != 4 {
+				t.Fatalf("%d periods, want the 3 that fell due and the 1 that remains", len(got.Periods))
+			}
+			wantLines(t, e.lines(got.Periods[0]), "instalment(bank) +1000 TWD", "account(bank) -1030 TWD", "expense(interest) +30 TWD, base +30")
+			wantLines(t, e.lines(got.Periods[3]), "instalment(bank) +9000 TWD", "account(bank) -9270 TWD", "expense(interest) +270 TWD, base +270")
+		})
+	}
+}
+
+func TestRescheduleInstalmentThatChangesWhatFellDueIsRefusedWithoutLeaveAndWritesNothing(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(e *env, in *usecase.RescheduleInstalmentInput)
+		seq    int
+		other  bool
+	}{
+		{"the interest of a period that fell due", func(_ *env, in *usecase.RescheduleInstalmentInput) {
+			in.Schedule.Periods[0].Interest = decPtr("3")
+		}, 1, false},
+		{"a period that fell due is dropped", func(_ *env, in *usecase.RescheduleInstalmentInput) {
+			in.Schedule.Periods = slices.Delete(in.Schedule.Periods, 2, 3)
+			in.Schedule.Periods[2].Principal = dec("10000")
+		}, 3, false},
+		{"the day of a period that fell due", func(_ *env, in *usecase.RescheduleInstalmentInput) {
+			in.Schedule.Periods[1].DueOn = in.Schedule.Periods[1].DueOn.AddDate(0, 0, 1)
+		}, 2, false},
+		{"the category of the interest that fell due", func(e *env, in *usecase.RescheduleInstalmentInput) {
+			in.Schedule.InterestCategoryID = &e.household.ID
+		}, 0, true},
+	}
+	for _, tt := range tests {
+		for _, confirm := range []bool{false, true} {
+			t.Run(tt.name+map[bool]string{false: ", a draft plan", true: ", a confirmed plan"}[confirm], func(t *testing.T) {
+				e := newEnv(t)
+				origin := e.recordPlan("laptop-00000001")
+				if confirm {
+					e.confirm(origin)
+				}
+				in := e.payoff(origin.ID)
+				tt.change(e, &in)
+				before := e.statuses()
+				stored, deleted, inserted := len(e.txns.byID), len(e.txns.deleted), e.txns.inserts
+
+				_, err := e.svc.RescheduleInstalment(context.Background(), in)
+
+				var changed *model.PastPeriodsChangedError
+				if !errors.Is(err, model.ErrPastPeriodsChanged) || !errors.As(err, &changed) {
+					t.Fatalf("err = %v, want a *PastPeriodsChangedError that is an ErrPastPeriodsChanged", err)
+				}
+				if tt.seq != 0 && (len(changed.Differences) == 0 || changed.Differences[0].Seq != tt.seq) {
+					t.Errorf("differences = %+v, want period %d first", changed.Differences, tt.seq)
+				}
+				if changed.InterestCategoryChanged != tt.other {
+					t.Errorf("category changed = %v, want %v", changed.InterestCategoryChanged, tt.other)
+				}
+				if len(e.txns.byID) != stored || len(e.txns.deleted) != deleted || e.txns.inserts != inserted || !reflect.DeepEqual(e.statuses(), before) {
+					t.Errorf("%d stored, %d deleted, %d inserted, want what there was: %d, %d, %d: nothing is written when it is refused",
+						len(e.txns.byID), len(e.txns.deleted), e.txns.inserts, stored, deleted, inserted)
+				}
+
+				// With leave, it is what was asked.
+				in.ChangePast = true
+				if _, err := e.svc.RescheduleInstalment(context.Background(), in); err != nil {
+					t.Errorf("RescheduleInstalment with ChangePast: %v, want it to change what fell due", err)
+				}
+			})
+		}
+	}
+}
+
+// Today is the day the clock says: a period that falls due on it is free, and on the
+// day after it is past. Each has a plan of its own, as a reschedule that is allowed
+// is the schedule of the plan from then on.
+func TestRescheduleInstalmentTakesTodayFromTheClock(t *testing.T) {
+	tests := []struct {
+		name    string
+		now     time.Time
+		refused bool
+	}{
+		{"the day the period falls due", time.Date(2027, 2, 5, 23, 59, 0, 0, taipei), false},
+		{"the day after", time.Date(2027, 2, 6, 0, 1, 0, 0, taipei), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			origin := e.recordPlan("laptop-00000001")
+			in := e.payoff(origin.ID)
+			// The third period falls due on the 5th of February, and gives some of its
+			// principal to the fourth.
+			in.Schedule.Periods[2].Principal, in.Schedule.Periods[3].Principal = dec("2000"), dec("8000")
+			e.clock.now = tt.now
+
+			_, err := e.svc.RescheduleInstalment(context.Background(), in)
+
+			if tt.refused {
+				if !errors.Is(err, model.ErrPastPeriodsChanged) {
+					t.Fatalf("err = %v, want ErrPastPeriodsChanged: the period fell due yesterday", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want the period that falls due today to be free", err)
+			}
+		})
+	}
+}
+
+// The category of the interest that the periods of a plan have is allowed when it
+// has been archived since, as no other is, and any other has to be in use.
+func TestRescheduleInstalmentAllowsTheArchivedCategoryThePlanUses(t *testing.T) {
+	e := newEnv(t)
+	origin := e.recordPlan("laptop-00000001")
+	other := e.categories.add(model.DirectionExpense, "other")
+	archivedOther := e.categories.add(model.DirectionExpense, "archived")
+	e.categories.archive(archivedOther.ID)
+	e.categories.archive(e.interest.ID)
+
+	if _, err := e.svc.RescheduleInstalment(context.Background(), e.rescheduleOf(origin.ID)); err != nil {
+		t.Errorf("with the archived category the periods use: %v, want it allowed", err)
+	}
+	in := e.rescheduleOf(origin.ID)
+	in.Schedule.InterestCategoryID = &archivedOther.ID
+	if _, err := e.svc.RescheduleInstalment(context.Background(), in); !errors.Is(err, model.ErrArchived) {
+		t.Errorf("with another archived category: err = %v, want ErrArchived", err)
+	}
+	in.Schedule.InterestCategoryID = &other.ID
+	if _, err := e.svc.RescheduleInstalment(context.Background(), in); err != nil {
+		t.Errorf("with another category in use: %v, want it allowed", err)
+	}
+}

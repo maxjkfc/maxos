@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -80,14 +81,17 @@ func PeriodIdempotencyKey(planID uuid.UUID, seq int) string {
 
 // check checks the schedule of a plan that splits amount, an amount of the
 // instrument, from the day of its origin. base is the base currency, which the
-// base amounts of interest are checked against.
-func (s InstalmentSchedule) check(originDay time.Time, instrument, base Instrument, amount decimal.Decimal) error {
+// base amounts of interest are checked against. inUse is the category the interest
+// of the periods a plan has already is booked to, for a plan that is rescheduled
+// and not nil: it is allowed though it has been archived since, which no other
+// category is; nil for a plan that is not made yet.
+func (s InstalmentSchedule) check(originDay time.Time, instrument, base Instrument, amount decimal.Decimal, inUse *uuid.UUID) error {
 	if len(s.Periods) == 0 {
 		return ErrNoPeriods
 	}
 	if c := s.InterestCategory; c != nil {
 		switch {
-		case c.IsArchived():
+		case c.IsArchived() && (inUse == nil || *inUse != c.ID):
 			return fmt.Errorf("interest category %q: %w", c.Name, ErrArchived)
 		case c.IsSystem():
 			return fmt.Errorf("interest category %q: %w", c.Name, ErrSystemCategory)
@@ -200,7 +204,7 @@ func (s InstalmentSchedule) periods(h Header, accountID uuid.UUID, instrument, b
 // postings and the header h (which is normalized), of the account, splitting
 // amount of the instrument as the schedule says.
 func newPlan(kind Kind, h Header, postings []Posting, accountID uuid.UUID, instrument, base Instrument, amount decimal.Decimal, s InstalmentSchedule) (InstalmentPlan, error) {
-	if err := s.check(h.OccurredOn, instrument, base, amount); err != nil {
+	if err := s.check(h.OccurredOn, instrument, base, amount, nil); err != nil {
 		return InstalmentPlan{}, err
 	}
 	origin, err := newPlanTransaction(kind, h, &planRef{id: h.ID, seq: 0}, postings)
@@ -233,6 +237,126 @@ func (t Transaction) instalmentPosting() (Posting, bool) {
 	return Posting{}, false
 }
 
+// scheduled is a period of a plan as its transaction says it: the day it falls due,
+// its principal, and, when it has interest, the interest, the interest in the base
+// currency and the category it is booked to.
+type scheduled struct {
+	dueOn                  time.Time
+	principal              decimal.Decimal
+	interest, interestBase *decimal.Decimal
+	category               *uuid.UUID
+}
+
+func scheduledOf(t Transaction) scheduled {
+	out := scheduled{dueOn: DateOf(t.OccurredOn)}
+	for _, p := range t.Postings {
+		switch p.Book {
+		case BookInstalment:
+			out.principal = p.Quantity
+		case BookExpense:
+			interest := p.Quantity
+			out.interest, out.interestBase, out.category = &interest, clonePtr(p.BaseAmount), clonePtr(p.CategoryID)
+		}
+	}
+	return out
+}
+
+// interestCategory returns the category the interest of the periods of the plan is
+// booked to, and nil for a plan whose periods have none.
+func (p InstalmentPlan) interestCategory() *uuid.UUID {
+	for _, period := range p.Periods {
+		if s := scheduledOf(period); s.category != nil {
+			return s.category
+		}
+	}
+	return nil
+}
+
+// RescheduleParams is what InstalmentPlan.Reschedule takes besides the plan.
+type RescheduleParams struct {
+	// Instrument is what the plan is counted in, and BaseCurrency the base currency.
+	Instrument, BaseCurrency Instrument
+	// Schedule is the new schedule, which replaces the old as a whole.
+	Schedule InstalmentSchedule
+	// Today is the day it is. The periods of the plan that fall due before it are
+	// its past; one that falls due today is not.
+	Today time.Time
+	// ChangePast lets the new schedule be other than the old in the past: without
+	// it, the periods of the new schedule that fall due before today must be the
+	// periods of the plan that fell due before it, one for one, each with the day,
+	// principal, interest and interest in the base currency it had, and the interest
+	// must be booked to the category it was; or it is a *PastPeriodsChangedError.
+	ChangePast bool
+}
+
+// checkPast returns a *PastPeriodsChangedError unless the new schedule keeps what
+// fell due before today: the periods of the schedule that fall due before it are
+// those of the plan that fell due before it, in the same order, the same in day,
+// principal, interest and interest in the base currency, and, when any of them has
+// interest, the category of the interest is the same.
+func (p InstalmentPlan) checkPast(r RescheduleParams) error {
+	today := DateOf(r.Today)
+	var old []scheduled
+	for _, period := range p.Periods {
+		if s := scheduledOf(period); s.dueOn.Before(today) {
+			old = append(old, s)
+		}
+	}
+	var next []InstalmentPeriod
+	for _, period := range r.Schedule.Periods {
+		if DateOf(period.DueOn).Before(today) {
+			next = append(next, period)
+		}
+	}
+
+	err := &PastPeriodsChangedError{Today: today}
+	for i := range max(len(old), len(next)) {
+		switch {
+		case i >= len(next):
+			err.Differences = append(err.Differences, PastPeriodDifference{Seq: i + 1, DueOn: old[i].dueOn, Change: "dropped"})
+		case i >= len(old):
+			err.Differences = append(err.Differences, PastPeriodDifference{Seq: i + 1, DueOn: DateOf(next[i].DueOn), Change: "added"})
+		default:
+			if changes := changesOf(old[i], next[i], r.Instrument, r.BaseCurrency); len(changes) > 0 {
+				err.Differences = append(err.Differences,
+					PastPeriodDifference{Seq: i + 1, DueOn: old[i].dueOn, Change: "changed: " + strings.Join(changes, ", ")})
+			}
+		}
+	}
+	for _, s := range old {
+		if s.interest != nil {
+			err.InterestCategoryChanged = r.Schedule.InterestCategory == nil || r.Schedule.InterestCategory.ID != *s.category
+			break
+		}
+	}
+	if len(err.Differences) == 0 && !err.InterestCategoryChanged {
+		return nil
+	}
+	return err
+}
+
+// changesOf says what of a period the new schedule has otherwise than the plan: its
+// day, principal, interest, and the interest in the base currency.
+func changesOf(old scheduled, next InstalmentPeriod, instrument, base Instrument) []string {
+	var changes []string
+	if !DateOf(next.DueOn).Equal(old.dueOn) {
+		changes = append(changes, "day")
+	}
+	if !next.Principal.Equal(old.principal) {
+		changes = append(changes, "principal")
+	}
+	switch {
+	case (old.interest == nil) != (next.Interest == nil), old.interest != nil && !old.interest.Equal(*next.Interest):
+		changes = append(changes, "interest")
+	case old.interest != nil:
+		// The schedule was checked, so its base amount is there to be worked out.
+		if got, err := baseAmountOf(instrument, base, *next.Interest, next.InterestBaseAmount); err != nil || old.interestBase == nil || !got.Equal(*old.interestBase) {
+			changes = append(changes, "interest in the base currency")
+		}
+	}
+	return changes
+}
+
 // Reschedule returns the plan with a new schedule: the origin as it is, and a
 // transaction for each period of the schedule in the place of those the plan had,
 // which are not in what is returned. Each of the new periods is a draft made as the
@@ -246,10 +370,13 @@ func (t Transaction) instalmentPosting() (Posting, bool) {
 // the schedule must add up to the principal of the plan, which the instalment
 // posting of the origin holds, or it is a *PrincipalMismatchError. To change it is
 // to change the purchase, which is voided and recorded again. The schedule is
-// checked as it is when a plan is recorded, from the day of the origin. A plan that
-// is void is ErrPlanVoid. instrument is what the plan is counted in, and base the
-// base currency.
-func (p InstalmentPlan) Reschedule(instrument, base Instrument, s InstalmentSchedule) (InstalmentPlan, error) {
+// checked as it is when a plan is recorded, from the day of the origin, except
+// that the category of the interest may be one that is archived since, when it is
+// the one the periods the plan has are booked to. The schedule replaces the old as
+// a whole, so the periods that fell due are in it too, as they were, unless
+// ChangePast gives leave to change them (see RescheduleParams). A plan that is void
+// is ErrPlanVoid.
+func (p InstalmentPlan) Reschedule(r RescheduleParams) (InstalmentPlan, error) {
 	origin := p.Origin
 	if origin.Status == StatusVoid {
 		return InstalmentPlan{}, ErrPlanVoid
@@ -263,18 +390,23 @@ func (p InstalmentPlan) Reschedule(instrument, base Instrument, s InstalmentSche
 	if !ok || posting.AccountID == nil {
 		return InstalmentPlan{}, fmt.Errorf("%w: the origin has no instalment posting of an account", ErrMalformedPlan)
 	}
-	if posting.InstrumentID != instrument.ID {
-		return InstalmentPlan{}, fmt.Errorf("%w: the plan is counted in instrument %s, not %s", ErrMalformedPlan, posting.InstrumentID, instrument.ID)
+	if posting.InstrumentID != r.Instrument.ID {
+		return InstalmentPlan{}, fmt.Errorf("%w: the plan is counted in instrument %s, not %s", ErrMalformedPlan, posting.InstrumentID, r.Instrument.ID)
 	}
 
 	h := Header{
 		ID: origin.ID, IdempotencyKey: origin.IdempotencyKey, OccurredOn: origin.OccurredOn, OccurredAt: origin.OccurredAt,
 		Description: origin.Description, Merchant: origin.Merchant, ProjectID: origin.ProjectID, AreaID: origin.AreaID, TagIDs: origin.TagIDs,
 	}
-	if err := s.check(DateOf(origin.OccurredOn), instrument, base, posting.Quantity.Neg()); err != nil {
+	if err := r.Schedule.check(DateOf(origin.OccurredOn), r.Instrument, r.BaseCurrency, posting.Quantity.Neg(), p.interestCategory()); err != nil {
 		return InstalmentPlan{}, err
 	}
-	periods, err := s.periods(h, *posting.AccountID, instrument, base)
+	if !r.ChangePast {
+		if err := p.checkPast(r); err != nil {
+			return InstalmentPlan{}, err
+		}
+	}
+	periods, err := r.Schedule.periods(h, *posting.AccountID, r.Instrument, r.BaseCurrency)
 	if err != nil {
 		return InstalmentPlan{}, err
 	}

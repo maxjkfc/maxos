@@ -163,7 +163,9 @@ func (s *Service) RescheduleInstalment(ctx context.Context, in usecase.Reschedul
 		if err != nil {
 			return err
 		}
-		next, err := plan.Reschedule(instrument, base, schedule)
+		next, err := plan.Reschedule(model.RescheduleParams{
+			Instrument: instrument, BaseCurrency: base, Schedule: schedule, Today: s.today(), ChangePast: in.ChangePast,
+		})
 		if err != nil {
 			return err
 		}

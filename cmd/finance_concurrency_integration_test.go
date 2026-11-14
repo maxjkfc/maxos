@@ -92,20 +92,76 @@ type overlapped struct {
 	errs      []error
 }
 
-// reconcileTogether makes a call of Reconcile for each key, all of them for an
-// account that holds 20 less than the ledger says, and makes them overlap exactly,
-// not by luck. The first call is held right after it has counted the drafts of
-// the account, which is the point where a reconciliation without a lock has
-// learnt what the others must not be allowed to. The others are started then, and
-// the first call is let go only when each of them has either finished (nothing
-// kept it from going all the way) or is waiting for a lock (the first call keeps
-// it from going on). The test finds out which by asking PostgreSQL who is waiting
-// for a lock, so it does not matter how long anything takes.
+// heldCalls runs n calls so that they overlap exactly, not by luck. Call 0 is held
+// by the tracer right after a statement that begins with the prefix of the tracer
+// has been read to its end. The others are started then, and call 0 is let go only
+// when each of them has either finished (nothing kept it from going all the way) or
+// is waiting for a lock (call 0 keeps it from going on). The test finds out which by
+// asking PostgreSQL, through direct, a pool that the tracer is not on, who is
+// waiting for a lock, so it does not matter how long anything takes.
 //
-// It does not wait for ever either. If a call is neither finished nor waiting
-// after pollLimit, the test fails and names the calls, and lets the first one go
-// on. Every call has a deadline of its own, so that a call that is stuck for
-// another reason ends with an error and does not hang the test.
+// It does not wait for ever either. If a call is neither finished nor waiting after
+// pollLimit, the test fails and names the calls, with name, and lets call 0 go on.
+// Every call has a deadline of its own, pollLimit, so that a call that is stuck for
+// another reason ends with an error and does not hang the test. run makes call i
+// with the context it is given, which carries the number of the call, and returns
+// when the call has finished.
+func heldCalls(t *testing.T, tracer *callTracer, direct *pgxpool.Pool, n int, name func(i int) string, run func(ctx context.Context, i int)) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*pollLimit)
+	defer cancel()
+	call := func(i int) {
+		callCtx, cancelCall := context.WithTimeout(context.WithValue(ctx, callKey{}, i), pollLimit)
+		defer cancelCall()
+		run(callCtx, i)
+	}
+	var (
+		others   sync.WaitGroup
+		finished = make([]atomic.Bool, n)
+	)
+	tracer.hook = func() {
+		for i := 1; i < n; i++ {
+			others.Add(1)
+			go func() {
+				defer others.Done()
+				call(i)
+				finished[i].Store(true)
+			}()
+		}
+		deadline := time.Now().Add(pollLimit)
+		for {
+			waiting, err := tracer.waiting(ctx, direct)
+			if err != nil {
+				t.Errorf("ask PostgreSQL which calls are waiting for a lock: %v", err)
+				return
+			}
+			var neither []string
+			for i := 1; i < n; i++ {
+				if !finished[i].Load() && !waiting[i] {
+					neither = append(neither, name(i))
+				}
+			}
+			if len(neither) == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("%s after the first call was held, calls %s are neither finished nor waiting for a lock",
+					pollLimit, strings.Join(neither, ", "))
+				return
+			}
+			time.Sleep(pollEvery)
+		}
+	}
+
+	call(0)
+	others.Wait()
+}
+
+// reconcileTogether makes a call of Reconcile for each key, all of them for an
+// account that holds 20 less than the ledger says, and makes them overlap exactly
+// (see heldCalls). The first call is held right after it has counted the drafts of
+// the account, which is the point where a reconciliation without a lock has learnt
+// what the others must not be allowed to.
 func reconcileTogether(t *testing.T, keys ...string) overlapped {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*pollLimit)
@@ -138,51 +194,11 @@ func reconcileTogether(t *testing.T, keys ...string) overlapped {
 	l.confirm(t, opening.Transaction)
 
 	got := overlapped{l: l, accountID: account.ID, outs: make([]usecase.ReconcileOutput, calls), errs: make([]error, calls)}
-	reconcile := func(i int) {
-		got.outs[i], got.errs[i] = l.Reconcile.Reconcile(context.WithValue(ctx, callKey{}, i), usecase.ReconcileInput{
+	heldCalls(t, tracer, direct, calls, func(i int) string { return fmt.Sprintf("%d (%s)", i, keys[i]) }, func(ctx context.Context, i int) {
+		got.outs[i], got.errs[i] = l.Reconcile.Reconcile(ctx, usecase.ReconcileInput{
 			RecordDetails: l.details(keys[i]), AccountID: account.ID, InstrumentID: twd, ActualBalance: dec("1980"),
 		})
-	}
-	var (
-		others   sync.WaitGroup
-		finished = make([]atomic.Bool, calls)
-	)
-	tracer.hook = func() {
-		for i := 1; i < calls; i++ {
-			others.Add(1)
-			go func() {
-				defer others.Done()
-				reconcile(i)
-				finished[i].Store(true)
-			}()
-		}
-		deadline := time.Now().Add(pollLimit)
-		for {
-			waiting, err := tracer.waiting(ctx, direct)
-			if err != nil {
-				t.Errorf("ask PostgreSQL which calls are waiting for a lock: %v", err)
-				return
-			}
-			var neither []string
-			for i := 1; i < calls; i++ {
-				if !finished[i].Load() && !waiting[i] {
-					neither = append(neither, fmt.Sprintf("%d (%s)", i, keys[i]))
-				}
-			}
-			if len(neither) == 0 {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Errorf("%s after the first call was held, calls %s are neither finished nor waiting for a lock",
-					pollLimit, strings.Join(neither, ", "))
-				return
-			}
-			time.Sleep(pollEvery)
-		}
-	}
-
-	reconcile(0)
-	others.Wait()
+	})
 	return got
 }
 

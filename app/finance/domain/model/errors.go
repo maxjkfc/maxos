@@ -3,6 +3,8 @@ package model
 import (
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -258,6 +260,12 @@ var (
 	// ErrPlanVoid is returned for rescheduling an instalment plan that is void: it
 	// counts for nothing any more, so there is no schedule of it left to change.
 	ErrPlanVoid = errors.New("the instalment plan is void")
+
+	// ErrPastPeriodsChanged is returned for rescheduling an instalment plan so that
+	// the periods that fell due before today are not as they were, when the
+	// reschedule was not given leave to change them. It comes as a
+	// *PastPeriodsChangedError, which says which.
+	ErrPastPeriodsChanged = errors.New("the new schedule changes periods that have fallen due")
 )
 
 // PendingDraftsError is what reconciling an account returns while drafts that
@@ -324,3 +332,46 @@ func (e *PrincipalMismatchError) Error() string {
 }
 
 func (e *PrincipalMismatchError) Unwrap() error { return ErrPrincipalMismatch }
+
+// PastPeriodDifference is one way the new schedule of an instalment plan is not the
+// old one in the periods that fell due before today.
+type PastPeriodDifference struct {
+	// Seq is the position of the period in the old schedule, for a period that the
+	// new schedule drops or changes, and the position the new schedule gives it for
+	// one that it adds.
+	Seq int
+	// DueOn is the day the period fell due in the old schedule, or, for one that is
+	// added, the day the new schedule gives it.
+	DueOn time.Time
+	// Change says what is different: "dropped", "added", or "changed" and what, out
+	// of "day", "principal", "interest" and "interest in the base currency".
+	Change string
+}
+
+// PastPeriodsChangedError is returned for rescheduling an instalment plan so that
+// the periods that fell due before today are not as they were, when the reschedule
+// was not given leave to change them. It is an ErrPastPeriodsChanged.
+type PastPeriodsChangedError struct {
+	// Today is the day the periods fell due before.
+	Today time.Time
+	// Differences are the periods that are not as they were, in the order of their
+	// positions.
+	Differences []PastPeriodDifference
+	// InterestCategoryChanged is that the interest of the periods that fell due is
+	// booked to another category in the new schedule than the one it was booked to.
+	InterestCategoryChanged bool
+}
+
+func (e *PastPeriodsChangedError) Error() string {
+	parts := make([]string, 0, len(e.Differences)+1)
+	for _, d := range e.Differences {
+		parts = append(parts, fmt.Sprintf("period %d (%s) %s", d.Seq, d.DueOn.Format(time.DateOnly), d.Change))
+	}
+	if e.InterestCategoryChanged {
+		parts = append(parts, "the category of the interest")
+	}
+	return fmt.Sprintf("%v before %s: %s; what has fallen due is changed only with ChangePast",
+		ErrPastPeriodsChanged, e.Today.Format(time.DateOnly), strings.Join(parts, "; "))
+}
+
+func (e *PastPeriodsChangedError) Unwrap() error { return ErrPastPeriodsChanged }
