@@ -36,7 +36,6 @@ type Service struct {
 	defaults     catalogusecase.ResolveProjectDefaults
 	projectAreas catalogusecase.ResolveProjectArea
 	listParties  catalogusecase.ListParties
-	getParty     catalogusecase.GetParty
 }
 
 var (
@@ -280,6 +279,29 @@ func (s *Service) verifyParties(ctx context.Context, ids ...uuid.UUID) error {
 	}
 	if err := s.references.VerifyReferences(ctx, catalogusecase.VerifyReferencesInput{PartyIDs: ids}); err != nil {
 		return fmt.Errorf("check the parties: %w", err)
+	}
+	return nil
+}
+
+// requireParty checks with the catalog that the party exists. It is the one check
+// of a party that lets an archived one through: what an archived party owes still
+// counts. A party the catalog does not know is model.ErrNotFound, as it is when a
+// dealing names a party that the catalog does not list; the catalog's own
+// *ReferenceError is not what the callers of the ledger can be expected to match.
+// Any other failure of the catalog is returned as it is, with what was being done.
+func (s *Service) requireParty(ctx context.Context, id uuid.UUID) error {
+	err := s.references.VerifyReferences(ctx, catalogusecase.VerifyReferencesInput{PartyIDs: []uuid.UUID{id}})
+	var refErr *catalogusecase.ReferenceError
+	if !errors.As(err, &refErr) {
+		if err != nil {
+			return fmt.Errorf("check party %s: %w", id, err)
+		}
+		return nil
+	}
+	for _, problem := range refErr.Problems {
+		if !problem.Archived {
+			return fmt.Errorf("party %s: %w", id, model.ErrNotFound)
+		}
 	}
 	return nil
 }

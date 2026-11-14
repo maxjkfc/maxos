@@ -32,6 +32,7 @@ type ledgerApp struct {
 	fx.In
 
 	CreateParty    catalogusecase.CreateParty
+	ArchiveParty   catalogusecase.ArchiveParty
 	CreateAccount  usecase.CreateAccount
 	CreateCategory usecase.CreateCategory
 	ListCategories usecase.ListCategories
@@ -203,6 +204,21 @@ func TestSplitsDealingsRewardsAndReconciliationsThroughTheRealUseCases(t *testin
 	}
 	if got, want := l.dealings(t, names, &bob), []string{"Bob 300"}; !slices.Equal(got, want) {
 		t.Errorf("dealings of Bob = %q, want %q", got, want)
+	}
+
+	// A party the catalog does not have is not one that owes nothing: it is not
+	// found, in the terms of the ledger, which the catalog's own error is not. One
+	// that is archived still shows what it owes, which for this one is nothing.
+	stranger := uuid.New()
+	if _, err := l.GetDealings.GetDealings(ctx, usecase.GetDealingsInput{PartyID: &stranger}); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("dealings of a party the catalog does not have: err = %v, want ErrNotFound", err)
+	}
+	old := party("Old")
+	if _, err := l.ArchiveParty.ArchiveParty(ctx, old); err != nil {
+		t.Fatalf("ArchiveParty: %v", err)
+	}
+	if got := l.dealings(t, names, &old); len(got) != 0 {
+		t.Errorf("dealings of an archived party with none = %q, want none", got)
 	}
 	for _, tt := range []struct {
 		name    string

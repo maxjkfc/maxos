@@ -24,10 +24,6 @@ type txKey struct{}
 // database transaction: the use cases must make all their writes in one.
 var errNotInTx = errors.New("the write was made outside a database transaction")
 
-// errNoSuchParty is what the fake catalog returns for a party it does not have:
-// an error of the catalog, which the ledger cannot tell from any other.
-var errNoSuchParty = errors.New("the catalog has no such party")
-
 func inTx(ctx context.Context) bool {
 	_, ok := ctx.Value(txKey{}).(struct{})
 	return ok
@@ -379,8 +375,7 @@ func (f *fakeCategories) Get(_ context.Context, id uuid.UUID) (model.Category, e
 // catalogusecase.ResolveProjectArea, it follows the rule of the port: the default
 // area it was given, unless that is archived, and a *ReferenceError for a project
 // that is not found or archived. As a catalogusecase.ListParties it lists its
-// parties by name, as the catalog does. As a catalogusecase.GetParty it returns a
-// party, archived or not, and errNoSuchParty for one it does not have.
+// parties by name, as the catalog does.
 type fakeReferences struct {
 	// projects, areas, parties and tags map each id the catalog has to whether it
 	// is archived.
@@ -390,6 +385,8 @@ type fakeReferences struct {
 	// defaultAreas maps the projects that have a default area to it.
 	defaultAreas map[uuid.UUID]uuid.UUID
 	calls        []catalogusecase.VerifyReferencesInput
+	// verifyErr, when set, is what VerifyReferences returns.
+	verifyErr error
 	// resolveAreaErr, when set, is what ResolveProjectArea returns.
 	resolveAreaErr error
 	// listedWith is what ListParties was last asked for, and listPartiesCalls how
@@ -397,8 +394,6 @@ type fakeReferences struct {
 	listedWith       catalogusecase.ListPartiesInput
 	listPartiesCalls int
 	listPartiesErr   error
-	// gotParties lists the ids GetParty was asked for, in order.
-	gotParties []uuid.UUID
 }
 
 func newFakeReferences() *fakeReferences {
@@ -456,14 +451,6 @@ func (f *fakeReferences) ListParties(_ context.Context, in catalogusecase.ListPa
 	return out, nil
 }
 
-func (f *fakeReferences) GetParty(_ context.Context, id uuid.UUID) (catalogusecase.Party, error) {
-	f.gotParties = append(f.gotParties, id)
-	if _, ok := f.parties[id]; !ok {
-		return catalogusecase.Party{}, errNoSuchParty
-	}
-	return catalogusecase.Party{ID: id, Name: f.partyNames[id]}, nil
-}
-
 // setDefaultArea makes area the default area of project.
 func (f *fakeReferences) setDefaultArea(project, area uuid.UUID) {
 	f.defaultAreas[project] = area
@@ -471,6 +458,9 @@ func (f *fakeReferences) setDefaultArea(project, area uuid.UUID) {
 
 func (f *fakeReferences) VerifyReferences(_ context.Context, in catalogusecase.VerifyReferencesInput) error {
 	f.calls = append(f.calls, in)
+	if f.verifyErr != nil {
+		return f.verifyErr
+	}
 	var problems []catalogusecase.ReferenceProblem
 	check := func(kind catalogusecase.ReferenceKind, known map[uuid.UUID]bool, ids []uuid.UUID) {
 		for _, id := range ids {

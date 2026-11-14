@@ -112,12 +112,12 @@ func (s *Service) GetBalances(ctx context.Context, in usecase.GetBalancesInput) 
 //
 // For one party (PartyID) there is nothing to put in order, so the catalog is
 // asked about that party and not for the list of all of them. A party it does
-// not know is an error, whatever the repo holds; an archived party is not one:
-// what it owes still counts.
+// not know is model.ErrNotFound, whatever the repo holds, and the repo is not
+// asked; an archived party is not one: what it owes still counts.
 func (s *Service) GetDealings(ctx context.Context, in usecase.GetDealingsInput) (usecase.GetDealingsOutput, error) {
 	if in.PartyID != nil {
-		if _, err := s.getParty.GetParty(ctx, *in.PartyID); err != nil {
-			return usecase.GetDealingsOutput{}, fmt.Errorf("party %s: %w", *in.PartyID, err)
+		if err := s.requireParty(ctx, *in.PartyID); err != nil {
+			return usecase.GetDealingsOutput{}, err
 		}
 	}
 	dealings, err := s.transactions.Dealings(ctx, in.PartyID)

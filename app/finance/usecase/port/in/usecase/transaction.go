@@ -479,7 +479,10 @@ type GetDealings interface {
 // GetDealingsInput says whose dealings to return.
 type GetDealingsInput struct {
 	// PartyID limits the dealings to that party; nil returns every party's. A party
-	// with no confirmed dealing postings has none.
+	// with no confirmed dealing postings has none. The party must be one the
+	// catalog has: for one it does not, the error is ErrNotFound (with the id of the
+	// party), not an empty result. An archived party is one the catalog has: what it
+	// owes still counts.
 	PartyID *uuid.UUID
 }
 

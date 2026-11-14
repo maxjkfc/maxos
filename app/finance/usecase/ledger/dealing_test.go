@@ -590,8 +590,8 @@ func TestGetDealingsOfOnePartyAsksTheCatalogAboutThatPartyAndKeepsTheOrderOfTheR
 	if e.txns.dealingsFor == nil || *e.txns.dealingsFor != amy {
 		t.Errorf("the repo was asked for %v, want the party", e.txns.dealingsFor)
 	}
-	if !slices.Equal(e.refs.gotParties, []uuid.UUID{amy}) || e.refs.listPartiesCalls != 0 {
-		t.Errorf("the catalog was asked for the parties %v and %d times for the list, want the party once and no list", e.refs.gotParties, e.refs.listPartiesCalls)
+	if len(e.refs.calls) != 1 || !slices.Equal(e.refs.calls[0].PartyIDs, []uuid.UUID{amy}) || e.refs.listPartiesCalls != 0 {
+		t.Errorf("the catalog was asked to verify %+v and for the list %d times, want the party alone and no list", e.refs.calls, e.refs.listPartiesCalls)
 	}
 	if len(out.Dealings) != 2 || out.Dealings[0].InstrumentID != e.btc.ID || out.Dealings[1].InstrumentID != e.twd.ID {
 		t.Errorf("dealings = %+v, want the two of the party, in the order of the repo", out.Dealings)
@@ -613,15 +613,19 @@ func TestGetDealingsOfOnePartyThatOwesNothingIsEmpty(t *testing.T) {
 }
 
 // A party the catalog does not know has no dealings to show: asking for it is a
-// mistake, which is not the same as an answer of none.
-func TestGetDealingsOfAPartyTheCatalogDoesNotKnowIsRefusedBeforeTheRepoIsAsked(t *testing.T) {
+// mistake, which is not the same as an answer of none. The error is the one the
+// dealings of all the parties give for a party they cannot place, ErrNotFound of
+// the finance domain, and not what the catalog says, which the callers of the
+// ledger cannot match. The catalog here says what the real one does: a
+// *ReferenceError that is not for an archived entry.
+func TestGetDealingsOfAPartyTheCatalogDoesNotKnowIsNotFoundAndTheRepoIsNotAsked(t *testing.T) {
 	e := newEnv(t)
 	stranger := uuid.Must(uuid.NewV7())
 
 	_, err := e.svc.GetDealings(context.Background(), usecase.GetDealingsInput{PartyID: &stranger})
 
-	if !errors.Is(err, errNoSuchParty) || !strings.Contains(err.Error(), stranger.String()) {
-		t.Fatalf("err = %v, want the error of the catalog, naming the party", err)
+	if !errors.Is(err, model.ErrNotFound) || !strings.Contains(err.Error(), stranger.String()) {
+		t.Fatalf("err = %v, want ErrNotFound naming the party", err)
 	}
 	if e.txns.dealingsFor != nil {
 		t.Errorf("the repo was asked for %v, want it not to be asked", e.txns.dealingsFor)
@@ -646,6 +650,22 @@ func TestGetDealingsReportsWhatItCannotRead(t *testing.T) {
 
 		if _, err := e.svc.GetDealings(context.Background(), usecase.GetDealingsInput{}); !errors.Is(err, boom) {
 			t.Fatalf("err = %v, want the failure of the catalog", err)
+		}
+	})
+	t.Run("the catalog cannot check the party", func(t *testing.T) {
+		e := newEnv(t)
+		party := e.refs.addParty("Amy", false)
+		e.refs.verifyErr = boom
+
+		_, err := e.svc.GetDealings(context.Background(), usecase.GetDealingsInput{PartyID: &party})
+
+		// The catalog failed and says nothing of the party: that is not a party that
+		// is not found.
+		if !errors.Is(err, boom) || errors.Is(err, model.ErrNotFound) {
+			t.Fatalf("err = %v, want the failure of the catalog, which is not ErrNotFound", err)
+		}
+		if e.txns.dealingsFor != nil {
+			t.Errorf("the repo was asked for %v, want it not to be asked", e.txns.dealingsFor)
 		}
 	})
 	t.Run("a dealing of a party the catalog does not know", func(t *testing.T) {
