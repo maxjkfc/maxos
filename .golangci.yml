@@ -1,7 +1,8 @@
 # golangci-lint v2: the default linters (errcheck, govet, ineffassign,
 # staticcheck, unused) plus depguard, which enforces the dependency rules of
 # docs/architecture-conventions.md section 4 (rules 1 to 6), and forbidigo,
-# which enforces rule 7 there: no time.Now in the domain or the use cases.
+# which enforces rule 7 there: no time.Now, time.Since or time.Until in the domain
+# or the use cases.
 #
 # depguard matches an import against each entry as a plain string prefix, with
 # no wildcards in package paths, so the rules that name a context exist once per
@@ -346,12 +347,13 @@ linters:
 
     # Conventions section 4, rule 7: the domain and the use cases get the time from
     # the clock port of their context (usecase/port/out/clock), not from time.Now,
-    # so that a test can say what day it is. forbidigo matches the text of the
-    # expression, so time.Now is found by that name; an import under another name
-    # is not. The exclusions below limit it to the domain and the use cases.
+    # time.Since or time.Until, which all read the wall clock, so that a test can
+    # say what day it is. forbidigo matches the text of the expression, so they are
+    # found by those names; an import under another name is not. The exclusions
+    # below limit it to the domain and the use cases.
     forbidigo:
       forbid:
-        - pattern: ^time\.Now$
+        - pattern: ^time\.(Now|Since|Until)$
           msg: the time comes from the clock port of the context (usecase/port/out/clock), see conventions section 4, rule 7
   exclusions:
     rules:
