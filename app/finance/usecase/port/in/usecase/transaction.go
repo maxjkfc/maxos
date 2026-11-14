@@ -382,14 +382,19 @@ type SetOpeningBalanceInput struct {
 
 // ConfirmTransactions confirms drafts, which makes them count toward balances,
 // each from the day it happened on. It is all or nothing: when any of them cannot
-// be confirmed (it does not exist, is not a draft, or is a period of an
-// instalment plan) none is, and the error names every one that cannot.
+// be confirmed (it does not exist, is not a draft, or is a period of a plan whose
+// origin is not among the ids) none is, and the error names every one that cannot.
 //
 // The origin of an instalment plan stands for the whole plan: it confirms the
 // origin and each period with it, in one go, and is one transaction of the call.
-// The output has the origin, and the periods are read with GetInstalmentPlan. A
-// period cannot be confirmed by its own id (ErrPartOfPlan), also when its origin
-// is among the ids: a plan is confirmed through its origin alone.
+// The periods are transactions of their own, which ListTransactions lists, so a
+// caller that confirms every draft it lists gives the id of a period beside that
+// of its origin: the period is covered by the origin, and confirmed once, with it.
+// The id of a period whose origin is not among the ids is ErrPartOfPlan: a period
+// is never confirmed alone. The output has what the ids name, each once and in the
+// order given: a period that was given is there, confirmed, in its place, and one
+// that was not given is not (the periods of a plan given by its origin alone are
+// read with GetInstalmentPlan).
 type ConfirmTransactions interface {
 	ConfirmTransactions(ctx context.Context, in ConfirmTransactionsInput) (ConfirmTransactionsOutput, error)
 }
@@ -401,8 +406,9 @@ type ConfirmTransactionsInput struct {
 	IDs []uuid.UUID
 }
 
-// ConfirmTransactionsOutput holds the transactions confirmed, in the order the
-// ids were given.
+// ConfirmTransactionsOutput holds one transaction for each id that was given, as
+// it is once confirmed, in the order the ids were given; an id given twice is
+// there once.
 type ConfirmTransactionsOutput struct {
 	Transactions []Transaction
 }
@@ -512,9 +518,12 @@ type Balance struct {
 	InstrumentID uuid.UUID
 	Quantity     decimal.Decimal
 	// UnbilledInstalment is the principal of the instalment plans of the account
-	// that has not fallen due by the day (未到期分期): zero or less, as what the
-	// account owes. It is not in Quantity: a period reaches the balance of the
-	// account on the day it falls due, and until then it is listed here.
+	// that has not fallen due by the day (未到期分期). It is zero or less, with the
+	// sign of what an account owes: -11000 is 11,000 still to be charged to the
+	// account in the periods to come. It is not in Quantity: a period reaches
+	// Quantity on the day it falls due, and until then it is listed here.
+	// InstalmentPlanSummary.Remaining is the same amount of one plan, as a size
+	// that is zero or more.
 	UnbilledInstalment decimal.Decimal
 }
 

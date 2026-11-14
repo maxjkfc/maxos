@@ -126,10 +126,12 @@ ORDER BY p.party_id, i.code, i.id;
 -- periods one of the principal it charges, which is positive. principal is the
 -- former without its sign. charged is the principals of the periods that fall due
 -- on or before the day (the day itself is in), and next_due_on is the first day
--- after it that a period falls due, NULL when none does. A plan is listed
--- whatever it has left to charge: telling the finished ones is for the use case.
--- With an account_id it is the plans that charge that account only. The newest
--- plan is first: by the day of its origin, then the latest made.
+-- after it that a period falls due, NULL when none does. A plan is there from the
+-- day of its origin, as its instalment posting is in ListBalances: one whose
+-- origin is dated after the day is not listed. A plan is listed whatever it has
+-- left to charge: telling the finished ones is for the use case. With an
+-- account_id it is the plans that charge that account only. The newest plan is
+-- first: by the day of its origin, then the latest made.
 SELECT o.id AS plan_id,
        op.account_id::uuid AS account_id,
        op.instrument_id,
@@ -140,7 +142,7 @@ FROM fin_transaction o
 JOIN fin_posting op ON op.transaction_id = o.id AND op.book = 'instalment'
 LEFT JOIN fin_transaction pt ON pt.plan_id = o.id AND pt.plan_seq > 0 AND pt.status = 'confirmed'
 LEFT JOIN fin_posting pp ON pp.transaction_id = pt.id AND pp.book = 'instalment'
-WHERE o.status = 'confirmed' AND o.plan_seq = 0
+WHERE o.status = 'confirmed' AND o.plan_seq = 0 AND o.occurred_on <= @day
   AND (sqlc.narg('account_id')::uuid IS NULL OR op.account_id = sqlc.narg('account_id'))
 GROUP BY o.id, o.occurred_on, op.account_id, op.instrument_id, op.quantity
 ORDER BY o.occurred_on DESC, o.id DESC;

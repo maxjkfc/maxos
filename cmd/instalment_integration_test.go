@@ -34,7 +34,7 @@ func (l ledgerApp) held(t *testing.T, names map[uuid.UUID]string, asOf *time.Tim
 	return lines
 }
 
-// plans is what the plans say, as "principal charged unbilled next", one to a line.
+// plans is what the plans say, as "principal charged remaining next", one to a line.
 func (l ledgerApp) plans(t *testing.T, includeFinished bool) []string {
 	t.Helper()
 	out, err := l.ListInstalmentPlans.ListInstalmentPlans(context.Background(), usecase.ListInstalmentPlansInput{IncludeFinished: includeFinished})
@@ -47,7 +47,7 @@ func (l ledgerApp) plans(t *testing.T, includeFinished bool) []string {
 		if p.NextDueOn != nil {
 			next = p.NextDueOn.Format(time.DateOnly)
 		}
-		lines[i] = p.Principal.String() + " " + p.Charged.String() + " " + p.UnbilledInstalment.String() + " " + next
+		lines[i] = p.Principal.String() + " " + p.Charged.String() + " " + p.Remaining.String() + " " + next
 	}
 	return lines
 }
@@ -144,6 +144,8 @@ func TestAnInstalmentPurchaseIsOwedPeriodByPeriodThroughTheRealUseCases(t *testi
 		held  []string
 		plans []string
 	}{
+		// A plan counts from the day of its origin, in the balances and in the plans.
+		{"the day before the purchase", dateOn(2026, time.November, 13), nil, nil},
 		{"the day of the purchase", day, []string{"card 0 unbilled -12000"}, []string{"12000 0 12000 2026-12-05"}},
 		{"the day before the first period", dateOn(2026, time.December, 4), []string{"card 0 unbilled -12000"}, []string{"12000 0 12000 2026-12-05"}},
 		{"the day the first period falls due", dateOn(2026, time.December, 5), []string{"card -1030 unbilled -11000"}, []string{"12000 1000 11000 2027-01-05"}},
@@ -319,5 +321,85 @@ func TestWhatIsDatedAfterTodayCountsFromItsDayThroughTheRealUseCases(t *testing.
 	var pending *model.PendingDraftsError
 	if !errors.Is(err, model.ErrPendingDrafts) || !errors.As(err, &pending) || pending.Count != 1 {
 		t.Fatalf("Reconcile on the day of the first period: err = %v, want 1 draft pending: the period that fell due", err)
+	}
+}
+
+// What a caller that confirms every draft it lists does: ListTransactions lists the
+// origin of a plan and each of its periods, which are drafts of their own, and the
+// ids all go to ConfirmTransactions together. The plan is confirmed once, as a
+// whole, and what comes back is what was sent.
+func TestConfirmingEveryDraftListedConfirmsAPlanOnceThroughTheRealUseCases(t *testing.T) {
+	ctx := context.Background()
+	clk := newTestClock(dateOn(2027, time.March, 1))
+	l := newLedgerAppOn(t, testpg.New(t), clk)
+	twd := model.BaseCurrencyID
+
+	bank, err := l.CreateAccount.CreateAccount(ctx, usecase.CreateAccountInput{Name: "bank", Kind: "bank"})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	card, err := l.CreateAccount.CreateAccount(ctx, usecase.CreateAccountInput{Name: "card", Kind: "card"})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	food, err := l.CreateCategory.CreateCategory(ctx, usecase.CreateCategoryInput{Direction: "expense", Name: "Food"})
+	if err != nil {
+		t.Fatalf("CreateCategory: %v", err)
+	}
+	interest, err := l.CreateCategory.CreateCategory(ctx, usecase.CreateCategoryInput{Direction: "expense", Name: "Interest"})
+	if err != nil {
+		t.Fatalf("CreateCategory: %v", err)
+	}
+	names := map[uuid.UUID]string{bank.ID: "bank", card.ID: "card"}
+
+	if _, err := l.RecordExpense.RecordExpense(ctx, usecase.RecordExpenseInput{
+		RecordDetails: l.details("instalment-tv-0004"), AccountID: &card.ID, InstrumentID: twd,
+		Lines:       []usecase.CategoryLine{{CategoryID: food.ID, Amount: dec("12000")}},
+		Instalments: instalmentsOf(interest.ID),
+	}); err != nil {
+		t.Fatalf("RecordExpense in instalments: %v", err)
+	}
+	if _, err := l.RecordExpense.RecordExpense(ctx, usecase.RecordExpenseInput{
+		RecordDetails: l.details("lunch-0000000001"), AccountID: &bank.ID, InstrumentID: twd,
+		Lines: []usecase.CategoryLine{{CategoryID: food.ID, Amount: dec("120")}},
+	}); err != nil {
+		t.Fatalf("RecordExpense: %v", err)
+	}
+
+	drafts, err := l.ListTransactions.ListTransactions(ctx, usecase.ListTransactionsInput{Status: "draft", Limit: 200})
+	if err != nil {
+		t.Fatalf("ListTransactions: %v", err)
+	}
+	listed := make([]uuid.UUID, len(drafts.Transactions))
+	for i, txn := range drafts.Transactions {
+		listed[i] = txn.ID
+	}
+	if len(listed) != 14 {
+		t.Fatalf("%d drafts listed, want the origin of the plan, its 12 periods and the lunch", len(listed))
+	}
+
+	confirmed, err := l.Confirm.ConfirmTransactions(ctx, usecase.ConfirmTransactionsInput{IDs: listed})
+	if err != nil {
+		t.Fatalf("confirm every draft listed: %v, want a period to be covered by the origin that is sent with it", err)
+	}
+	got := make([]uuid.UUID, len(confirmed.Transactions))
+	for i, txn := range confirmed.Transactions {
+		got[i] = txn.ID
+		if txn.Status != "confirmed" {
+			t.Errorf("transaction %s is %q in the output, want it confirmed", txn.ID, txn.Status)
+		}
+	}
+	if !slices.Equal(got, listed) {
+		t.Errorf("confirmed %v, want the transactions that were sent, in the order they were sent,\n  %v", got, listed)
+	}
+
+	rest, err := l.ListTransactions.ListTransactions(ctx, usecase.ListTransactionsInput{Status: "draft", Limit: 200})
+	if err != nil || len(rest.Transactions) != 0 {
+		t.Errorf("drafts left = %d, %v, want none", len(rest.Transactions), err)
+	}
+	// Counted once: three periods have fallen due by the 1st of March, 1,000 and the
+	// 30 of interest of the first charged, and 9,000 is still to come.
+	if got, want := l.held(t, names, nil), []string{"bank -120 unbilled 0", "card -3030 unbilled -9000"}; !slices.Equal(got, want) {
+		t.Errorf("balances = %q, want %q", got, want)
 	}
 }

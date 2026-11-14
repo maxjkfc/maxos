@@ -120,7 +120,9 @@ type ListInstalmentPlansInput struct {
 }
 
 // InstalmentPlanSummary is where an instalment plan stands today. Its amounts are
-// sizes, and so are never negative, unlike the balances they are read beside.
+// sizes, so never negative: how much there is of the plan, not what an account
+// owes. The balance of an account has the same amounts with the sign of what is
+// owed (Balance.UnbilledInstalment).
 type InstalmentPlanSummary struct {
 	// PlanID is the id of the plan, which is the id of its origin.
 	PlanID uuid.UUID
@@ -133,11 +135,12 @@ type InstalmentPlanSummary struct {
 	// Charged is the principal of the periods that have fallen due, today's included,
 	// which is what has reached the balance of the account.
 	Charged decimal.Decimal
-	// UnbilledInstalment is the principal that has not fallen due yet (未到期分期):
-	// Principal less Charged, zero for a finished plan. It is the same amount as the
-	// unbilled instalment of the balance of the account for this plan, without the
-	// sign.
-	UnbilledInstalment decimal.Decimal
+	// Remaining is the principal that has not fallen due yet, which the plan has
+	// still to charge to the account (未到期分期): Principal less Charged, zero for
+	// a finished plan. It is a size, zero or more. Balance.UnbilledInstalment of the
+	// account is the same amount with the sign of what is owed, zero or less: minus
+	// the Remaining of all the plans that charge the account.
+	Remaining decimal.Decimal
 	// NextDueOn is the first day after today that a period falls due, at midnight
 	// UTC; nil for a finished plan.
 	NextDueOn *time.Time

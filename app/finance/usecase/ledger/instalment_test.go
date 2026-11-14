@@ -152,6 +152,72 @@ func TestTheKeysOfThePeriodsOfAPlanAreMadeOfThePlanAndNeverComeFromTheCaller(t *
 	}
 }
 
+// The key of a period is the ledger's own. A request that gave one would be answered
+// with that period, as a duplicate, so every use case that takes a key refuses the
+// form they are made in, before anything is looked up or written.
+func TestEveryRecordRefusesAKeyInTheFormOfThoseOfPeriodsAndAnswersWithNoPeriod(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	origin := e.recordPlan("laptop-00000001")
+	period := e.planOf(origin).Periods[0]
+	d := usecase.RecordDetails{IdempotencyKey: period.IdempotencyKey, OccurredOn: day}
+	stored, opened := len(e.txns.byID), e.tx.calls
+
+	calls := map[string]func() error{
+		"RecordExpense": func() error {
+			_, err := e.svc.RecordExpense(ctx, usecase.RecordExpenseInput{RecordDetails: d})
+			return err
+		},
+		"RecordExpense in instalments": func() error {
+			_, err := e.svc.RecordExpense(ctx, usecase.RecordExpenseInput{RecordDetails: d, Instalments: &usecase.InstalmentSchedule{}})
+			return err
+		},
+		"RecordIncome": func() error {
+			_, err := e.svc.RecordIncome(ctx, usecase.RecordIncomeInput{RecordDetails: d})
+			return err
+		},
+		"RecordTransfer": func() error {
+			_, err := e.svc.RecordTransfer(ctx, usecase.RecordTransferInput{RecordDetails: d})
+			return err
+		},
+		"RecordExchange": func() error {
+			_, err := e.svc.RecordExchange(ctx, usecase.RecordExchangeInput{RecordDetails: d})
+			return err
+		},
+		"RecordTrade": func() error { _, err := e.svc.RecordTrade(ctx, usecase.RecordTradeInput{RecordDetails: d}); return err },
+		"RecordDealing": func() error {
+			_, err := e.svc.RecordDealing(ctx, usecase.RecordDealingInput{RecordDetails: d})
+			return err
+		},
+		"RecordReward": func() error {
+			_, err := e.svc.RecordReward(ctx, usecase.RecordRewardInput{RecordDetails: d})
+			return err
+		},
+		"SetOpeningBalance": func() error {
+			_, err := e.svc.SetOpeningBalance(ctx, usecase.SetOpeningBalanceInput{RecordDetails: d})
+			return err
+		},
+		"RecordBillInstalment": func() error {
+			_, err := e.svc.RecordBillInstalment(ctx, usecase.RecordBillInstalmentInput{RecordDetails: d})
+			return err
+		},
+		"Reconcile": func() error { _, err := e.svc.Reconcile(ctx, usecase.ReconcileInput{RecordDetails: d}); return err },
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			err := call()
+
+			if !errors.Is(err, model.ErrReservedIdempotencyKey) {
+				t.Fatalf("err = %v, want ErrReservedIdempotencyKey: the key is that of period 1 of a plan", err)
+			}
+		})
+	}
+	if len(e.txns.byID) != stored || e.tx.calls != opened {
+		t.Errorf("%d transactions stored and %d database transactions opened, want the %d and %d there were: nothing is looked up or written",
+			len(e.txns.byID), e.tx.calls, stored, opened)
+	}
+}
+
 func TestRecordExpenseWithInstalmentsAnsweredWithAKeyUsedBeforeReturnsTheOriginAndWritesNothing(t *testing.T) {
 	e := newEnv(t)
 	first := e.recordPlan("laptop-00000001")
@@ -433,7 +499,6 @@ func TestConfirmTransactionsRefusesAPeriodByItsOwnIdAndConfirmsNothing(t *testin
 		ids  func(origin, period, lunch usecase.Transaction) []uuid.UUID
 	}{
 		{"a period alone", func(_, period, _ usecase.Transaction) []uuid.UUID { return []uuid.UUID{period.ID} }},
-		{"a period with its origin", func(origin, period, _ usecase.Transaction) []uuid.UUID { return []uuid.UUID{origin.ID, period.ID} }},
 		{"a period with a draft that could be confirmed", func(_, period, lunch usecase.Transaction) []uuid.UUID {
 			return []uuid.UUID{lunch.ID, period.ID}
 		}},
@@ -462,6 +527,77 @@ func TestConfirmTransactionsRefusesAPeriodByItsOwnIdAndConfirmsNothing(t *testin
 				t.Errorf("%d changes of status written, want none", len(e.txns.statusSet))
 			}
 		})
+	}
+}
+
+// What a caller that confirms every draft it lists sends: the origin of a plan and
+// periods of it, which are drafts of their own. The plan is confirmed once, as a
+// whole, and what comes back is what was given, each once and in the order given.
+func TestConfirmTransactionsGivenAPlanAndSomeOfItsPeriodsConfirmsThePlanOnceAndReturnsWhatWasGiven(t *testing.T) {
+	e := newEnv(t)
+	origin := e.recordPlan("laptop-00000001")
+	notAsked := e.recordPlan("laptop-00000002")
+	lunch := e.recordLunch("lunch-0000001a")
+	periods := ids(e.planOf(origin).Periods...)
+	opened, changes := e.tx.calls, len(e.txns.statusSet)
+
+	// A period before its origin, one twice, and the lunch between: the order is the caller's.
+	given := []uuid.UUID{periods[4], lunch.ID, origin.ID, periods[0], periods[4]}
+	out, err := e.svc.ConfirmTransactions(context.Background(), usecase.ConfirmTransactionsInput{IDs: given})
+	if err != nil {
+		t.Fatalf("ConfirmTransactions: %v, want a period to be covered by its origin, which is given too", err)
+	}
+
+	if got, want := ids(out.Transactions...), []uuid.UUID{periods[4], lunch.ID, origin.ID, periods[0]}; !slices.Equal(got, want) {
+		t.Errorf("confirmed %v, want each id given once, in the order given,\n  %v", got, want)
+	}
+	for _, txn := range out.Transactions {
+		if txn.Status != "confirmed" || txn.ConfirmedAt == nil {
+			t.Errorf("transaction %s is %s in the output, want it as it is confirmed", txn.ID, txn.Status)
+		}
+	}
+	// All of the plan, though only two periods were given, and nothing of the other plan.
+	notConfirmed := map[uuid.UUID]bool{}
+	for _, id := range e.membersOf(notAsked) {
+		notConfirmed[id] = true
+	}
+	for id, status := range e.statuses() {
+		if want := map[bool]model.Status{true: model.StatusDraft, false: model.StatusConfirmed}[notConfirmed[id]]; status != want {
+			t.Errorf("transaction %s is %s, want %s", id, status, want)
+		}
+	}
+	// Each transaction of the plan is confirmed once, and in one database transaction.
+	written := e.txns.statusSet[changes:]
+	if want := sortedIDs(append(e.membersOf(origin), lunch.ID)...); !slices.Equal(sortedIDs(written...), want) {
+		t.Errorf("status set for %v, want each of the 13 of the plan and the lunch once,\n  %v", sortedIDs(written...), want)
+	}
+	if got := e.tx.calls - opened; got != 1 {
+		t.Errorf("%d database transactions opened, want 1", got)
+	}
+	if want := sortedIDs(append(e.membersOf(origin), lunch.ID)...); !slices.Equal(e.txns.locked, want) {
+		t.Errorf("locked\n  %v\nwant each transaction once, in the order of the ids,\n  %v", e.txns.locked, want)
+	}
+}
+
+// A period is covered by its own origin, and by no other: the origin of another
+// plan does not make it right.
+func TestConfirmTransactionsRefusesAPeriodWhoseOriginIsNotAmongTheIdsEvenWithTheOriginOfAnotherPlan(t *testing.T) {
+	e := newEnv(t)
+	first, second := e.recordPlan("laptop-00000001"), e.recordPlan("laptop-00000002")
+	period := e.planOf(first).Periods[3]
+
+	_, err := e.svc.ConfirmTransactions(context.Background(), usecase.ConfirmTransactionsInput{IDs: []uuid.UUID{second.ID, period.ID}})
+
+	if !errors.Is(err, model.ErrPartOfPlan) || !strings.Contains(err.Error(), period.ID.String()) || !strings.Contains(err.Error(), first.ID.String()) {
+		t.Fatalf("err = %v, want ErrPartOfPlan naming the period and its plan", err)
+	}
+	for id, status := range e.statuses() {
+		if status != model.StatusDraft {
+			t.Errorf("transaction %s is %s, want everything left a draft: it is all or nothing", id, status)
+		}
+	}
+	if slices.Contains(e.txns.locked, period.ID) {
+		t.Error("the period that is refused was locked")
 	}
 }
 
@@ -742,8 +878,8 @@ func TestListInstalmentPlansLeavesOutTheFinishedUnlessAskedAndReadsTodaysDay(t *
 	}
 	got := out.Plans[0]
 	if got.AccountID != e.bank.ID || got.InstrumentID != e.twd.ID || !got.Principal.Equal(dec("12000")) ||
-		!got.Charged.Equal(dec("1000")) || !got.UnbilledInstalment.Equal(dec("11000")) || got.NextDueOn == nil || !got.NextDueOn.Equal(next) {
-		t.Errorf("plan = %+v, want 12000 split, 1000 charged, 11000 unbilled (as a size, not negative) and the next day it is due", got)
+		!got.Charged.Equal(dec("1000")) || !got.Remaining.Equal(dec("11000")) || got.NextDueOn == nil || !got.NextDueOn.Equal(next) {
+		t.Errorf("plan = %+v, want 12000 split, 1000 charged, 11000 remaining (as a size, not negative) and the next day it is due", got)
 	}
 	if !e.txns.plansDay.Equal(day) || e.txns.plansFor != nil {
 		t.Errorf("the repo was asked about %s for %v, want today, 2026-11-14, for every account", e.txns.plansDay.Format(time.DateOnly), e.txns.plansFor)
@@ -763,8 +899,8 @@ func TestListInstalmentPlansLeavesOutTheFinishedUnlessAskedAndReadsTodaysDay(t *
 	if len(out.Plans) != 3 || out.Plans[2].PlanID != finished.PlanID {
 		t.Fatalf("plans = %+v, want the three of them, the finished one too", out.Plans)
 	}
-	if last := out.Plans[2]; !last.UnbilledInstalment.IsZero() || last.NextDueOn != nil {
-		t.Errorf("finished plan = %+v, want nothing unbilled and no next day", last)
+	if last := out.Plans[2]; !last.Remaining.IsZero() || last.NextDueOn != nil {
+		t.Errorf("finished plan = %+v, want nothing remaining and no next day", last)
 	}
 	if want := time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC); !e.txns.plansDay.Equal(want) || e.txns.plansFor == nil || *e.txns.plansFor != e.bank.ID {
 		t.Errorf("the repo was asked about %s for %v, want 2027-02-01 for the bank", e.txns.plansDay.Format(time.DateOnly), e.txns.plansFor)

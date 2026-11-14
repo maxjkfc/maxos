@@ -17,8 +17,10 @@ type Balance struct {
 	Quantity decimal.Decimal
 	// UnbilledInstalment is the principal of instalment plans that is not yet due
 	// on the day (未到期分期): the instalment postings of the account added up. It
-	// is zero or less, as what the account owes. It is not in Quantity: a period
-	// reaches the balance on the day it falls due, and until then it is shown
-	// here.
+	// is zero or less, with the sign of what an account owes: -11000 is 11,000 still
+	// to be charged to the account in the periods to come. It is not in Quantity: a
+	// period reaches the balance on the day it falls due, and until then it is shown
+	// here. InstalmentPlanSummary.Remaining is the same amount of one plan, as a
+	// size that is zero or more.
 	UnbilledInstalment decimal.Decimal
 }

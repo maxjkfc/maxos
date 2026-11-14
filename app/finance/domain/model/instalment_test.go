@@ -564,8 +564,15 @@ func TestAPeriodsKeyIsMadeOfThePlanAndThePositionAndOfNothingElse(t *testing.T) 
 			if again := model.PeriodIdempotencyKey(id, seq); again != key {
 				t.Fatalf("the key of period %d of %s is %q, and then %q: it must come out the same every time", seq, id, key, again)
 			}
-			if normalized, err := model.NormalizeIdempotencyKey(key); err != nil || normalized != key {
-				t.Fatalf("the key %q of period %d is not a key the ledger takes as it is: %q, %v", key, seq, normalized, err)
+			// It is the ledger's own: a request that gave it would be answered with the
+			// period, so it is refused wherever a caller gives a key. It is a key the
+			// table holds all the same, which is not shorter or longer than any other (the
+			// characters are all ASCII).
+			if _, err := model.NormalizeIdempotencyKey(key); !errors.Is(err, model.ErrReservedIdempotencyKey) {
+				t.Fatalf("the key %q of period %d is taken from a caller: err = %v, want ErrReservedIdempotencyKey", key, seq, err)
+			}
+			if n := len(key); n < model.MinKeyRunes || n > model.MaxKeyRunes {
+				t.Fatalf("the key %q of period %d is %d characters, want %d to %d", key, seq, n, model.MinKeyRunes, model.MaxKeyRunes)
 			}
 			if !strings.Contains(key, id.String()) {
 				t.Errorf("the key %q does not name its plan %s", key, id)
@@ -578,11 +585,61 @@ func TestAPeriodsKeyIsMadeOfThePlanAndThePositionAndOfNothingElse(t *testing.T) 
 	}
 }
 
+func TestNormalizeIdempotencyKeyRefusesTheFormOfTheKeysOfPeriodsAndNoOther(t *testing.T) {
+	tests := []struct {
+		name     string
+		key      string
+		reserved bool
+	}{
+		{"the key of a period", model.PeriodIdempotencyKey(uuid.Must(uuid.NewV7()), 3), true},
+		{"the form with anything after it", "instalment:laptop-0001", true},
+		{"the form with whitespace around it, which is trimmed first", "  \tinstalment:laptop-0001\n", true},
+		{"the form alone", "instalment:", true},
+		{"the word without the colon", "instalment-laptop-0001", false},
+		{"the form after something else", "laptop-instalment:0001", false},
+		{"the form in another case, which is another key to the table", "Instalment:laptop-0001", false},
+		{"an ordinary key", "lunch-2026-11-14-a", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := model.NormalizeIdempotencyKey(tt.key)
+
+			if !tt.reserved {
+				if err != nil || got != strings.TrimSpace(tt.key) {
+					t.Fatalf("NormalizeIdempotencyKey(%q) = %q, %v, want the key trimmed", tt.key, got, err)
+				}
+				return
+			}
+			if !errors.Is(err, model.ErrReservedIdempotencyKey) || got != "" {
+				t.Fatalf("NormalizeIdempotencyKey(%q) = %q, %v, want ErrReservedIdempotencyKey", tt.key, got, err)
+			}
+			if !strings.Contains(err.Error(), "instalment:") {
+				t.Errorf("err = %q, want it to say what form is reserved", err)
+			}
+		})
+	}
+}
+
+func TestTheBuildersRefuseAKeyInTheFormOfThoseOfPeriods(t *testing.T) {
+	f := newInstalmentFixtures(t)
+	key := model.PeriodIdempotencyKey(uuid.Must(uuid.NewV7()), 1)
+
+	if _, err := model.NewExpense(f.expenseParams(key, "120")); !errors.Is(err, model.ErrReservedIdempotencyKey) {
+		t.Errorf("NewExpense: err = %v, want ErrReservedIdempotencyKey", err)
+	}
+	if _, err := model.NewInstalmentExpense(f.expenseParams(key, "12000"), f.interestSchedule(monthly(12, "1000"))); !errors.Is(err, model.ErrReservedIdempotencyKey) {
+		t.Errorf("NewInstalmentExpense: err = %v, want ErrReservedIdempotencyKey", err)
+	}
+	if _, err := model.NewBillInstalment(f.billParams(key, "12000", monthly(12, "1000"))); !errors.Is(err, model.ErrReservedIdempotencyKey) {
+		t.Errorf("NewBillInstalment: err = %v, want ErrReservedIdempotencyKey", err)
+	}
+}
+
 func TestAnInstalmentPlanSummaryIsFinishedWhenNothingIsLeftToCharge(t *testing.T) {
 	tests := []struct {
 		name               string
 		principal, charged string
-		wantUnbilled       string
+		wantRemaining      string
 		wantFinished       bool
 	}{
 		{"nothing charged yet", "12000", "0", "12000", false},
@@ -594,8 +651,8 @@ func TestAnInstalmentPlanSummaryIsFinishedWhenNothingIsLeftToCharge(t *testing.T
 		t.Run(tt.name, func(t *testing.T) {
 			s := model.InstalmentPlanSummary{Principal: dec(tt.principal), Charged: dec(tt.charged)}
 
-			if got := s.UnbilledInstalment(); !got.Equal(dec(tt.wantUnbilled)) {
-				t.Errorf("unbilled instalment = %s, want %s", got, tt.wantUnbilled)
+			if got := s.Remaining(); !got.Equal(dec(tt.wantRemaining)) {
+				t.Errorf("remaining = %s, want %s", got, tt.wantRemaining)
 			}
 			if got := s.Finished(); got != tt.wantFinished {
 				t.Errorf("Finished = %v, want %v", got, tt.wantFinished)

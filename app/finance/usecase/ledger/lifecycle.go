@@ -19,8 +19,12 @@ import (
 // that the caller can put them all right at once.
 //
 // The origin of an instalment plan stands for the whole plan: it is confirmed
-// with each of its periods, in the same call, and the output has the origin (see
-// lockActed). The id of a period is a problem, ErrPartOfPlan.
+// with each of its periods, in the same call (see lockActed). A period given beside
+// its origin is covered by it, and confirmed once, with the rest; the id of a
+// period whose origin is not given is a problem, ErrPartOfPlan. The output has a
+// transaction for each id given, once and in the order given, as it was confirmed:
+// a period that was given is in it, and a period of a plan that was given by its
+// origin alone is not.
 func (s *Service) ConfirmTransactions(ctx context.Context, in usecase.ConfirmTransactionsInput) (usecase.ConfirmTransactionsOutput, error) {
 	ids := uniqueIDs(in.IDs)
 	if len(ids) == 0 {
@@ -69,7 +73,8 @@ func (s *Service) ConfirmTransactions(ctx context.Context, in usecase.ConfirmTra
 // DiscardDraft deletes a draft with its postings. Only a draft: a confirmed
 // transaction has counted, and a void one is kept as a record. The origin of an
 // instalment plan is deleted with each of its periods, or none of them is; the
-// periods go first, as they refer to the origin.
+// periods go first, as they refer to the origin. It is given one id, so the id of
+// a period, whose origin cannot be given with it, is ErrPartOfPlan.
 func (s *Service) DiscardDraft(ctx context.Context, id uuid.UUID) error {
 	return s.tx.WithinTx(ctx, func(ctx context.Context) error {
 		acted, problems, err := s.lockActed(ctx, []uuid.UUID{id})
@@ -101,7 +106,8 @@ func (s *Service) DiscardDraft(ctx context.Context, id uuid.UUID) error {
 
 // VoidTransaction voids a confirmed transaction. The origin of an instalment plan
 // voids the whole plan, the periods that have fallen due already too, and what is
-// returned is the origin.
+// returned is the origin. It is given one id, so the id of a period, whose origin
+// cannot be given with it, is ErrPartOfPlan.
 func (s *Service) VoidTransaction(ctx context.Context, id uuid.UUID) (usecase.Transaction, error) {
 	var out usecase.Transaction
 	err := s.tx.WithinTx(ctx, func(ctx context.Context) error {
@@ -143,9 +149,10 @@ func (s *Service) VoidTransaction(ctx context.Context, id uuid.UUID) (usecase.Tr
 // the transactions it acts on, and locks them until the database transaction
 // ends. They are the transactions the ids name, except that the origin of an
 // instalment plan stands for the whole plan: it is acted on with each of its
-// periods. They are returned as they stand once locked, so that what is checked
-// of them is what is written over, in the order of their ids, which is the order
-// they were locked in.
+// periods, and a period that is given beside its origin is one of them, acted on
+// once. They are returned as they stand once locked, so that what is checked of
+// them is what is written over, in the order of their ids, which is the order they
+// were locked in.
 //
 // All of them are locked in one order, the order of their ids, and not one id after
 // the other as they are met, nor one plan after the other: two calls that have
@@ -158,42 +165,54 @@ func (s *Service) VoidTransaction(ctx context.Context, id uuid.UUID) (usecase.Tr
 //
 // A problem of the request is not an error of the call, and the others are still
 // looked at, so that all of them are reported together: an id that is not found,
-// and the id of a period, which is ErrPartOfPlan and is not locked, nor acted on
-// by its origin's call: a plan is acted on through its origin alone, also when the
-// origin is among the ids too.
+// and the id of a period whose origin is not among the ids, which is ErrPartOfPlan
+// and is not locked, nor acted on: a plan is acted on through its origin.
 func (s *Service) lockActed(ctx context.Context, ids []uuid.UUID) (acted []model.Transaction, problems []error, err error) {
-	needed := make([]uuid.UUID, 0, len(ids))
+	asked := make([]model.Transaction, 0, len(ids))
+	origins := make(map[uuid.UUID]bool, len(ids))
 	for _, id := range ids {
 		txn, err := s.transactions.Get(ctx, id)
-		switch {
-		case errors.Is(err, model.ErrNotFound):
-			problems = append(problems, fmt.Errorf("transaction %s: %w", id, err))
-			continue
-		case err != nil:
-			return nil, nil, fmt.Errorf("get transaction %s: %w", id, err)
-		case txn.IsPlanPeriod():
-			problems = append(problems, fmt.Errorf("%w: transaction %s is period %d of plan %s: use the origin of the plan, which acts on all of it",
-				model.ErrPartOfPlan, id, *txn.PlanSeq, *txn.PlanID))
-			continue
-		}
-
-		needed = append(needed, id)
-		if !txn.IsPlanOrigin() {
-			continue
-		}
-		plan, err := s.transactions.GetPlan(ctx, id)
 		if errors.Is(err, model.ErrNotFound) {
-			// Discarded since it was read: it is not there, as it is for an id that never
-			// was.
 			problems = append(problems, fmt.Errorf("transaction %s: %w", id, err))
-			needed = needed[:len(needed)-1]
 			continue
 		}
 		if err != nil {
-			return nil, nil, fmt.Errorf("get plan %s: %w", id, err)
+			return nil, nil, fmt.Errorf("get transaction %s: %w", id, err)
 		}
-		for _, period := range plan.Periods {
-			needed = append(needed, period.ID)
+		asked = append(asked, txn)
+		if txn.IsPlanOrigin() {
+			origins[txn.ID] = true
+		}
+	}
+
+	needed := make([]uuid.UUID, 0, len(asked))
+	for _, txn := range asked {
+		switch {
+		case txn.IsPlanPeriod():
+			if origins[*txn.PlanID] {
+				// Covered by its origin, which is among the ids: it is acted on with the
+				// rest of the plan, once.
+				continue
+			}
+			problems = append(problems, fmt.Errorf("%w: transaction %s is period %d of plan %s, whose origin is not among the ids: give the origin, which acts on all of the plan",
+				model.ErrPartOfPlan, txn.ID, *txn.PlanSeq, *txn.PlanID))
+		case txn.IsPlanOrigin():
+			plan, err := s.transactions.GetPlan(ctx, txn.ID)
+			if errors.Is(err, model.ErrNotFound) {
+				// Discarded since it was read: it is not there, as it is for an id that
+				// never was.
+				problems = append(problems, fmt.Errorf("transaction %s: %w", txn.ID, err))
+				continue
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("get plan %s: %w", txn.ID, err)
+			}
+			needed = append(needed, txn.ID)
+			for _, period := range plan.Periods {
+				needed = append(needed, period.ID)
+			}
+		default:
+			needed = append(needed, txn.ID)
 		}
 	}
 

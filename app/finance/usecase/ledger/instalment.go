@@ -108,13 +108,13 @@ func (s *Service) ListInstalmentPlans(ctx context.Context, in usecase.ListInstal
 			continue
 		}
 		out.Plans = append(out.Plans, usecase.InstalmentPlanSummary{
-			PlanID:             plan.PlanID,
-			AccountID:          plan.AccountID,
-			InstrumentID:       plan.InstrumentID,
-			Principal:          plan.Principal,
-			Charged:            plan.Charged,
-			UnbilledInstalment: plan.UnbilledInstalment(),
-			NextDueOn:          clone(plan.NextDueOn),
+			PlanID:       plan.PlanID,
+			AccountID:    plan.AccountID,
+			InstrumentID: plan.InstrumentID,
+			Principal:    plan.Principal,
+			Charged:      plan.Charged,
+			Remaining:    plan.Remaining(),
+			NextDueOn:    clone(plan.NextDueOn),
 		})
 	}
 	return out, nil

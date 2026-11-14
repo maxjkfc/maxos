@@ -248,6 +248,12 @@ var (
 	// ErrInterestBaseAmountWithoutInterest is returned for a period that comes with
 	// the amount of its interest in the base currency and has no interest.
 	ErrInterestBaseAmountWithoutInterest = errors.New("the interest in the base currency is for a period that has interest")
+
+	// ErrReservedIdempotencyKey is returned for an idempotency key in the form the
+	// keys of the periods of an instalment plan are made in. The ledger makes those,
+	// one for each period, so a request that gave one would be answered with that
+	// period, as a duplicate.
+	ErrReservedIdempotencyKey = errors.New("idempotency key is reserved for the periods of instalment plans")
 )
 
 // PendingDraftsError is what reconciling an account returns while drafts that

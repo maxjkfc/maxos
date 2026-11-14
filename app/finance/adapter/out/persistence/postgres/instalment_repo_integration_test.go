@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
@@ -119,8 +120,8 @@ func (e *ledgerEnv) summaries(accountID *uuid.UUID, day time.Time) []string {
 		if s.NextDueOn != nil {
 			next = s.NextDueOn.Format(time.DateOnly)
 		}
-		lines[i] = fmt.Sprintf("%s %s principal %s charged %s unbilled %s next %s",
-			names[s.AccountID], names[s.InstrumentID], s.Principal, s.Charged, s.UnbilledInstalment(), next)
+		lines[i] = fmt.Sprintf("%s %s principal %s charged %s remaining %s next %s",
+			names[s.AccountID], names[s.InstrumentID], s.Principal, s.Charged, s.Remaining(), next)
 	}
 	return lines
 }
@@ -529,30 +530,39 @@ func TestInstalmentPlansAddUpWhatIsChargedByTheDay(t *testing.T) {
 		day  time.Time
 		want []string
 	}{
-		// The newest plan is first: the bill instalment of the 16th, then the purchase of the 14th.
-		{"before the bill instalment was made, when neither has charged anything", on(2026, time.November, 15), []string{
-			"bank TWD principal 3000 charged 0 unbilled 3000 next 2026-11-20",
-			"card TWD principal 12000 charged 0 unbilled 12000 next 2026-12-05",
+		// A plan is there from the day of its origin, the day of the purchase or of the
+		// conversion, as it is in the balances. The newest is first: the bill
+		// instalment of the 16th, then the purchase of the 14th.
+		{"the day before the purchase, which is not made yet", on(2026, time.November, 13), nil},
+		{"the day of the purchase, when the bill instalment is not made yet", on(2026, time.November, 14), []string{
+			"card TWD principal 12000 charged 0 remaining 12000 next 2026-12-05",
+		}},
+		{"the day before the bill instalment is made", on(2026, time.November, 15), []string{
+			"card TWD principal 12000 charged 0 remaining 12000 next 2026-12-05",
+		}},
+		{"the day the bill instalment is made, before any period of it has fallen due", on(2026, time.November, 16), []string{
+			"bank TWD principal 3000 charged 0 remaining 3000 next 2026-11-20",
+			"card TWD principal 12000 charged 0 remaining 12000 next 2026-12-05",
 		}},
 		{"the day its first period falls due, which is charged by then", on(2026, time.November, 20), []string{
-			"bank TWD principal 3000 charged 1000 unbilled 2000 next 2026-12-20",
-			"card TWD principal 12000 charged 0 unbilled 12000 next 2026-12-05",
+			"bank TWD principal 3000 charged 1000 remaining 2000 next 2026-12-20",
+			"card TWD principal 12000 charged 0 remaining 12000 next 2026-12-05",
 		}},
 		{"the day before the first of the purchase", on(2026, time.December, 4), []string{
-			"bank TWD principal 3000 charged 1000 unbilled 2000 next 2026-12-20",
-			"card TWD principal 12000 charged 0 unbilled 12000 next 2026-12-05",
+			"bank TWD principal 3000 charged 1000 remaining 2000 next 2026-12-20",
+			"card TWD principal 12000 charged 0 remaining 12000 next 2026-12-05",
 		}},
 		{"the day the first of the purchase falls due: its 30 of interest is not principal", on(2026, time.December, 5), []string{
-			"bank TWD principal 3000 charged 1000 unbilled 2000 next 2026-12-20",
-			"card TWD principal 12000 charged 1000 unbilled 11000 next 2027-01-05",
+			"bank TWD principal 3000 charged 1000 remaining 2000 next 2026-12-20",
+			"card TWD principal 12000 charged 1000 remaining 11000 next 2027-01-05",
 		}},
 		{"the day the bill instalment is finished", on(2027, time.January, 20), []string{
-			"bank TWD principal 3000 charged 3000 unbilled 0 next -",
-			"card TWD principal 12000 charged 2000 unbilled 10000 next 2027-02-05",
+			"bank TWD principal 3000 charged 3000 remaining 0 next -",
+			"card TWD principal 12000 charged 2000 remaining 10000 next 2027-02-05",
 		}},
 		{"after both are finished", on(2030, time.January, 1), []string{
-			"bank TWD principal 3000 charged 3000 unbilled 0 next -",
-			"card TWD principal 12000 charged 12000 unbilled 0 next -",
+			"bank TWD principal 3000 charged 3000 remaining 0 next -",
+			"card TWD principal 12000 charged 12000 remaining 0 next -",
 		}},
 	}
 	for _, tt := range tests {
@@ -564,20 +574,68 @@ func TestInstalmentPlansAddUpWhatIsChargedByTheDay(t *testing.T) {
 	}
 
 	day := on(2026, time.December, 5)
-	if got, want := e.summaries(&e.bank.ID, day), []string{"bank TWD principal 3000 charged 1000 unbilled 2000 next 2026-12-20"}; !slices.Equal(got, want) {
+	if got, want := e.summaries(&e.bank.ID, day), []string{"bank TWD principal 3000 charged 1000 remaining 2000 next 2026-12-20"}; !slices.Equal(got, want) {
 		t.Errorf("plans of the bank = %q, want %q", got, want)
 	}
-	if got, want := e.summaries(&e.card.ID, day), []string{"card TWD principal 12000 charged 1000 unbilled 11000 next 2027-01-05"}; !slices.Equal(got, want) {
+	if got, want := e.summaries(&e.card.ID, day), []string{"card TWD principal 12000 charged 1000 remaining 11000 next 2027-01-05"}; !slices.Equal(got, want) {
 		t.Errorf("plans of the card = %q, want %q", got, want)
 	}
 	if got := e.summaries(&e.cash.ID, day); len(got) != 0 {
 		t.Errorf("plans of cash = %q, want none", got)
 	}
 
-	// What the plans say is what the balances say: the unbilled instalment of a
-	// plan, as a size, is the unbilled instalment of the balance of its account.
+	// What the plans say is what the balances say: what a plan has remaining, as a
+	// size, is the unbilled instalment of the balance of its account, with the sign
+	// of what is owed.
 	if got := e.balancesOn(nil, day, true); !slices.Equal(got, []string{"bank TWD 2000 unbilled -2000", "card TWD -1030 unbilled -11000"}) {
 		t.Errorf("balances on the day = %q, want the same figures as the plans, with the sign of what is owed", got)
+	}
+}
+
+// The plans and the balances count from the same day: on every day, what the
+// plans of an account have remaining is, with the opposite sign, the unbilled
+// instalment of the balance of the account. A plan whose origin is dated after the
+// day is in neither.
+func TestInstalmentPlansAndBalancesTellTheSameUnbilledInstalmentOnEveryDay(t *testing.T) {
+	e := newLedgerEnv(t)
+	ctx := context.Background()
+	e.confirmedPlan("plan-agree-000001")
+	bill := e.storePlan(e.billInstalmentOf("plan-agree-000002"))
+	e.setPlanStatus(bill, model.StatusConfirmed)
+
+	for day := on(2026, time.November, 10); !day.After(on(2027, time.November, 6)); day = day.AddDate(0, 0, 1) {
+		plans, err := e.txns.InstalmentPlans(ctx, nil, day)
+		if err != nil {
+			t.Fatalf("InstalmentPlans on %s: %v", day.Format(time.DateOnly), err)
+		}
+		remaining := map[uuid.UUID]decimal.Decimal{}
+		for _, plan := range plans {
+			if r := plan.Remaining(); !r.IsZero() {
+				remaining[plan.AccountID] = remaining[plan.AccountID].Add(r)
+			}
+		}
+
+		balances, err := e.txns.Balances(ctx, repo.BalanceFilter{Day: day})
+		if err != nil {
+			t.Fatalf("Balances on %s: %v", day.Format(time.DateOnly), err)
+		}
+		unbilled := map[uuid.UUID]decimal.Decimal{}
+		for _, balance := range balances {
+			if !balance.UnbilledInstalment.IsZero() {
+				unbilled[balance.AccountID] = balance.UnbilledInstalment.Neg()
+			}
+		}
+
+		if len(remaining) != len(unbilled) {
+			t.Fatalf("on %s the plans have %v remaining and the balances %v unbilled, want the same accounts",
+				day.Format(time.DateOnly), remaining, unbilled)
+		}
+		for account, want := range unbilled {
+			if got, ok := remaining[account]; !ok || !got.Equal(want) {
+				t.Fatalf("on %s the plans of %s have %s remaining, and its balance has %s unbilled, want them the same",
+					day.Format(time.DateOnly), e.names()[account], got, want)
+			}
+		}
 	}
 }
 

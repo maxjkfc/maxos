@@ -770,13 +770,19 @@ func DateOf(t time.Time) time.Time {
 	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }
 
-// NormalizeIdempotencyKey trims the whitespace around key and checks its length.
-// It returns an *IdempotencyKeyLengthError for a key that is too short or too
-// long.
+// NormalizeIdempotencyKey trims the whitespace around key and checks it. It
+// returns an *IdempotencyKeyLengthError for a key that is too short or too long,
+// and an error that is ErrReservedIdempotencyKey for one that starts with
+// "instalment:", which is how the ledger makes the keys of the periods of an
+// instalment plan (PeriodIdempotencyKey). It is the one place that checks a key a
+// caller gave, so what it refuses, every kind of transaction refuses.
 func NormalizeIdempotencyKey(key string) (string, error) {
 	key = strings.TrimSpace(key)
 	if n := utf8.RuneCountInString(key); n < MinKeyRunes || n > MaxKeyRunes {
 		return "", &IdempotencyKeyLengthError{Runes: n, Min: MinKeyRunes, Max: MaxKeyRunes}
+	}
+	if strings.HasPrefix(key, periodKeyPrefix) {
+		return "", fmt.Errorf("%w: a key that starts with %q is made by the ledger", ErrReservedIdempotencyKey, periodKeyPrefix)
 	}
 	return key, nil
 }

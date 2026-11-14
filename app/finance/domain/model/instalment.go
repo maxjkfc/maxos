@@ -64,13 +64,18 @@ func (p InstalmentPlan) Transactions() []Transaction {
 	return append(out, p.Periods...)
 }
 
+// periodKeyPrefix starts the idempotency key of every period of an instalment
+// plan, and no key a caller gives (NormalizeIdempotencyKey).
+const periodKeyPrefix = "instalment:"
+
 // PeriodIdempotencyKey is the idempotency key of the transaction of a period of a
 // plan: made of the id of the plan and the position of the period in it, so that
 // it is the same whenever it is worked out, and cannot be that of another period.
-// Callers never give it; they give a key for the origin. It is a key that
-// NormalizeIdempotencyKey accepts.
+// Callers never give it; they give a key for the origin, and
+// NormalizeIdempotencyKey refuses a key in this form (ErrReservedIdempotencyKey),
+// so that no request is answered with a period as a duplicate.
 func PeriodIdempotencyKey(planID uuid.UUID, seq int) string {
-	return "instalment:" + planID.String() + ":" + strconv.Itoa(seq)
+	return periodKeyPrefix + planID.String() + ":" + strconv.Itoa(seq)
 }
 
 // check checks the schedule of a plan that splits amount, an amount of the
@@ -153,13 +158,15 @@ func (s InstalmentSchedule) periods(h Header, accountID uuid.UUID, instrument, b
 		seq := i + 1
 		ph := h
 		ph.ID = period.ID
-		ph.IdempotencyKey = PeriodIdempotencyKey(h.ID, seq)
 		ph.OccurredOn = period.DueOn
 		ph.OccurredAt = nil
 		ph, err := normalizeHeader(ph)
 		if err != nil {
 			return nil, fmt.Errorf("period %d: %w", seq, err)
 		}
+		// The key is made after the header is checked, as it is the ledger's own and
+		// not one a caller gave, which is what the check refuses.
+		ph.IdempotencyKey = PeriodIdempotencyKey(h.ID, seq)
 
 		charged := period.Principal
 		postings := make([]Posting, 2, 3)
@@ -326,13 +333,14 @@ type InstalmentPlanSummary struct {
 	NextDueOn *time.Time
 }
 
-// UnbilledInstalment is the principal of the plan that is not yet due on the day
-// (未到期分期), as an amount that is greater than zero or zero.
-func (s InstalmentPlanSummary) UnbilledInstalment() decimal.Decimal {
+// Remaining is the principal of the plan that has not fallen due on the day, which
+// is still to be charged to the account (未到期分期), as a size: zero or more. The
+// balance of the account has it with the sign of what is owed.
+func (s InstalmentPlanSummary) Remaining() decimal.Decimal {
 	return s.Principal.Sub(s.Charged)
 }
 
 // Finished reports whether nothing is left of the plan to charge on the day.
 func (s InstalmentPlanSummary) Finished() bool {
-	return s.UnbilledInstalment().IsZero()
+	return s.Remaining().IsZero()
 }
