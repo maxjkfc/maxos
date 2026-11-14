@@ -216,8 +216,9 @@ func (s *Service) lockActed(ctx context.Context, ids []uuid.UUID) (acted []model
 		}
 	}
 
+	// Every id is in needed once: the caller removes the repeats of a request, and no
+	// two plans have a period in common.
 	slices.SortFunc(needed, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
-	needed = slices.Compact(needed)
 	acted = make([]model.Transaction, 0, len(needed))
 	for _, id := range needed {
 		txn, err := s.transactions.GetForUpdate(ctx, id)

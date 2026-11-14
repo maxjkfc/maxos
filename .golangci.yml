@@ -1,6 +1,7 @@
 # golangci-lint v2: the default linters (errcheck, govet, ineffassign,
 # staticcheck, unused) plus depguard, which enforces the dependency rules of
-# docs/architecture-conventions.md section 4.
+# docs/architecture-conventions.md section 4 (rules 1 to 6), and forbidigo,
+# which enforces rule 7 there: no time.Now in the domain or the use cases.
 #
 # depguard matches an import against each entry as a plain string prefix, with
 # no wildcards in package paths, so the rules that name a context exist once per
@@ -17,6 +18,7 @@ linters:
   default: standard
   enable:
     - depguard
+    - forbidigo
   settings:
     depguard:
       rules:
@@ -341,3 +343,24 @@ linters:
           deny:
             - pkg: github.com/maxjkfc/maxos/app/finance/
               desc: other contexts may import only app/finance/usecase/port/in
+
+    # Conventions section 4, rule 7: the domain and the use cases get the time from
+    # the clock port of their context (usecase/port/out/clock), not from time.Now,
+    # so that a test can say what day it is. forbidigo matches the text of the
+    # expression, so time.Now is found by that name; an import under another name
+    # is not. The exclusions below limit it to the domain and the use cases.
+    forbidigo:
+      forbid:
+        - pattern: ^time\.Now$
+          msg: the time comes from the clock port of the context (usecase/port/out/clock), see conventions section 4, rule 7
+  exclusions:
+    rules:
+      # Only app/<context>/domain and app/<context>/usecase are held to it: the
+      # adapters, cmd/ and pkg/ are not (pkg/clock is what calls time.Now).
+      - path-except: ^app/[^/]+/(domain|usecase)/
+        linters:
+          - forbidigo
+      # Nor are the tests.
+      - path: _test\.go$
+        linters:
+          - forbidigo

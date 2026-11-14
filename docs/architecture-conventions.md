@@ -82,7 +82,7 @@ adapter  →  usecase  →  domain
 6. 只有 `cmd/` 知道具體實作，負責把 adapter 注入 port。
 7. **時間**：use case 與 domain 不呼叫 `time.Now()`。use case 要知道現在或今天，只經自己 context 的 `usecase/port/out/clock`（介面只有 `Now()`），由 `cmd/` 以 `pkg/clock` 實作並注入，時區來自 `MAXOS_TIMEZONE`（預設 `Asia/Taipei`）；測試給假的時鐘。資料庫記下的寫入時間（`confirmed_at` 等）不在此限，那是何時寫入，不是使用者的「今天」。
 
-以上規則，除了第 7 點，由 golangci-lint 的 import 限制在 `make check` 檢查；第 7 點目前靠 review，沒有 lint。
+以上規則由 golangci-lint 在 `make check` 檢查：第 1 至 6 點是 import 限制（depguard），第 7 點是 `forbidigo`，禁止 `app/<context>/domain` 與 `app/<context>/usecase` 的非測試檔使用 `time.Now`（`pkg/clock` 與 `cmd/` 不在此限）。
 
 ## 5. 技術選型
 
