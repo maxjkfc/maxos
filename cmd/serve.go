@@ -30,6 +30,8 @@ func newServeCmd() *cobra.Command {
 				fx.Supply(cfg),
 				InfraModule(),
 				InboxModule(),
+				CatalogModule(),
+				FinanceModule(),
 				MCPModule(),
 				AccessModule(),
 				fx.Invoke(serveHTTP),
