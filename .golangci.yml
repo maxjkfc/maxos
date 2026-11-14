@@ -1,0 +1,91 @@
+# golangci-lint v2: the default linters (errcheck, govet, ineffassign,
+# staticcheck, unused) plus depguard, which enforces the dependency rules of
+# docs/architecture-conventions.md section 4.
+#
+# depguard matches an import against each entry as a plain string prefix, with
+# no wildcards in package paths, so the rules that name a context exist once per
+# context. When another context gets Go code, copy the inbox-* rules and change
+# the context name.
+#
+# File globs are anchored at this file's directory with ${config-path}.
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - depguard
+  settings:
+    depguard:
+      rules:
+        # pkg/ is technical code with no knowledge of any context.
+        pkg-isolation:
+          list-mode: lax
+          files:
+            - "${config-path}/pkg/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/
+              desc: pkg/ is domain-agnostic and must not import app/
+
+        # domain/ and usecase/ stay free of frameworks and infrastructure, and
+        # never reach for pkg/, which sits below the adapters only.
+        domain-isolation:
+          list-mode: lax
+          files:
+            - "${config-path}/app/*/domain/**"
+          deny:
+            - pkg: github.com/jackc/pgx
+              desc: domain must not depend on the database driver
+            - pkg: github.com/modelcontextprotocol/go-sdk
+              desc: domain must not depend on the MCP SDK
+            - pkg: github.com/maxjkfc/maxos/pkg/
+              desc: domain must not import pkg/
+        usecase-isolation:
+          list-mode: lax
+          files:
+            - "${config-path}/app/*/usecase/**"
+          deny:
+            - pkg: github.com/jackc/pgx
+              desc: use cases must not depend on the database driver; go through a port
+            - pkg: github.com/modelcontextprotocol/go-sdk
+              desc: use cases must not depend on the MCP SDK; go through a port
+            - pkg: github.com/maxjkfc/maxos/pkg/
+              desc: use cases must not import pkg/
+
+        # Layers inside the inbox context: adapter -> usecase -> domain.
+        inbox-domain:
+          list-mode: lax
+          files:
+            - "${config-path}/app/inbox/domain/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/inbox/usecase/
+              desc: domain must not depend on use cases
+            - pkg: github.com/maxjkfc/maxos/app/inbox/adapter/
+              desc: domain must not depend on adapters
+        inbox-usecase:
+          list-mode: lax
+          files:
+            - "${config-path}/app/inbox/usecase/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/inbox/adapter/
+              desc: use cases must not depend on adapters; go through a port
+        inbox-adapter:
+          list-mode: lax
+          files:
+            - "${config-path}/app/inbox/adapter/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/inbox/usecase/port/
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/inbox/usecase/
+              desc: adapters depend on usecase/port only; cmd/ injects the implementations
+
+        # Other contexts reach the inbox through its in-ports only.
+        inbox-boundary:
+          list-mode: lax
+          files:
+            - "${config-path}/app/**"
+            - "!${config-path}/app/inbox/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/inbox/usecase/port/in/
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/inbox/
+              desc: other contexts may import only app/inbox/usecase/port/in

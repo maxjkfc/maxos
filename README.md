@@ -2,7 +2,7 @@
 
 Go + PostgreSQL + MCP server, exposed through a Cloudflare Tunnel and protected by Cloudflare Access.
 
-M0 provides the `core_inbox` table and two MCP tools: `capture` and `inbox_recent`.
+M0 provides the `inbox_item` table and two MCP tools: `capture` and `inbox_recent`.
 
 ## Run
 
@@ -10,8 +10,8 @@ M0 provides the `core_inbox` table and two MCP tools: `capture` and `inbox_recen
 cp .env.example .env     # set POSTGRES_PASSWORD (and the Access values for `serve`)
 make up                  # start PostgreSQL (127.0.0.1:55432)
 make migrate             # apply migrations to the dev database
-make check               # go vet + golangci-lint + go test against a real Postgres (maxos_test)
-make sqlc                # regenerate internal/db/dbgen (Docker)
+make check               # go vet + golangci-lint + go test against a real Postgres (maxos_test) + sqlc drift check
+make sqlc                # regenerate app/*/adapter/out/persistence/postgres/dbgen (Docker)
 ```
 
 Commands (`maxos <command>`), configured through environment variables:

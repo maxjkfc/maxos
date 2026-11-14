@@ -2,8 +2,6 @@
 
 maxos 的分層、依賴規則與技術選型。所有開發（含 subagent 派工）以本檔為準。
 
-> 現況：M0 的程式碼（`internal/core`、`internal/access`、`internal/mcpserver`、`internal/db`）尚未符合本檔，重構後才一致。重構完成時刪除這一段。
-
 ## 1. 系統定位
 
 - 單一使用者的個人系統，跑在一台 Mac mini 上。
@@ -37,6 +35,7 @@ app/
         <kind>/                  其他對外實作
 pkg/                             與領域無關的技術元件
   config/  log/  postgres/  cfaccess/  mcpserver/
+migrations/                      goose 的 SQL migration（Go package，內嵌進 binary）
 internal/testpg/                 整合測試用的資料庫輔助
 docs/
 ```
@@ -46,7 +45,7 @@ docs/
 | Context | 職責 | 狀態 |
 |---|---|---|
 | `inbox` | 所有外部輸入的原始紀錄與冪等 | M0 |
-| `catalog` | project、party、tag、link（跨領域關聯） | M0 建表，M1 起使用 |
+| `catalog` | project、area、party、tag、link（跨領域關聯） | M0 建表，M1 起使用 |
 | `finance` | 帳本、匯入、報表、投資 | M1 起 |
 | `health` | 待定 | M6 之後 |
 | `project` | 待定；可能是外部系統，以 `external_ref` 對接 | 待評估 |
@@ -106,6 +105,7 @@ adapter  →  usecase  →  domain
 ## 6. 資料庫慣例
 
 - **Schema 變更**只能透過新增 migration 檔，不修改已合併的 migration。
+- **Migration 位置**：放在專案根目錄的 `migrations/`（Go package，以 embed 內嵌進 binary，`maxos migrate` 與整合測試都用它）；sqlc 的 schema 也來自這裡。
 - **資料表前綴**用 context 名稱：`inbox_`、`catalog_`、`fin_`。
 - **sqlc**：
   - 查詢檔與產生碼都放在該 context 的 `adapter/out/persistence/postgres/` 底下。
@@ -157,3 +157,4 @@ adapter  →  usecase  →  domain
 4. 在 use case 套件的 `new.go` 提供 `Module()`，並在 `cmd/dp.go` 掛上。
 5. 需要對外的動作，在 `adapter/in/mcp` 註冊工具。
 6. 更新第 2 節的 context 清單。
+7. 在 `.golangci.yml` 加上該 context 的 depguard 規則（複製 `inbox-*` 各條，改成該 context 的名稱與路徑）。

@@ -3,7 +3,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/maxos ./cmd/maxos
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/maxos .
 
 FROM alpine:3.24
 # ca-certificates: the Access verifier fetches JWKS over HTTPS.
