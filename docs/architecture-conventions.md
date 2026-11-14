@@ -48,7 +48,7 @@ docs/
 | `catalog` | project、area、party、tag、link（跨 context 關聯） | M0 建表，M1 起使用 |
 | `finance` | 帳本、匯入、報表、投資 | M1 起 |
 | `health` | 待定 | M6 之後 |
-| `project` | 待定；可能是外部系統，以 `external_ref` 對接 | 待評估 |
+| `project` | 待定；可能是外部系統，以外部參照對接（欄位待定） | 待評估 |
 
 ## 3. 各層職責
 
