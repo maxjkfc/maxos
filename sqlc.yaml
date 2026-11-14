@@ -1,0 +1,27 @@
+version: "2"
+sql:
+  - engine: postgresql
+    schema: migrations
+    queries: app/inbox/adapter/out/persistence/postgres/queries
+    gen:
+      go:
+        package: dbgen
+        out: app/inbox/adapter/out/persistence/postgres/dbgen
+        sql_package: pgx/v5
+        # Only the structs this context's queries use; the other contexts' tables
+        # get theirs from their own entry.
+        omit_unused_structs: true
+        overrides:
+          - db_type: uuid
+            go_type: github.com/google/uuid.UUID
+          - db_type: uuid
+            nullable: true
+            go_type: github.com/google/uuid.NullUUID
+          - db_type: timestamptz
+            go_type: time.Time
+          - db_type: timestamptz
+            nullable: true
+            go_type:
+              import: time
+              type: Time
+              pointer: true

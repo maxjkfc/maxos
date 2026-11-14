@@ -1,0 +1,6 @@
+.git
+.env
+bin
+maxos
+*.md
+compose.yaml
