@@ -29,12 +29,21 @@ const (
 	KindTransfer Kind = "transfer"
 	KindExchange Kind = "exchange"
 	KindOpening  Kind = "opening"
+	// KindReward is money or credit that a payment instrument gives back.
+	KindReward Kind = "reward"
+	// KindDealing is a change in what a party owes me, paid out of or into an
+	// account.
+	KindDealing Kind = "dealing"
+	// KindReconciliation makes up for the difference a reconciliation finds
+	// between what an account holds and what the ledger says.
+	KindReconciliation Kind = "reconciliation"
 )
 
 // Valid reports whether k is one of the kinds above.
 func (k Kind) Valid() bool {
 	switch k {
-	case KindExpense, KindIncome, KindTransfer, KindExchange, KindOpening:
+	case KindExpense, KindIncome, KindTransfer, KindExchange, KindOpening,
+		KindReward, KindDealing, KindReconciliation:
 		return true
 	}
 	return false
@@ -77,21 +86,35 @@ const (
 	BookConversion Book = "conversion"
 	// BookOpening is where the balance an account starts with comes from.
 	BookOpening Book = "opening"
+	// BookDealing is what a party owes me: the posting is positive when they owe
+	// me more, and negative when they owe me less, or when I owe them.
+	BookDealing Book = "dealing"
+	// BookReward is the rewards that payment instruments give back. Like an
+	// income, it grows by a negative posting.
+	BookReward Book = "reward"
+	// BookAdjustment is the counterpart of the reconciliation of an instrument
+	// that is not a currency: the quantity that was missing or too much.
+	BookAdjustment Book = "adjustment"
 )
 
 // Valid reports whether b is one of the books above.
 func (b Book) Valid() bool {
 	switch b {
-	case BookAccount, BookExpense, BookIncome, BookConversion, BookOpening:
+	case BookAccount, BookExpense, BookIncome, BookConversion, BookOpening,
+		BookDealing, BookReward, BookAdjustment:
 		return true
 	}
 	return false
 }
 
-// carriesCategory reports whether a posting of the book names a category and has
-// a base amount.
+// carriesCategory reports whether a posting of the book names a category.
 func (b Book) carriesCategory() bool {
 	return b == BookExpense || b == BookIncome
+}
+
+// carriesBase reports whether a posting of the book has a base amount.
+func (b Book) carriesBase() bool {
+	return b == BookExpense || b == BookIncome || b == BookReward
 }
 
 // Posting is one movement of one instrument within a transaction. The postings
@@ -105,24 +128,33 @@ type Posting struct {
 	AccountID *uuid.UUID
 	// CategoryID is the category of an expense or an income posting, and nil for
 	// every other book.
-	CategoryID   *uuid.UUID
+	CategoryID *uuid.UUID
+	// PartyID is the id of the catalog party of a dealing posting, and nil for
+	// every other book. Whether the party exists and is in use is for the use case
+	// to check.
+	PartyID      *uuid.UUID
 	InstrumentID uuid.UUID
 	// Quantity is how much of the instrument moves, and is never zero. The sign is
 	// that of the thing the posting is made to: positive when it grows (an account
-	// holds more, an expense happens), negative when it shrinks (an income
-	// happens).
+	// holds more, an expense happens, a party owes me more), negative when it
+	// shrinks (an income or a reward happens, a party owes me less).
 	Quantity decimal.Decimal
 	// BaseAmount is Quantity in the base currency, at the rate of the day of the
-	// transaction and fixed from then on. It has the sign of Quantity. An expense
-	// or an income posting has one, and every other posting has none. For an
-	// instrument that is the base currency it equals Quantity.
+	// transaction and fixed from then on. It has the sign of Quantity. An expense,
+	// an income or a reward posting has one, and every other posting has none. For
+	// an instrument that is the base currency it equals Quantity.
 	BaseAmount *decimal.Decimal
-	Memo       string
+	// Discount is what the merchant took off the price at checkout, in the
+	// instrument of the posting, and is greater than zero. Only an expense posting
+	// may have one, and it is only a record of it: Quantity is what was paid, and
+	// no balance or total counts the discount.
+	Discount *decimal.Decimal
+	Memo     string
 }
 
 // validate checks what a posting must satisfy by itself: that it belongs to a
 // book, has the fields its book needs and no others, moves something, and that
-// its base amount is a consistent one.
+// its base amount and discount are consistent ones.
 func (p Posting) validate() error {
 	if !p.Book.Valid() {
 		return fmt.Errorf("%w: %q is not a book", ErrMalformedPosting, p.Book)
@@ -137,7 +169,8 @@ func (p Posting) validate() error {
 	}{
 		{"an account", p.AccountID != nil, p.Book == BookAccount},
 		{"a category", p.CategoryID != nil, p.Book.carriesCategory()},
-		{"a base amount", p.BaseAmount != nil, p.Book.carriesCategory()},
+		{"a party", p.PartyID != nil, p.Book == BookDealing},
+		{"a base amount", p.BaseAmount != nil, p.Book.carriesBase()},
 	}
 	for _, f := range fields {
 		switch {
@@ -147,7 +180,16 @@ func (p Posting) validate() error {
 			return fmt.Errorf("%w: the %s posting must not have %s", ErrMalformedPosting, p.Book, f.name)
 		}
 	}
-	if !p.Book.carriesCategory() {
+	if p.Discount != nil {
+		if p.Book != BookExpense {
+			return fmt.Errorf("%w: the %s posting must not have a discount", ErrMalformedPosting, p.Book)
+		}
+		if !p.Discount.IsPositive() {
+			return fmt.Errorf("%w: the discount %s of the %s posting must be greater than zero",
+				ErrMalformedPosting, *p.Discount, p.Book)
+		}
+	}
+	if !p.Book.carriesBase() {
 		return nil
 	}
 	base := *p.BaseAmount
@@ -195,15 +237,25 @@ type Transaction struct {
 // Validate checks the invariants of the ledger on the transaction, and returns
 // the first it breaks:
 //
-//   - every posting has the fields its book needs and no others, and a base
-//     amount that has the sign of its quantity (ErrMalformedPosting), and equals
-//     it for the base currency (ErrBaseAmountMismatch);
-//   - the postings are the ones the kind is made of: an expense is one account
-//     posting and one or more expense postings, an income the same with income
-//     postings, a transfer two account postings of different accounts, an
-//     exchange two account and two conversion postings of two instruments, an
-//     opening balance an account posting and an opening posting (ErrWrongPostings,
-//     ErrSameAccount);
+//   - every posting has the fields its book needs and no others, a discount only
+//     if it is an expense posting, and a base amount that has the sign of its
+//     quantity (ErrMalformedPosting), and equals it for the base currency
+//     (ErrBaseAmountMismatch);
+//   - only a reconciliation uses a system category (ErrSystemCategory);
+//   - the postings are the ones the kind is made of (ErrWrongPostings,
+//     ErrSameAccount, ErrDuplicateParty): an expense is one account posting and
+//     one or more expense postings, and a dealing posting for each party it was
+//     paid for, or, when a party paid, one dealing posting in place of the account
+//     posting; an income is one account posting and one or more income postings;
+//     a transfer is two account postings of different accounts; an exchange two
+//     account and two conversion postings of two instruments; a dealing an
+//     account posting and a dealing posting; a reward an account posting and a
+//     reward posting; an opening balance an account posting and an opening
+//     posting; a reconciliation an account posting and the posting that makes up
+//     for it, an expense or an income of the system category of its direction, or
+//     an adjustment. An income, a transfer, an exchange, a dealing and a reward
+//     may also have fees, each an expense posting and the account posting that
+//     pays it;
 //   - each posting moves money the way the kind says: an expense takes money out
 //     of its account, an income puts money into it, a transfer and an exchange do
 //     both (ErrWrongSign);
@@ -225,6 +277,9 @@ func (t Transaction) Validate() error {
 		if err := p.validate(); err != nil {
 			return fmt.Errorf("posting %d: %w", p.Seq, err)
 		}
+		if p.CategoryID != nil && IsSystemCategory(*p.CategoryID) && t.Kind != KindReconciliation {
+			return fmt.Errorf("posting %d: %w: category %s is for reconciliations", p.Seq, ErrSystemCategory, *p.CategoryID)
+		}
 	}
 	if err := t.checkKind(); err != nil {
 		return err
@@ -233,19 +288,31 @@ func (t Transaction) Validate() error {
 }
 
 // checkKind checks that the postings are the ones the kind is made of, and move
-// money the way it does.
+// money the way it does. Besides the expense, the opening balance and the
+// reconciliation, a kind is checked on the postings that are left once its fees
+// are taken out.
 func (t Transaction) checkKind() error {
 	switch t.Kind {
 	case KindExpense:
-		return t.checkCategorized(BookExpense)
+		return t.checkExpense()
+	case KindOpening:
+		return t.checkOpening()
+	case KindReconciliation:
+		return t.checkReconciliation()
+	}
+
+	t.Postings = t.withoutFees()
+	switch t.Kind {
 	case KindIncome:
-		return t.checkCategorized(BookIncome)
+		return t.checkIncome()
 	case KindTransfer:
 		return t.checkTransfer()
 	case KindExchange:
 		return t.checkExchange()
-	case KindOpening:
-		return t.checkOpening()
+	case KindDealing:
+		return t.checkDealing()
+	case KindReward:
+		return t.checkReward()
 	default:
 		return fmt.Errorf("%w %q", ErrInvalidKind, t.Kind)
 	}
@@ -260,22 +327,97 @@ func (t Transaction) booksOf() map[Book][]Posting {
 	return books
 }
 
-// checkCategorized checks an expense or an income: one account posting and one or
-// more postings of the category book, nothing else. An expense takes money out of
-// the account and makes its categories grow; an income does the reverse.
-func (t Transaction) checkCategorized(categoryBook Book) error {
+// withoutFees returns the postings of the transaction that are not fees. A fee is
+// a positive expense posting without a discount, in a kind that has no expense of
+// its own, together with the account posting that pays it: the same instrument,
+// the same quantity taken out. The constructors put each fee after the postings
+// the kind is made of, so when several account postings could pay one, the last is
+// the one that does. An expense posting that nothing pays is not taken for a fee:
+// it stays, and the kind refuses it.
+func (t Transaction) withoutFees() []Posting {
+	taken := make([]bool, len(t.Postings))
+	for i, fee := range t.Postings {
+		if fee.Book != BookExpense || !fee.Quantity.IsPositive() || fee.Discount != nil {
+			continue
+		}
+		paid := fee.Quantity.Neg()
+		for j := len(t.Postings) - 1; j >= 0; j-- {
+			p := t.Postings[j]
+			if !taken[j] && p.Book == BookAccount && p.InstrumentID == fee.InstrumentID && p.Quantity.Equal(paid) {
+				taken[i], taken[j] = true, true
+				break
+			}
+		}
+	}
+	core := make([]Posting, 0, len(t.Postings))
+	for i, p := range t.Postings {
+		if !taken[i] {
+			core = append(core, p)
+		}
+	}
+	return core
+}
+
+// checkExpense checks an expense: who paid and where the money went. The money
+// went to one or more expense postings. Either an account paid, with one account
+// posting that takes it out, or a party paid on my behalf, with one dealing
+// posting that takes it out of what the party owes me and no account posting. An
+// account that paid may have paid for others too: each one it paid for has a
+// dealing posting, who owes me that much, and a party has at most one.
+func (t Transaction) checkExpense() error {
 	books := t.booksOf()
-	accounts, categories := books[BookAccount], books[categoryBook]
-	if len(accounts) != 1 || len(categories) == 0 || len(accounts)+len(categories) != len(t.Postings) {
-		return fmt.Errorf("%w: an %s is one account posting and one or more %s postings", ErrWrongPostings, t.Kind, categoryBook)
+	accounts, expenses, dealings := books[BookAccount], books[BookExpense], books[BookDealing]
+	if len(accounts) > 1 || len(expenses) == 0 || len(accounts)+len(expenses)+len(dealings) != len(t.Postings) {
+		return fmt.Errorf("%w: an expense is one account posting, or one dealing posting when a party paid, and one or more expense postings",
+			ErrWrongPostings)
 	}
-	accountLoses := categoryBook == BookExpense
-	if accounts[0].Quantity.IsNegative() != accountLoses {
-		return fmt.Errorf("%w: the account posting of an %s must be %s", ErrWrongSign, t.Kind, signWord(accountLoses))
+	for _, p := range expenses {
+		if p.Quantity.IsNegative() {
+			return fmt.Errorf("%w: the expense postings of an expense must be positive", ErrWrongSign)
+		}
 	}
-	for _, p := range categories {
-		if p.Quantity.IsNegative() == accountLoses {
-			return fmt.Errorf("%w: the %s postings of an %s must be %s", ErrWrongSign, categoryBook, t.Kind, signWord(!accountLoses))
+	if len(accounts) == 1 {
+		if !accounts[0].Quantity.IsNegative() {
+			return fmt.Errorf("%w: the account posting of an expense must be negative", ErrWrongSign)
+		}
+		for _, p := range dealings {
+			if p.Quantity.IsNegative() {
+				return fmt.Errorf("%w: the dealing postings of an expense paid from an account must be positive", ErrWrongSign)
+			}
+		}
+	} else {
+		if len(dealings) != 1 {
+			return fmt.Errorf("%w: an expense with no account posting has one dealing posting, of the party that paid", ErrWrongPostings)
+		}
+		if !dealings[0].Quantity.IsNegative() {
+			return fmt.Errorf("%w: the dealing posting of an expense paid by a party must be negative", ErrWrongSign)
+		}
+	}
+	seen := make(map[uuid.UUID]struct{}, len(dealings))
+	for _, p := range dealings {
+		if _, repeated := seen[*p.PartyID]; repeated {
+			return fmt.Errorf("%w: party %s has two dealing postings", ErrDuplicateParty, *p.PartyID)
+		}
+		seen[*p.PartyID] = struct{}{}
+	}
+	return nil
+}
+
+// checkIncome checks an income: one account posting and one or more income
+// postings, nothing else. An income puts money into the account and makes its
+// categories shrink.
+func (t Transaction) checkIncome() error {
+	books := t.booksOf()
+	accounts, incomes := books[BookAccount], books[BookIncome]
+	if len(accounts) != 1 || len(incomes) == 0 || len(accounts)+len(incomes) != len(t.Postings) {
+		return fmt.Errorf("%w: an income is one account posting and one or more income postings", ErrWrongPostings)
+	}
+	if accounts[0].Quantity.IsNegative() {
+		return fmt.Errorf("%w: the account posting of an income must be positive", ErrWrongSign)
+	}
+	for _, p := range incomes {
+		if !p.Quantity.IsNegative() {
+			return fmt.Errorf("%w: the income postings of an income must be negative", ErrWrongSign)
 		}
 	}
 	return nil
@@ -333,6 +475,80 @@ func (t Transaction) checkOpening() error {
 	return nil
 }
 
+// checkDealing checks a dealing: an account posting and a dealing posting. Money
+// paid out of the account makes what the party owes me grow, and money paid into
+// it makes it shrink.
+func (t Transaction) checkDealing() error {
+	books := t.booksOf()
+	accounts, dealings := books[BookAccount], books[BookDealing]
+	if len(accounts) != 1 || len(dealings) != 1 || len(t.Postings) != 2 {
+		return fmt.Errorf("%w: a dealing is one account posting and one dealing posting", ErrWrongPostings)
+	}
+	if accounts[0].Quantity.Sign() == dealings[0].Quantity.Sign() {
+		return fmt.Errorf("%w: a dealing takes money out of the account and grows the dealing, or puts it into the account and shrinks the dealing", ErrWrongSign)
+	}
+	return nil
+}
+
+// checkReward checks a reward: an account posting that puts money into the
+// account, and the reward posting that mirrors it.
+func (t Transaction) checkReward() error {
+	books := t.booksOf()
+	accounts, rewards := books[BookAccount], books[BookReward]
+	if len(accounts) != 1 || len(rewards) != 1 || len(t.Postings) != 2 {
+		return fmt.Errorf("%w: a reward is one account posting and one reward posting", ErrWrongPostings)
+	}
+	if !accounts[0].Quantity.IsPositive() {
+		return fmt.Errorf("%w: the account posting of a reward must be positive", ErrWrongSign)
+	}
+	if !rewards[0].Quantity.IsNegative() {
+		return fmt.Errorf("%w: the reward posting of a reward must be negative", ErrWrongSign)
+	}
+	return nil
+}
+
+// checkReconciliation checks a reconciliation: an account posting and the posting
+// that makes up for what it adds or takes away. A currency that is short is an
+// expense of the system category of expenses, and one that is over is an income
+// of the system category of incomes; any other instrument has an adjustment.
+func (t Transaction) checkReconciliation() error {
+	accounts := t.booksOf()[BookAccount]
+	if len(accounts) != 1 || len(t.Postings) != 2 {
+		return fmt.Errorf("%w: a reconciliation is one account posting and the posting that makes up for it", ErrWrongPostings)
+	}
+	account := accounts[0]
+	counterpart := t.Postings[0]
+	if counterpart.Book == BookAccount {
+		counterpart = t.Postings[1]
+	}
+	switch counterpart.Book {
+	case BookExpense:
+		if *counterpart.CategoryID != UnrecordedExpenseCategoryID {
+			return fmt.Errorf("%w: the expense of a reconciliation is of the system category %s, not %s",
+				ErrWrongPostings, UnrecordedExpenseCategoryID, *counterpart.CategoryID)
+		}
+		if !counterpart.Quantity.IsPositive() {
+			return fmt.Errorf("%w: the expense of a reconciliation must be positive", ErrWrongSign)
+		}
+	case BookIncome:
+		if *counterpart.CategoryID != UnrecordedIncomeCategoryID {
+			return fmt.Errorf("%w: the income of a reconciliation is of the system category %s, not %s",
+				ErrWrongPostings, UnrecordedIncomeCategoryID, *counterpart.CategoryID)
+		}
+		if !counterpart.Quantity.IsNegative() {
+			return fmt.Errorf("%w: the income of a reconciliation must be negative", ErrWrongSign)
+		}
+	case BookAdjustment:
+	default:
+		return fmt.Errorf("%w: a reconciliation is made up for by an expense, an income or an adjustment, not a %s posting",
+			ErrWrongPostings, counterpart.Book)
+	}
+	if account.Quantity.Sign() == counterpart.Quantity.Sign() {
+		return fmt.Errorf("%w: the posting that makes up for a reconciliation has the other sign than its account posting", ErrWrongSign)
+	}
+	return nil
+}
+
 // checkBalanced checks the first invariant of the ledger: in each instrument the
 // quantities of the postings add up to zero.
 func (t Transaction) checkBalanced() error {
@@ -351,14 +567,6 @@ func (t Transaction) checkBalanced() error {
 		}
 	}
 	return nil
-}
-
-// signWord names the sign a posting must have, for an error message.
-func signWord(negative bool) string {
-	if negative {
-		return "negative"
-	}
-	return "positive"
 }
 
 // Confirm returns the transaction confirmed: from then on it counts toward the

@@ -29,10 +29,15 @@ func insertCategory(t *testing.T, r *postgres.CategoryRepo, direction model.Dire
 	return stored
 }
 
+// categoryNames returns the names of the categories, without the system
+// categories that migration 0005 seeds in every database: the tests that list
+// what they inserted are about those.
 func categoryNames(categories []model.Category) []string {
-	names := make([]string, len(categories))
-	for i, category := range categories {
-		names[i] = category.Name
+	names := make([]string, 0, len(categories))
+	for _, category := range categories {
+		if !category.IsSystem() {
+			names = append(names, category.Name)
+		}
 	}
 	return names
 }
@@ -273,5 +278,51 @@ func TestCategoryListFiltersAndOrders(t *testing.T) {
 				t.Fatalf("List(%q, %v) = %v, want %v", tt.direction, tt.includeArchived, names, tt.want)
 			}
 		})
+	}
+}
+
+func TestTheSystemCategoriesAreSeededUnderTheIdsOfTheModelAndNeverArchived(t *testing.T) {
+	ctx := context.Background()
+	r := postgres.NewCategoryRepo(testpg.New(t))
+	system := map[uuid.UUID]model.Direction{
+		model.UnrecordedExpenseCategoryID: model.DirectionExpense,
+		model.UnrecordedIncomeCategoryID:  model.DirectionIncome,
+	}
+
+	for id, direction := range system {
+		got, err := r.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v, want the system category of %s seeded under the id of the model", id, err, direction)
+		}
+		if got.Name != "未記錄" || got.Direction != direction || got.ParentID != nil || got.IsArchived() || !got.IsSystem() {
+			t.Errorf("category = %+v, want the top-level category 未記錄 of %s, in use", got, direction)
+		}
+
+		// Another top-level category of that name cannot be added next to it.
+		if _, err := r.Insert(ctx, newCategory(direction, nil, "未記錄")); !errors.Is(err, model.ErrAlreadyExists) {
+			t.Errorf("Insert of a second 未記錄 of %s: err = %v, want ErrAlreadyExists", direction, err)
+		}
+
+		// The table keeps it in use whatever asks for it to be archived.
+		_, err = r.Archive(ctx, id)
+		wantConstraint(t, err, checkViolation, "fin_category_system_not_archived_check")
+		if got, err := r.Get(ctx, id); err != nil || got.IsArchived() {
+			t.Errorf("Get(%s) = %+v, %v, want it still in use", id, got, err)
+		}
+	}
+
+	// They are listed with every other category of their direction.
+	listed, err := r.List(ctx, "", false)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	found := 0
+	for _, c := range listed {
+		if c.IsSystem() {
+			found++
+		}
+	}
+	if found != len(system) {
+		t.Errorf("List has %d system categories, want %d", found, len(system))
 	}
 }

@@ -1,15 +1,19 @@
 // Package usecase declares what the finance context offers its callers: the use
 // cases on the reference data every transaction points at (instruments,
 // institutions, accounts and categories) and the ledger (recording, confirming,
-// voiding and listing transactions, and balances). It is the only part of the
-// finance context that other contexts may depend on.
+// voiding and listing transactions, reconciling accounts, and balances and
+// dealings). It is the only part of the finance context that other contexts may
+// depend on.
 //
 // The use cases return the errors of the finance domain (ErrNameEmpty,
 // ErrNotFound, ErrAlreadyExists, ErrArchived and the rest, all in domain/model),
 // wrapped with what was being done; the ledger adds the ones about transactions
-// (ErrAmountNotPositive, ErrBaseAmountRequired, ErrNotDraft and the rest). A
-// project, area or tag that cannot be used comes back as the *ReferenceError of
-// the catalog's in-port, wrapped the same way.
+// (ErrAmountNotPositive, ErrBaseAmountRequired, ErrNotDraft and the rest), and
+// Reconcile the two that carry something with them: *PendingDraftsError, the
+// number of drafts that stand in its way, and *DifferenceBaseAmountRequiredError,
+// the difference to ask again with. A project, area, party or tag that cannot be
+// used comes back as the *ReferenceError of the catalog's in-port, wrapped the
+// same way.
 package usecase
 
 import (

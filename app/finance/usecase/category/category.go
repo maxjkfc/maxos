@@ -60,10 +60,17 @@ func (s *Service) CreateCategory(ctx context.Context, in usecase.CreateCategoryI
 	return toCategory(stored), nil
 }
 
-// ArchiveCategory archives the category; the repo archives its subcategories
-// with it. An archived category stays archived: asking again returns it as it
-// is.
+// ArchiveCategory archives the category, unless it is a system category, which
+// is never archived; the repo archives its subcategories with it. An archived
+// category stays archived: asking again returns it as it is.
 func (s *Service) ArchiveCategory(ctx context.Context, id uuid.UUID) (usecase.Category, error) {
+	category, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return usecase.Category{}, fmt.Errorf("archive category %s: %w", id, err)
+	}
+	if err := category.CheckArchivable(); err != nil {
+		return usecase.Category{}, err
+	}
 	stored, err := s.repo.Archive(ctx, id)
 	if err != nil {
 		return usecase.Category{}, fmt.Errorf("archive category %s: %w", id, err)

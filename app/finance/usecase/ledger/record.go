@@ -2,7 +2,6 @@ package ledger
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/google/uuid"
 
@@ -10,32 +9,20 @@ import (
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
 )
 
-// RecordExpense loads the account, the instrument and the categories the request
-// names, and records the expense the domain makes of them as a draft.
+// RecordExpense loads the account, or checks the party that paid, the parties the
+// expense was paid for, the instrument and the categories the request names, and
+// records the expense the domain makes of them as a draft.
 func (s *Service) RecordExpense(ctx context.Context, in usecase.RecordExpenseInput) (usecase.RecordOutput, error) {
-	return s.recordCategorized(ctx, in.RecordDetails, in.AccountID, in.InstrumentID, in.Lines, model.NewExpense)
-}
-
-// RecordIncome is RecordExpense for money that comes in.
-func (s *Service) RecordIncome(ctx context.Context, in usecase.RecordIncomeInput) (usecase.RecordOutput, error) {
-	return s.recordCategorized(ctx, in.RecordDetails, in.AccountID, in.InstrumentID, in.Lines, model.NewIncome)
-}
-
-// recordCategorized records an expense or an income, which only differ in the
-// constructor of the domain.
-func (s *Service) recordCategorized(
-	ctx context.Context,
-	d usecase.RecordDetails,
-	accountID, instrumentID uuid.UUID,
-	lines []usecase.CategoryLine,
-	newTransaction func(model.CategorizedParams) (model.Transaction, error),
-) (usecase.RecordOutput, error) {
-	return s.record(ctx, d, func(ctx context.Context, h model.Header) (model.Transaction, error) {
-		account, err := s.account(ctx, accountID)
-		if err != nil {
-			return model.Transaction{}, err
+	return s.record(ctx, in.RecordDetails, func(ctx context.Context, h model.Header) (model.Transaction, error) {
+		var account *model.Account
+		if in.AccountID != nil {
+			loaded, err := s.account(ctx, *in.AccountID)
+			if err != nil {
+				return model.Transaction{}, err
+			}
+			account = &loaded
 		}
-		instrument, err := s.instrument(ctx, instrumentID)
+		instrument, err := s.instrument(ctx, in.InstrumentID)
 		if err != nil {
 			return model.Transaction{}, err
 		}
@@ -43,31 +30,68 @@ func (s *Service) recordCategorized(
 		if err != nil {
 			return model.Transaction{}, err
 		}
-
-		categories := make(map[uuid.UUID]model.Category, len(lines))
-		modelLines := make([]model.CategoryLine, len(lines))
-		for i, line := range lines {
-			category, loaded := categories[line.CategoryID]
-			if !loaded {
-				if category, err = s.category(ctx, line.CategoryID); err != nil {
-					return model.Transaction{}, fmt.Errorf("line %d: %w", i+1, err)
-				}
-				categories[line.CategoryID] = category
-			}
-			modelLines[i] = model.CategoryLine{
-				Category:   category,
-				Amount:     line.Amount,
-				BaseAmount: line.BaseAmount,
-				Memo:       line.Memo,
-			}
+		lines, err := s.lines(ctx, in.Lines)
+		if err != nil {
+			return model.Transaction{}, err
 		}
 
-		return newTransaction(model.CategorizedParams{
+		shares := make([]model.Share, len(in.Shares))
+		parties := make([]uuid.UUID, 0, len(in.Shares)+1)
+		for i, share := range in.Shares {
+			shares[i] = model.Share{PartyID: share.PartyID, Amount: share.Amount, Memo: share.Memo}
+			parties = append(parties, share.PartyID)
+		}
+		if in.PaidByPartyID != nil {
+			parties = append(parties, *in.PaidByPartyID)
+		}
+		if err := s.verifyParties(ctx, parties...); err != nil {
+			return model.Transaction{}, err
+		}
+
+		return model.NewExpense(model.ExpenseParams{
+			Header:       h,
+			Account:      account,
+			PaidBy:       in.PaidByPartyID,
+			Instrument:   instrument,
+			BaseCurrency: base,
+			Lines:        lines,
+			Shares:       shares,
+		})
+	})
+}
+
+// RecordIncome is RecordExpense for money that comes in, and has fees instead of
+// shares.
+func (s *Service) RecordIncome(ctx context.Context, in usecase.RecordIncomeInput) (usecase.RecordOutput, error) {
+	return s.record(ctx, in.RecordDetails, func(ctx context.Context, h model.Header) (model.Transaction, error) {
+		account, err := s.account(ctx, in.AccountID)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		instrument, err := s.instrument(ctx, in.InstrumentID)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		base, err := s.baseCurrency(ctx, instrument)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		lines, err := s.lines(ctx, in.Lines)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		fees, err := s.fees(ctx, in.Fees)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+
+		return model.NewIncome(model.IncomeParams{
 			Header:       h,
 			Account:      account,
 			Instrument:   instrument,
 			BaseCurrency: base,
-			Lines:        modelLines,
+			Lines:        lines,
+			Fees:         fees,
 		})
 	})
 }
@@ -87,12 +111,22 @@ func (s *Service) RecordTransfer(ctx context.Context, in usecase.RecordTransferI
 		if err != nil {
 			return model.Transaction{}, err
 		}
+		base, err := s.baseCurrency(ctx, instrument)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		fees, err := s.fees(ctx, in.Fees)
+		if err != nil {
+			return model.Transaction{}, err
+		}
 		return model.NewTransfer(model.TransferParams{
-			Header:     h,
-			From:       from,
-			To:         to,
-			Instrument: instrument,
-			Amount:     in.Amount,
+			Header:       h,
+			From:         from,
+			To:           to,
+			Instrument:   instrument,
+			Amount:       in.Amount,
+			BaseCurrency: base,
+			Fees:         fees,
 		})
 	})
 }
@@ -116,6 +150,14 @@ func (s *Service) RecordExchange(ctx context.Context, in usecase.RecordExchangeI
 		if err != nil {
 			return model.Transaction{}, err
 		}
+		base, err := s.baseCurrency(ctx, fromInstrument)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		fees, err := s.fees(ctx, in.Fees)
+		if err != nil {
+			return model.Transaction{}, err
+		}
 		return model.NewExchange(model.ExchangeParams{
 			Header:         h,
 			FromAccount:    fromAccount,
@@ -124,6 +166,76 @@ func (s *Service) RecordExchange(ctx context.Context, in usecase.RecordExchangeI
 			ToInstrument:   toInstrument,
 			FromAmount:     in.FromAmount,
 			ToAmount:       in.ToAmount,
+			BaseCurrency:   base,
+			Fees:           fees,
+		})
+	})
+}
+
+// RecordDealing records money paid out to a party, or received from one, and what
+// the party owes me changing with it. The party is checked with the catalog.
+func (s *Service) RecordDealing(ctx context.Context, in usecase.RecordDealingInput) (usecase.RecordOutput, error) {
+	return s.record(ctx, in.RecordDetails, func(ctx context.Context, h model.Header) (model.Transaction, error) {
+		account, err := s.account(ctx, in.AccountID)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		instrument, err := s.instrument(ctx, in.InstrumentID)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		base, err := s.baseCurrency(ctx, instrument)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		if err := s.verifyParties(ctx, in.PartyID); err != nil {
+			return model.Transaction{}, err
+		}
+		fees, err := s.fees(ctx, in.Fees)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		return model.NewDealing(model.DealingParams{
+			Header:       h,
+			Account:      account,
+			PartyID:      in.PartyID,
+			Instrument:   instrument,
+			BaseCurrency: base,
+			Amount:       in.Amount,
+			Direction:    model.DealingDirection(in.Direction),
+			Fees:         fees,
+		})
+	})
+}
+
+// RecordReward records money or credit that a payment instrument gave back into
+// an account.
+func (s *Service) RecordReward(ctx context.Context, in usecase.RecordRewardInput) (usecase.RecordOutput, error) {
+	return s.record(ctx, in.RecordDetails, func(ctx context.Context, h model.Header) (model.Transaction, error) {
+		account, err := s.account(ctx, in.AccountID)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		instrument, err := s.instrument(ctx, in.InstrumentID)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		base, err := s.baseCurrency(ctx, instrument)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		fees, err := s.fees(ctx, in.Fees)
+		if err != nil {
+			return model.Transaction{}, err
+		}
+		return model.NewReward(model.RewardParams{
+			Header:       h,
+			Account:      account,
+			Instrument:   instrument,
+			BaseCurrency: base,
+			Amount:       in.Amount,
+			BaseAmount:   in.BaseAmount,
+			Fees:         fees,
 		})
 	})
 }

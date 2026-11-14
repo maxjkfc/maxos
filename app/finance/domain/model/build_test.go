@@ -110,8 +110,8 @@ func signed(d decimal.Decimal) string {
 }
 
 // describe writes the postings of a transaction the way the design table does:
-// book, what it is made to, quantity and instrument, and the base amount when
-// there is one. names says what to call each id.
+// book, what it is made to, quantity and instrument, and the base amount and the
+// discount when there are some. names says what to call each id.
 func describe(txn model.Transaction, names map[uuid.UUID]string) []string {
 	out := make([]string, 0, len(txn.Postings))
 	for _, p := range txn.Postings {
@@ -121,10 +121,15 @@ func describe(txn model.Transaction, names map[uuid.UUID]string) []string {
 			target += "(" + names[*p.AccountID] + ")"
 		case p.CategoryID != nil:
 			target += "(" + names[*p.CategoryID] + ")"
+		case p.PartyID != nil:
+			target += "(" + names[*p.PartyID] + ")"
 		}
 		line := fmt.Sprintf("%s %s %s", target, signed(p.Quantity), names[p.InstrumentID])
 		if p.BaseAmount != nil {
 			line += ", base " + signed(*p.BaseAmount)
+		}
+		if p.Discount != nil {
+			line += ", discount " + p.Discount.String()
 		}
 		out = append(out, line)
 	}
@@ -153,9 +158,9 @@ func TestNewExpenseInTheBaseCurrency(t *testing.T) {
 	twd := newTWD(t)
 	names := map[uuid.UUID]string{cash.ID: "現金", food.ID: "飲食", twd.ID: "TWD"}
 
-	txn, err := model.NewExpense(model.CategorizedParams{
+	txn, err := model.NewExpense(model.ExpenseParams{
 		Header:     header(testKey),
-		Account:    cash,
+		Account:    &cash,
 		Instrument: twd,
 		Lines:      []model.CategoryLine{{Category: food, Amount: dec("120")}},
 	})
@@ -179,9 +184,9 @@ func TestNewExpenseInAForeignCurrencyKeepsTheBaseAmountOfTheCaller(t *testing.T)
 	twd := newTWD(t)
 	names := map[uuid.UUID]string{card.ID: "卡", food.ID: "飲食", usd.ID: "USD", twd.ID: "TWD"}
 
-	txn, err := model.NewExpense(model.CategorizedParams{
+	txn, err := model.NewExpense(model.ExpenseParams{
 		Header:       header(testKey),
-		Account:      card,
+		Account:      &card,
 		Instrument:   usd,
 		BaseCurrency: twd,
 		Lines:        []model.CategoryLine{{Category: food, Amount: dec("100"), BaseAmount: decPtr("3200")}},
@@ -203,9 +208,9 @@ func TestNewExpenseSplitsAPaymentAmongCategories(t *testing.T) {
 	twd := newTWD(t)
 	names := map[uuid.UUID]string{cash.ID: "現金", groceries.ID: "食材", household.ID: "日用品", twd.ID: "TWD"}
 
-	txn, err := model.NewExpense(model.CategorizedParams{
+	txn, err := model.NewExpense(model.ExpenseParams{
 		Header:     header(testKey),
-		Account:    cash,
+		Account:    &cash,
 		Instrument: twd,
 		Lines: []model.CategoryLine{
 			{Category: groceries, Amount: dec("300"), Memo: " 蔬菜 "},
@@ -233,9 +238,9 @@ func TestNewExpenseSplitInAForeignCurrencyNeedsABaseAmountPerLine(t *testing.T) 
 	usd := newCurrency(t, "USD", 2)
 	twd := newTWD(t)
 	names := map[uuid.UUID]string{card.ID: "卡", groceries.ID: "食材", household.ID: "日用品", usd.ID: "USD", twd.ID: "TWD"}
-	params := model.CategorizedParams{
+	params := model.ExpenseParams{
 		Header:       header(testKey),
-		Account:      card,
+		Account:      &card,
 		Instrument:   usd,
 		BaseCurrency: twd,
 		Lines: []model.CategoryLine{
@@ -267,7 +272,7 @@ func TestNewIncome(t *testing.T) {
 	twd := newTWD(t)
 	names := map[uuid.UUID]string{bank.ID: "薪轉戶", salary.ID: "薪水", twd.ID: "TWD"}
 
-	txn, err := model.NewIncome(model.CategorizedParams{
+	txn, err := model.NewIncome(model.IncomeParams{
 		Header:     header(testKey),
 		Account:    bank,
 		Instrument: twd,
@@ -293,7 +298,7 @@ func TestNewIncomeInAForeignCurrency(t *testing.T) {
 	twd := newTWD(t)
 	names := map[uuid.UUID]string{wallet.ID: "錢包", salary.ID: "薪水", usd.ID: "USD", twd.ID: "TWD"}
 
-	txn, err := model.NewIncome(model.CategorizedParams{
+	txn, err := model.NewIncome(model.IncomeParams{
 		Header:       header(testKey),
 		Account:      wallet,
 		Instrument:   usd,
@@ -469,9 +474,9 @@ func TestConstructorsKeepTheHeaderTidy(t *testing.T) {
 	h.OccurredAt = &at
 	h.ProjectID, h.AreaID = &project, &area
 	h.TagIDs = []uuid.UUID{second, first, second}
-	txn, err := model.NewExpense(model.CategorizedParams{
+	txn, err := model.NewExpense(model.ExpenseParams{
 		Header:     h,
-		Account:    cash,
+		Account:    &cash,
 		Instrument: twd,
 		Lines:      []model.CategoryLine{{Category: food, Amount: dec("120")}},
 	})
@@ -502,8 +507,8 @@ func TestConstructorsRefuseABadHeader(t *testing.T) {
 	food := topLevel(t, model.DirectionExpense, "飲食")
 	twd := newTWD(t)
 	expense := func(h model.Header) error {
-		_, err := model.NewExpense(model.CategorizedParams{
-			Header: h, Account: cash, Instrument: twd, Lines: []model.CategoryLine{{Category: food, Amount: dec("1")}},
+		_, err := model.NewExpense(model.ExpenseParams{
+			Header: h, Account: &cash, Instrument: twd, Lines: []model.CategoryLine{{Category: food, Amount: dec("1")}},
 		})
 		return err
 	}
@@ -540,10 +545,10 @@ func TestNewExpenseRefuses(t *testing.T) {
 	usd := newCurrency(t, "USD", 2)
 	jpy := newCurrency(t, "JPY", 0)
 	twd := newTWD(t)
-	valid := func() model.CategorizedParams {
-		return model.CategorizedParams{
+	valid := func() model.ExpenseParams {
+		return model.ExpenseParams{
 			Header:       header(testKey),
-			Account:      cash,
+			Account:      &cash,
 			Instrument:   twd,
 			BaseCurrency: twd,
 			Lines:        []model.CategoryLine{{Category: food, Amount: dec("120")}},
@@ -552,41 +557,44 @@ func TestNewExpenseRefuses(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		mutate func(p *model.CategorizedParams)
+		mutate func(p *model.ExpenseParams)
 		want   error
 	}{
-		{"no lines", func(p *model.CategorizedParams) { p.Lines = nil }, model.ErrNoLines},
-		{"a zero amount", func(p *model.CategorizedParams) { p.Lines[0].Amount = dec("0") }, model.ErrAmountNotPositive},
-		{"a negative amount", func(p *model.CategorizedParams) { p.Lines[0].Amount = dec("-120") }, model.ErrAmountNotPositive},
-		{"a second line that is zero", func(p *model.CategorizedParams) {
+		{"no lines", func(p *model.ExpenseParams) { p.Lines = nil }, model.ErrNoLines},
+		{"a zero amount", func(p *model.ExpenseParams) { p.Lines[0].Amount = dec("0") }, model.ErrAmountNotPositive},
+		{"a negative amount", func(p *model.ExpenseParams) { p.Lines[0].Amount = dec("-120") }, model.ErrAmountNotPositive},
+		{"a second line that is zero", func(p *model.ExpenseParams) {
 			p.Lines = append(p.Lines, model.CategoryLine{Category: food, Amount: dec("0")})
 		}, model.ErrAmountNotPositive},
-		{"more decimals than TWD has", func(p *model.CategorizedParams) { p.Lines[0].Amount = dec("120.005") }, model.ErrTooManyDecimals},
-		{"more decimals than JPY has", func(p *model.CategorizedParams) {
+		{"more decimals than TWD has", func(p *model.ExpenseParams) { p.Lines[0].Amount = dec("120.005") }, model.ErrTooManyDecimals},
+		{"more decimals than JPY has", func(p *model.ExpenseParams) {
 			p.Instrument = jpy
 			p.Lines[0].Amount = dec("100.5")
 			p.Lines[0].BaseAmount = decPtr("30")
 		}, model.ErrTooManyDecimals},
-		{"a base amount that is not the amount, for the base currency", func(p *model.CategorizedParams) {
+		{"a base amount that is not the amount, for the base currency", func(p *model.ExpenseParams) {
 			p.Lines[0].BaseAmount = decPtr("121")
 		}, model.ErrBaseAmountMismatch},
-		{"no base amount for a foreign currency", func(p *model.CategorizedParams) { p.Instrument = usd }, model.ErrBaseAmountRequired},
-		{"a zero base amount", func(p *model.CategorizedParams) {
+		{"no base amount for a foreign currency", func(p *model.ExpenseParams) { p.Instrument = usd }, model.ErrBaseAmountRequired},
+		{"a zero base amount", func(p *model.ExpenseParams) {
 			p.Instrument = usd
 			p.Lines[0].BaseAmount = decPtr("0")
 		}, model.ErrBaseAmountNotPositive},
-		{"a negative base amount", func(p *model.CategorizedParams) {
+		{"a negative base amount", func(p *model.ExpenseParams) {
 			p.Instrument = usd
 			p.Lines[0].BaseAmount = decPtr("-3200")
 		}, model.ErrBaseAmountNotPositive},
-		{"a base amount finer than TWD", func(p *model.CategorizedParams) {
+		{"a base amount finer than TWD", func(p *model.ExpenseParams) {
 			p.Instrument = usd
 			p.Lines[0].BaseAmount = decPtr("3200.123")
 		}, model.ErrTooManyDecimals},
-		{"a category of the other direction", func(p *model.CategorizedParams) { p.Lines[0].Category = salary }, model.ErrWrongCategoryDirection},
-		{"an archived category", func(p *model.CategorizedParams) { p.Lines[0].Category = archivedCategory(food) }, model.ErrArchived},
-		{"an archived account", func(p *model.CategorizedParams) { p.Account = archivedAccount(cash) }, model.ErrArchived},
-		{"an archived instrument", func(p *model.CategorizedParams) { p.Instrument = archivedInstrument(twd) }, model.ErrArchived},
+		{"a category of the other direction", func(p *model.ExpenseParams) { p.Lines[0].Category = salary }, model.ErrWrongCategoryDirection},
+		{"an archived category", func(p *model.ExpenseParams) { p.Lines[0].Category = archivedCategory(food) }, model.ErrArchived},
+		{"an archived account", func(p *model.ExpenseParams) {
+			archived := archivedAccount(cash)
+			p.Account = &archived
+		}, model.ErrArchived},
+		{"an archived instrument", func(p *model.ExpenseParams) { p.Instrument = archivedInstrument(twd) }, model.ErrArchived},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -609,9 +617,9 @@ func TestNewExpenseNamesTheLineThatIsWrong(t *testing.T) {
 	food := topLevel(t, model.DirectionExpense, "飲食")
 	twd := newTWD(t)
 
-	_, err := model.NewExpense(model.CategorizedParams{
+	_, err := model.NewExpense(model.ExpenseParams{
 		Header:     header(testKey),
-		Account:    cash,
+		Account:    &cash,
 		Instrument: twd,
 		Lines: []model.CategoryLine{
 			{Category: food, Amount: dec("10")},
@@ -628,8 +636,8 @@ func TestNewIncomeRefuses(t *testing.T) {
 	salary := topLevel(t, model.DirectionIncome, "薪水")
 	food := topLevel(t, model.DirectionExpense, "飲食")
 	twd := newTWD(t)
-	valid := func() model.CategorizedParams {
-		return model.CategorizedParams{
+	valid := func() model.IncomeParams {
+		return model.IncomeParams{
 			Header:     header(testKey),
 			Account:    bank,
 			Instrument: twd,
@@ -639,13 +647,13 @@ func TestNewIncomeRefuses(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		mutate func(p *model.CategorizedParams)
+		mutate func(p *model.IncomeParams)
 		want   error
 	}{
-		{"a category of expenses", func(p *model.CategorizedParams) { p.Lines[0].Category = food }, model.ErrWrongCategoryDirection},
-		{"a negative amount", func(p *model.CategorizedParams) { p.Lines[0].Amount = dec("-50000") }, model.ErrAmountNotPositive},
-		{"no lines", func(p *model.CategorizedParams) { p.Lines = nil }, model.ErrNoLines},
-		{"an archived account", func(p *model.CategorizedParams) { p.Account = archivedAccount(bank) }, model.ErrArchived},
+		{"a category of expenses", func(p *model.IncomeParams) { p.Lines[0].Category = food }, model.ErrWrongCategoryDirection},
+		{"a negative amount", func(p *model.IncomeParams) { p.Lines[0].Amount = dec("-50000") }, model.ErrAmountNotPositive},
+		{"no lines", func(p *model.IncomeParams) { p.Lines = nil }, model.ErrNoLines},
+		{"an archived account", func(p *model.IncomeParams) { p.Account = archivedAccount(bank) }, model.ErrArchived},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -794,9 +802,9 @@ func TestAFineAmountOfAnInstrumentWithDecimalsIsAccepted(t *testing.T) {
 	twd := newTWD(t)
 
 	for _, amount := range []string{"120", "120.5", "120.50", "0.01"} {
-		_, err := model.NewExpense(model.CategorizedParams{
+		_, err := model.NewExpense(model.ExpenseParams{
 			Header:     header(testKey),
-			Account:    cash,
+			Account:    &cash,
 			Instrument: twd,
 			Lines:      []model.CategoryLine{{Category: food, Amount: dec(amount)}},
 		})

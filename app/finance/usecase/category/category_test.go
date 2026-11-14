@@ -259,6 +259,27 @@ func TestArchiveCategory(t *testing.T) {
 			t.Errorf("err = %q, want it to name the id", err)
 		}
 	})
+
+	t.Run("refuses the system categories, which a reconciliation records to", func(t *testing.T) {
+		r := newFakeRepo()
+		for id, direction := range map[uuid.UUID]model.Direction{
+			model.UnrecordedExpenseCategoryID: model.DirectionExpense,
+			model.UnrecordedIncomeCategoryID:  model.DirectionIncome,
+		} {
+			r.categories[id] = model.Category{ID: id, Direction: direction, Name: "未記錄"}
+		}
+		svc := category.New(r)
+
+		for _, id := range []uuid.UUID{model.UnrecordedExpenseCategoryID, model.UnrecordedIncomeCategoryID} {
+			_, err := svc.ArchiveCategory(ctx, id)
+			if !errors.Is(err, model.ErrSystemCategory) {
+				t.Fatalf("ArchiveCategory(%s): err = %v, want ErrSystemCategory", id, err)
+			}
+			if r.categories[id].IsArchived() {
+				t.Errorf("category %s is archived, want it left in use", id)
+			}
+		}
+	})
 }
 
 func TestListCategories(t *testing.T) {

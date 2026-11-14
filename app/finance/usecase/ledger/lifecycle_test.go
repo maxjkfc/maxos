@@ -282,13 +282,14 @@ func TestListTransactionsPassesTheFilterOn(t *testing.T) {
 	taipei := time.FixedZone("UTC+8", 8*60*60)
 	from := time.Date(2026, 11, 12, 23, 59, 0, 0, taipei)
 	to := time.Date(2026, 11, 14, 0, 1, 0, 0, taipei)
-	project, area := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	project, area, party := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 
 	_, err := e.svc.ListTransactions(context.Background(), usecase.ListTransactionsInput{
 		Status:    "confirmed",
 		From:      &from,
 		To:        &to,
 		AccountID: &e.cash.ID,
+		PartyID:   &party,
 		ProjectID: &project,
 		AreaID:    &area,
 		Limit:     20,
@@ -303,8 +304,9 @@ func TestListTransactionsPassesTheFilterOn(t *testing.T) {
 	if f.Status != model.StatusConfirmed || f.From == nil || !f.From.Equal(wantFrom) || f.To == nil || !f.To.Equal(wantTo) {
 		t.Errorf("filter = %+v, want confirmed, from %v to %v: the day each time falls on", f, wantFrom, wantTo)
 	}
-	if f.AccountID == nil || *f.AccountID != e.cash.ID || f.ProjectID == nil || *f.ProjectID != project || f.AreaID == nil || *f.AreaID != area {
-		t.Errorf("filter = %+v, want the account, the project and the area", f)
+	if f.AccountID == nil || *f.AccountID != e.cash.ID || f.PartyID == nil || *f.PartyID != party ||
+		f.ProjectID == nil || *f.ProjectID != project || f.AreaID == nil || *f.AreaID != area {
+		t.Errorf("filter = %+v, want the account, the party, the project and the area", f)
 	}
 	if f.Limit != 21 || f.Offset != 40 {
 		t.Errorf("limit %d, offset %d, want 21 (the page and one more) and 40", f.Limit, f.Offset)
@@ -313,7 +315,7 @@ func TestListTransactionsPassesTheFilterOn(t *testing.T) {
 	if _, err := e.svc.ListTransactions(context.Background(), usecase.ListTransactionsInput{}); err != nil {
 		t.Fatalf("ListTransactions without a filter: %v", err)
 	}
-	if f := e.txns.listed; f.Status != "" || f.From != nil || f.To != nil || f.AccountID != nil || f.ProjectID != nil || f.AreaID != nil {
+	if f := e.txns.listed; f.Status != "" || f.From != nil || f.To != nil || f.AccountID != nil || f.PartyID != nil || f.ProjectID != nil || f.AreaID != nil {
 		t.Errorf("filter = %+v, want no condition set", f)
 	}
 }

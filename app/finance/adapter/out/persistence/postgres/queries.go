@@ -49,6 +49,10 @@ func listIDsSQL(f repo.TransactionFilter) (string, []any) {
 		conditions = append(conditions,
 			"EXISTS (SELECT 1 FROM fin_posting p WHERE p.transaction_id = t.id AND p.account_id = "+arg(*f.AccountID)+")")
 	}
+	if f.PartyID != nil {
+		conditions = append(conditions,
+			"EXISTS (SELECT 1 FROM fin_posting p WHERE p.transaction_id = t.id AND p.party_id = "+arg(*f.PartyID)+")")
+	}
 
 	var sb strings.Builder
 	sb.WriteString("SELECT t.id FROM fin_transaction t")

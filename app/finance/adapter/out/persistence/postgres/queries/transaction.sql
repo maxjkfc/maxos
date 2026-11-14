@@ -17,8 +17,8 @@ ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING *;
 
 -- name: InsertPosting :exec
-INSERT INTO fin_posting (id, transaction_id, seq, book, account_id, category_id, instrument_id, quantity, base_amount, memo)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
+INSERT INTO fin_posting (id, transaction_id, seq, book, account_id, category_id, party_id, instrument_id, quantity, base_amount, discount, memo)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
 
 -- name: InsertTransactionTag :exec
 INSERT INTO fin_transaction_tag (transaction_id, tag_id) VALUES ($1, $2);
@@ -75,3 +75,39 @@ WHERE t.status = 'confirmed' AND p.book = 'account'
   AND (sqlc.narg('account_id')::uuid IS NULL OR p.account_id = sqlc.narg('account_id'))
 GROUP BY a.id, a.name, i.id, i.code
 ORDER BY a.name, a.id, i.code, i.id;
+
+-- name: GetBalanceAsOf :one
+-- What an account holds of an instrument on a day: the quantities of its account
+-- postings in the confirmed transactions that happened on or before the day (the
+-- day itself is in), added up. Zero when there are none.
+SELECT COALESCE(sum(p.quantity), 0)::numeric AS quantity
+FROM fin_posting p
+JOIN fin_transaction t ON t.id = p.transaction_id
+WHERE t.status = 'confirmed' AND p.book = 'account'
+  AND p.account_id = @account_id AND p.instrument_id = @instrument_id
+  AND t.occurred_on <= @day;
+
+-- name: CountPendingDrafts :one
+-- How many drafts happened on or before the day and have a posting to the account
+-- in the instrument. A draft counts once, however many such postings it has.
+SELECT count(DISTINCT t.id)
+FROM fin_posting p
+JOIN fin_transaction t ON t.id = p.transaction_id
+WHERE t.status = 'draft' AND p.book = 'account'
+  AND p.account_id = @account_id AND p.instrument_id = @instrument_id
+  AND t.occurred_on <= @day;
+
+-- name: ListDealings :many
+-- What each party owes me of each instrument: the quantities of the dealing
+-- postings made to it, added up, counting only the confirmed transactions.
+-- Nothing is stored. With a party_id it is that party's only. party_id is a plain
+-- uuid column, so no row of another table says which parties exist: the use case
+-- orders them by name, and this by id and then instrument code.
+SELECT p.party_id::uuid AS party_id, i.id AS instrument_id, sum(p.quantity)::numeric AS quantity
+FROM fin_posting p
+JOIN fin_transaction t ON t.id = p.transaction_id
+JOIN fin_instrument i ON i.id = p.instrument_id
+WHERE t.status = 'confirmed' AND p.book = 'dealing'
+  AND (sqlc.narg('party_id')::uuid IS NULL OR p.party_id = sqlc.narg('party_id'))
+GROUP BY p.party_id, i.id, i.code
+ORDER BY p.party_id, i.code, i.id;

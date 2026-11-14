@@ -1,11 +1,14 @@
 package ledger_test
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
@@ -69,6 +72,12 @@ type fakeTransactions struct {
 	// returns.
 	balancesFor *uuid.UUID
 	balanceRows []model.Balance
+	// dealingsFor is the party Dealings was last asked for; dealingRows what it
+	// returns, in the order the repo promises: by party id, then instrument code.
+	dealingsFor *uuid.UUID
+	dealingRows []model.Dealing
+	// readErr, when set, is what BalanceAsOf, PendingDrafts and Dealings return.
+	readErr error
 }
 
 func newFakeTransactions() *fakeTransactions {
@@ -175,6 +184,55 @@ func (f *fakeTransactions) Balances(_ context.Context, accountID *uuid.UUID) ([]
 	return f.balanceRows, nil
 }
 
+// BalanceAsOf adds up the account postings of the confirmed transactions that
+// happened on or before the day, as the repo does.
+func (f *fakeTransactions) BalanceAsOf(_ context.Context, accountID, instrumentID uuid.UUID, day time.Time) (decimal.Decimal, error) {
+	if f.readErr != nil {
+		return decimal.Zero, f.readErr
+	}
+	sum := decimal.Zero
+	for _, txn := range f.byID {
+		if txn.Status != model.StatusConfirmed || txn.OccurredOn.After(day) {
+			continue
+		}
+		for _, p := range txn.Postings {
+			if p.Book == model.BookAccount && *p.AccountID == accountID && p.InstrumentID == instrumentID {
+				sum = sum.Add(p.Quantity)
+			}
+		}
+	}
+	return sum, nil
+}
+
+// PendingDrafts counts the drafts that happened on or before the day and have a
+// posting to the account in the instrument, as the repo does.
+func (f *fakeTransactions) PendingDrafts(_ context.Context, accountID, instrumentID uuid.UUID, day time.Time) (int, error) {
+	if f.readErr != nil {
+		return 0, f.readErr
+	}
+	pending := 0
+	for _, txn := range f.byID {
+		if txn.Status != model.StatusDraft || txn.OccurredOn.After(day) {
+			continue
+		}
+		for _, p := range txn.Postings {
+			if p.Book == model.BookAccount && *p.AccountID == accountID && p.InstrumentID == instrumentID {
+				pending++
+				break
+			}
+		}
+	}
+	return pending, nil
+}
+
+func (f *fakeTransactions) Dealings(_ context.Context, partyID *uuid.UUID) ([]model.Dealing, error) {
+	f.dealingsFor = partyID
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	return f.dealingRows, nil
+}
+
 // fakeAccounts is an in-memory repo.AccountRepo of which only Get is used.
 type fakeAccounts struct {
 	repo.AccountRepo
@@ -270,28 +328,38 @@ func (f *fakeCategories) Get(_ context.Context, id uuid.UUID) (model.Category, e
 	return c, nil
 }
 
-// fakeReferences is the catalog as the ledger sees it, with some projects, areas
-// and tags. As a catalogusecase.VerifyReferences, an id it does not know is not
-// found and one it knows as archived is archived. As a
+// fakeReferences is the catalog as the ledger sees it, with some projects, areas,
+// parties and tags. As a catalogusecase.VerifyReferences, an id it does not know
+// is not found and one it knows as archived is archived. As a
 // catalogusecase.ResolveProjectArea, it follows the rule of the port: the default
 // area it was given, unless that is archived, and a *ReferenceError for a project
-// that is not found or archived.
+// that is not found or archived. As a catalogusecase.ListParties it lists its
+// parties by name, as the catalog does.
 type fakeReferences struct {
-	// projects, areas and tags map each id the catalog has to whether it is
-	// archived.
-	projects, areas, tags map[uuid.UUID]bool
+	// projects, areas, parties and tags map each id the catalog has to whether it
+	// is archived.
+	projects, areas, parties, tags map[uuid.UUID]bool
+	// partyNames maps each party to its name.
+	partyNames map[uuid.UUID]string
 	// defaultAreas maps the projects that have a default area to it.
 	defaultAreas map[uuid.UUID]uuid.UUID
 	calls        []catalogusecase.VerifyReferencesInput
 	// resolveAreaErr, when set, is what ResolveProjectArea returns.
 	resolveAreaErr error
+	// listedWith is what ListParties was last asked for, and listPartiesCalls how
+	// often it was called; listPartiesErr, when set, is what it returns.
+	listedWith       catalogusecase.ListPartiesInput
+	listPartiesCalls int
+	listPartiesErr   error
 }
 
 func newFakeReferences() *fakeReferences {
 	return &fakeReferences{
 		projects:     map[uuid.UUID]bool{},
 		areas:        map[uuid.UUID]bool{},
+		parties:      map[uuid.UUID]bool{},
 		tags:         map[uuid.UUID]bool{},
+		partyNames:   map[uuid.UUID]string{},
 		defaultAreas: map[uuid.UUID]uuid.UUID{},
 	}
 }
@@ -314,6 +382,32 @@ func (f *fakeReferences) addTag(archived bool) uuid.UUID {
 	return id
 }
 
+func (f *fakeReferences) addParty(name string, archived bool) uuid.UUID {
+	id := uuid.Must(uuid.NewV7())
+	f.parties[id] = archived
+	f.partyNames[id] = name
+	return id
+}
+
+func (f *fakeReferences) ListParties(_ context.Context, in catalogusecase.ListPartiesInput) (catalogusecase.ListPartiesOutput, error) {
+	f.listedWith = in
+	f.listPartiesCalls++
+	if f.listPartiesErr != nil {
+		return catalogusecase.ListPartiesOutput{}, f.listPartiesErr
+	}
+	var out catalogusecase.ListPartiesOutput
+	for id, archived := range f.parties {
+		if archived && !in.IncludeArchived {
+			continue
+		}
+		out.Parties = append(out.Parties, catalogusecase.Party{ID: id, Name: f.partyNames[id]})
+	}
+	slices.SortFunc(out.Parties, func(a, b catalogusecase.Party) int {
+		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID.String(), b.ID.String()))
+	})
+	return out, nil
+}
+
 // setDefaultArea makes area the default area of project.
 func (f *fakeReferences) setDefaultArea(project, area uuid.UUID) {
 	f.defaultAreas[project] = area
@@ -333,6 +427,7 @@ func (f *fakeReferences) VerifyReferences(_ context.Context, in catalogusecase.V
 	}
 	check(catalogusecase.ReferenceProject, f.projects, in.ProjectIDs)
 	check(catalogusecase.ReferenceArea, f.areas, in.AreaIDs)
+	check(catalogusecase.ReferenceParty, f.parties, in.PartyIDs)
 	check(catalogusecase.ReferenceTag, f.tags, in.TagIDs)
 	if len(problems) > 0 {
 		return &catalogusecase.ReferenceError{Problems: problems}
