@@ -33,9 +33,9 @@ type InstalmentPeriod struct {
 	InterestBaseAmount *decimal.Decimal
 }
 
-// InstalmentSchedule is when an instalment plan is charged and how much, which is
-// set when the plan is recorded and does not change: the periods become the
-// transactions of the plan.
+// InstalmentSchedule is when an instalment plan is charged and how much: the
+// periods, which become the transactions of the plan. It is set when the plan is
+// recorded, and RescheduleInstalment replaces it as a whole.
 type InstalmentSchedule struct {
 	// Periods are the periods in the order they fall due, at least one. They fall
 	// due on later and later days, each on a day after the one before it, the first
@@ -99,6 +99,48 @@ type InstalmentPlan struct {
 // is ErrNotFound for an id that is not the id of a plan, the origin's.
 type GetInstalmentPlan interface {
 	GetInstalmentPlan(ctx context.Context, planID uuid.UUID) (InstalmentPlan, error)
+}
+
+// RescheduleInstalment replaces the schedule of an instalment plan with a new one,
+// and returns the plan as it is then. All the periods can change: the days they
+// fall due, the principal and the interest of each, the category of the interest,
+// and how many there are. The new schedule is an InstalmentSchedule like the one a
+// plan is recorded with, and is checked in the same way, from the day of the
+// origin of the plan: later and later days, the first not before the origin,
+// principals greater than zero, the rules of the interest and its category.
+//
+// What cannot change is the origin, which is never touched, and the amount that is
+// split: the principals of the new schedule must add up exactly to the principal
+// of the plan, or it is a *model.PrincipalMismatchError, which is an
+// ErrPrincipalMismatch and carries both amounts. To change the amount is to change
+// the purchase: void the plan and record it again. Paying a plan off early is a
+// reschedule: the principal that remains goes into one period, on the day it is
+// paid.
+//
+// It works on a plan that is a draft and on one that is confirmed, and every
+// period may be given a new day or amount, those that have fallen due too, because
+// what an institution charged is not always what was planned. A plan that is void
+// is ErrPlanVoid. This is the one way a confirmed transaction is changed, and what
+// changes is the schedule only: the periods of the new schedule take the status of
+// the plan (the periods of a confirmed plan are confirmed, from the time of the
+// call) and are put in the place of the old ones, which are deleted. So the
+// transactions of the periods have new ids, and the keys they are made of, the
+// plan and the position, are the same. Nothing identifies the request but its
+// content: made twice, it gives the same schedule, with the periods rewritten.
+//
+// An id that is not the id of a plan, such as that of a period, is ErrNotFound.
+// The balance and the unbilled instalment of the account, and the plans of the
+// account, follow the new schedule, each period from the day it falls due.
+type RescheduleInstalment interface {
+	RescheduleInstalment(ctx context.Context, in RescheduleInstalmentInput) (InstalmentPlan, error)
+}
+
+// RescheduleInstalmentInput is the plan to reschedule and its new schedule.
+type RescheduleInstalmentInput struct {
+	// PlanID is the id of the plan, which is the id of its origin.
+	PlanID uuid.UUID
+	// Schedule is the whole of the new schedule, which replaces the old.
+	Schedule InstalmentSchedule
 }
 
 // ListInstalmentPlans lists the confirmed instalment plans, where each stands

@@ -254,6 +254,10 @@ var (
 	// one for each period, so a request that gave one would be answered with that
 	// period, as a duplicate.
 	ErrReservedIdempotencyKey = errors.New("idempotency key is reserved for the periods of instalment plans")
+
+	// ErrPlanVoid is returned for rescheduling an instalment plan that is void: it
+	// counts for nothing any more, so there is no schedule of it left to change.
+	ErrPlanVoid = errors.New("the instalment plan is void")
 )
 
 // PendingDraftsError is what reconciling an account returns while drafts that
@@ -302,3 +306,21 @@ type IdempotencyKeyLengthError struct {
 func (e *IdempotencyKeyLengthError) Error() string {
 	return fmt.Sprintf("idempotency key must be %d to %d characters (got %d)", e.Min, e.Max, e.Runes)
 }
+
+// PrincipalMismatchError is returned for an instalment schedule whose periods do
+// not charge exactly the amount that is split. It is an ErrPrincipalMismatch.
+type PrincipalMismatchError struct {
+	// Principals is what the principals of the periods add up to.
+	Principals decimal.Decimal
+	// Amount is what is split: the amount of the purchase or the conversion, which
+	// for a plan that is made already is the principal of its origin.
+	Amount decimal.Decimal
+	// InstrumentCode is the code of the instrument both are in.
+	InstrumentCode string
+}
+
+func (e *PrincipalMismatchError) Error() string {
+	return fmt.Sprintf("%v: they add up to %s, and %s %s is split", ErrPrincipalMismatch, e.Principals, e.Amount, e.InstrumentCode)
+}
+
+func (e *PrincipalMismatchError) Unwrap() error { return ErrPrincipalMismatch }

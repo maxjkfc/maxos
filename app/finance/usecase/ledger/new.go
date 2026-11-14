@@ -67,6 +67,7 @@ func Module() fx.Option {
 		fx.As(new(usecase.ConfirmTransactions)),
 		fx.As(new(usecase.DiscardDraft)),
 		fx.As(new(usecase.VoidTransaction)),
+		fx.As(new(usecase.RescheduleInstalment)),
 		fx.As(new(usecase.GetTransaction)),
 		fx.As(new(usecase.ListTransactions)),
 		fx.As(new(usecase.GetInstalmentPlan)),

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -574,8 +575,8 @@ func TestConfirmTransactionsGivenAPlanAndSomeOfItsPeriodsConfirmsThePlanOnceAndR
 	if got := e.tx.calls - opened; got != 1 {
 		t.Errorf("%d database transactions opened, want 1", got)
 	}
-	if want := sortedIDs(append(e.membersOf(origin), lunch.ID)...); !slices.Equal(e.txns.locked, want) {
-		t.Errorf("locked\n  %v\nwant each transaction once, in the order of the ids,\n  %v", e.txns.locked, want)
+	if want := e.lockOrder(origin, lunch); !slices.Equal(e.txns.locked, want) {
+		t.Errorf("locked\n  %v\nwant each transaction once, the origin and the lunch in the order of their ids and then the periods,\n  %v", e.txns.locked, want)
 	}
 }
 
@@ -601,13 +602,33 @@ func TestConfirmTransactionsRefusesAPeriodWhoseOriginIsNotAmongTheIdsEvenWithThe
 	}
 }
 
-// All the rows a call touches are locked in the order of their ids, so that two
-// calls that have some in common cannot each hold what the other waits for.
-func TestConfirmTransactionsLocksEveryTransactionOfTheCallInTheOrderOfTheirIds(t *testing.T) {
+// lockOrder is the order a call that acts on the transactions locks what it
+// touches in, which is the same for every call: the origins of plans and the
+// ordinary transactions among them in the order of their ids, and then the periods
+// of each plan, in the order of their ids, plan after plan in the order of the
+// origins.
+func (e *env) lockOrder(txns ...usecase.Transaction) []uuid.UUID {
+	e.t.Helper()
+	first := sortedIDs(ids(txns...)...)
+	want := slices.Clone(first)
+	for _, id := range first {
+		if plan, err := e.svc.GetInstalmentPlan(context.Background(), id); err == nil {
+			want = append(want, sortedIDs(ids(plan.Periods...)...)...)
+		}
+	}
+	return want
+}
+
+// The locks of a call are taken in one order, whatever order it is asked in: first
+// the origins of plans and the ordinary transactions, in the order of their ids,
+// and then the periods of each plan, which only the call that holds its origin
+// touches. So two calls that have some of them in common cannot each hold what the
+// other waits for.
+func TestConfirmTransactionsLocksTheOriginsAndOrdinaryTransactionsInTheOrderOfTheirIdsAndThenThePeriods(t *testing.T) {
 	e := newEnv(t)
 	first, second := e.recordPlan("laptop-00000001"), e.recordPlan("laptop-00000002")
 	lunch := e.recordLunch("lunch-0000001a")
-	want := sortedIDs(append(append(e.membersOf(first), e.membersOf(second)...), lunch.ID)...)
+	want := e.lockOrder(first, second, lunch)
 	if len(want) != 27 {
 		t.Fatalf("%d transactions to lock, want the 13 of each plan and the lunch", len(want))
 	}
@@ -620,32 +641,31 @@ func TestConfirmTransactionsLocksEveryTransactionOfTheCallInTheOrderOfTheirIds(t
 	}
 
 	if !slices.Equal(e.txns.locked, want) {
-		t.Errorf("locked\n  %v\nwant every transaction of the call once, in the order of the ids,\n  %v", e.txns.locked, want)
+		t.Errorf("locked\n  %v\nwant every transaction of the call once, in the order of the ids of what is not a period and then the periods,\n  %v", e.txns.locked, want)
 	}
 }
 
-func TestVoidTransactionAndDiscardDraftLockEveryTransactionOfThePlanInTheOrderOfTheirIds(t *testing.T) {
+func TestVoidTransactionAndDiscardDraftLockTheOriginOfThePlanAndThenItsPeriodsInTheOrderOfTheirIds(t *testing.T) {
 	e := newEnv(t)
 	discarded := e.recordPlan("laptop-00000001")
 	voided := e.recordPlan("laptop-00000002")
 	e.confirm(voided)
+	wantDiscard, wantVoid := e.lockOrder(discarded), e.lockOrder(voided)
 	e.txns.locked = nil
 
 	if err := e.svc.DiscardDraft(context.Background(), discarded.ID); err != nil {
 		t.Fatalf("DiscardDraft: %v", err)
 	}
-	if want := sortedIDs(append(ids(e.planOf(voided).Periods...), voided.ID)...); len(e.txns.locked) != 13 {
-		t.Errorf("DiscardDraft locked %d, want the 13 of the plan (%d of the other plan are not)", len(e.txns.locked), len(want))
-	} else if !slices.IsSortedFunc(e.txns.locked, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) }) {
-		t.Errorf("DiscardDraft locked %v, want the order of the ids", e.txns.locked)
+	if len(wantDiscard) != 13 || !slices.Equal(e.txns.locked, wantDiscard) {
+		t.Errorf("DiscardDraft locked\n  %v\nwant the 13 of the plan, the origin first,\n  %v", e.txns.locked, wantDiscard)
 	}
 
 	e.txns.locked = nil
 	if _, err := e.svc.VoidTransaction(context.Background(), voided.ID); err != nil {
 		t.Fatalf("VoidTransaction: %v", err)
 	}
-	if want := e.membersOf(voided); !slices.Equal(e.txns.locked, want) {
-		t.Errorf("VoidTransaction locked\n  %v\nwant the 13 of the plan in the order of the ids,\n  %v", e.txns.locked, want)
+	if len(wantVoid) != 13 || !slices.Equal(e.txns.locked, wantVoid) {
+		t.Errorf("VoidTransaction locked\n  %v\nwant the 13 of the plan, the origin first,\n  %v", e.txns.locked, wantVoid)
 	}
 }
 
@@ -910,5 +930,280 @@ func TestListInstalmentPlansLeavesOutTheFinishedUnlessAskedAndReadsTodaysDay(t *
 	e.txns.readErr = boom
 	if _, err := e.svc.ListInstalmentPlans(context.Background(), usecase.ListInstalmentPlansInput{}); !errors.Is(err, boom) {
 		t.Errorf("err = %v, want the failure of the repo", err)
+	}
+}
+
+// reschedule is a new schedule of four periods of 3,000, the second with 90 of
+// interest, which splits what instalmentExpense does.
+func (e *env) rescheduleOf(planID uuid.UUID) usecase.RescheduleInstalmentInput {
+	schedule := e.schedule(4, "3000")
+	schedule.Periods[1].Interest = decPtr("90")
+	return usecase.RescheduleInstalmentInput{PlanID: planID, Schedule: schedule}
+}
+
+func TestRescheduleInstalmentOfADraftPlanPutsNewPeriodsInThePlaceOfTheOldOnesInOneDatabaseTransaction(t *testing.T) {
+	e := newEnv(t)
+	origin := e.recordPlan("laptop-00000001")
+	lunch := e.recordLunch("lunch-0000001a")
+	oldIDs := ids(e.planOf(origin).Periods...)
+	originBefore := e.txns.byID[origin.ID]
+	opened, inserted, statuses := e.tx.calls, e.txns.inserts, len(e.txns.statusSet)
+
+	got, err := e.svc.RescheduleInstalment(context.Background(), e.rescheduleOf(origin.ID))
+	if err != nil {
+		t.Fatalf("RescheduleInstalment: %v", err)
+	}
+
+	// What is returned is the plan as stored: the origin, and the 4 new periods in the
+	// order they fall due, with new ids and the keys of the plan and the position.
+	if got.Origin.ID != origin.ID || len(got.Periods) != 4 {
+		t.Fatalf("plan = %d periods of origin %s, want the 4 of the new schedule, of %s", len(got.Periods), got.Origin.ID, origin.ID)
+	}
+	for i, period := range got.Periods {
+		if slices.Contains(oldIDs, period.ID) {
+			t.Errorf("period %d has the id %s of an old period, want a new transaction", i+1, period.ID)
+		}
+		if period.Status != "draft" || period.PlanID == nil || *period.PlanID != origin.ID || period.PlanSeq == nil || *period.PlanSeq != i+1 ||
+			period.IdempotencyKey != model.PeriodIdempotencyKey(origin.ID, i+1) {
+			t.Errorf("period %d = %+v, want a draft of the plan at its position with the key of the plan and the position", i+1, period)
+		}
+	}
+	wantLines(t, e.lines(got.Periods[0]), "instalment(bank) +3000 TWD", "account(bank) -3000 TWD")
+	wantLines(t, e.lines(got.Periods[1]), "instalment(bank) +3000 TWD", "account(bank) -3090 TWD", "expense(interest) +90 TWD, base +90")
+
+	// The old periods are gone and nothing else is: the origin is as it was, and so
+	// is the other transaction.
+	for _, id := range oldIDs {
+		if _, found := e.txns.byID[id]; found {
+			t.Errorf("old period %s is still stored", id)
+		}
+	}
+	if !reflect.DeepEqual(e.txns.byID[origin.ID], originBefore) {
+		t.Error("the origin was changed")
+	}
+	if _, found := e.txns.byID[lunch.ID]; !found || len(e.txns.byID) != 1+1+4 {
+		t.Errorf("%d transactions stored, want the origin, the 4 new periods and the lunch", len(e.txns.byID))
+	}
+	if got := e.tx.calls - opened; got != 1 {
+		t.Errorf("%d database transactions opened, want 1", got)
+	}
+	if got := e.txns.inserts - inserted; got != 4 || len(e.txns.statusSet) != statuses {
+		t.Errorf("%d inserted and %d changes of status, want the 4 new periods stored as drafts and no change of status", got, len(e.txns.statusSet)-statuses)
+	}
+}
+
+func TestRescheduleInstalmentOfAConfirmedPlanConfirmsTheNewPeriodsAndNothingElse(t *testing.T) {
+	e := newEnv(t)
+	origin := e.recordPlan("laptop-00000001")
+	e.confirm(origin)
+	originBefore := e.txns.byID[origin.ID]
+	statuses := len(e.txns.statusSet)
+
+	got, err := e.svc.RescheduleInstalment(context.Background(), e.rescheduleOf(origin.ID))
+	if err != nil {
+		t.Fatalf("RescheduleInstalment: %v", err)
+	}
+
+	if len(got.Periods) != 4 {
+		t.Fatalf("%d periods, want 4", len(got.Periods))
+	}
+	for i, period := range got.Periods {
+		if period.Status != "confirmed" || period.ConfirmedAt == nil {
+			t.Errorf("period %d is %s, confirmed at %v, want it confirmed, from the time of the call", i+1, period.Status, period.ConfirmedAt)
+		}
+	}
+	if want := ids(got.Periods...); !slices.Equal(sortedIDs(e.txns.statusSet[statuses:]...), sortedIDs(want...)) {
+		t.Errorf("status set for %v, want the 4 new periods only", e.txns.statusSet[statuses:])
+	}
+	if !reflect.DeepEqual(e.txns.byID[origin.ID], originBefore) {
+		t.Error("the origin of a confirmed plan was changed")
+	}
+}
+
+// A schedule is written the way it is read: the same schedule given twice leaves
+// the same schedule, whatever the ids of the periods.
+func TestRescheduleInstalmentWithTheScheduleItHasLeavesTheSameSchedule(t *testing.T) {
+	e := newEnv(t)
+	origin := e.recordPlan("laptop-00000001")
+	in := e.rescheduleOf(origin.ID)
+
+	first, err := e.svc.RescheduleInstalment(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RescheduleInstalment: %v", err)
+	}
+	second, err := e.svc.RescheduleInstalment(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RescheduleInstalment again: %v", err)
+	}
+
+	if len(first.Periods) != len(second.Periods) {
+		t.Fatalf("%d periods and then %d, want the same", len(first.Periods), len(second.Periods))
+	}
+	for i := range first.Periods {
+		a, b := first.Periods[i], second.Periods[i]
+		if !a.OccurredOn.Equal(b.OccurredOn) || a.IdempotencyKey != b.IdempotencyKey || !slices.Equal(e.lines(a), e.lines(b)) {
+			t.Errorf("period %d: %v on %s, then %v on %s, want the same", i+1, e.lines(a), a.OccurredOn.Format(time.DateOnly), e.lines(b), b.OccurredOn.Format(time.DateOnly))
+		}
+	}
+	if len(e.txns.byID) != 5 {
+		t.Errorf("%d transactions stored, want the origin and the 4 periods", len(e.txns.byID))
+	}
+}
+
+// The plan is locked as the lifecycle locks it: the origin, and then its periods in
+// the order of their ids, so that a call that reschedules and one that confirms
+// cannot each hold what the other waits for.
+func TestRescheduleInstalmentLocksThePlanAsTheLifecycleDoes(t *testing.T) {
+	e := newEnv(t)
+	origin := e.recordPlan("laptop-00000001")
+	want := e.lockOrder(origin)
+	e.txns.locked = nil
+
+	if _, err := e.svc.RescheduleInstalment(context.Background(), e.rescheduleOf(origin.ID)); err != nil {
+		t.Fatalf("RescheduleInstalment: %v", err)
+	}
+
+	if !slices.Equal(e.txns.locked, want) {
+		t.Errorf("locked\n  %v\nwant the origin and then the 12 old periods in the order of their ids,\n  %v", e.txns.locked, want)
+	}
+}
+
+// The plan is read again once it is locked: a plan that was voided, or that someone
+// else discarded, while the call waited is not rescheduled.
+func TestRescheduleInstalmentChecksTheStatusAndTheExistenceOfThePlanUnderTheLock(t *testing.T) {
+	t.Run("voided while it waited", func(t *testing.T) {
+		e := newEnv(t)
+		origin := e.recordPlan("laptop-00000001")
+		e.confirm(origin)
+		e.txns.beforeLock = func(id uuid.UUID) {
+			if id != origin.ID {
+				return
+			}
+			for id, txn := range e.txns.byID {
+				if txn.PlanID != nil && *txn.PlanID == origin.ID {
+					txn.Status = model.StatusVoid
+					e.txns.byID[id] = txn
+				}
+			}
+		}
+
+		_, err := e.svc.RescheduleInstalment(context.Background(), e.rescheduleOf(origin.ID))
+
+		if !errors.Is(err, model.ErrPlanVoid) {
+			t.Fatalf("err = %v, want ErrPlanVoid", err)
+		}
+		if len(e.txns.deleted) != 0 {
+			t.Errorf("%d transactions deleted, want none", len(e.txns.deleted))
+		}
+	})
+	t.Run("discarded while it waited", func(t *testing.T) {
+		e := newEnv(t)
+		origin := e.recordPlan("laptop-00000001")
+		e.txns.beforeLock = func(id uuid.UUID) {
+			if id == origin.ID {
+				for id, txn := range e.txns.byID {
+					if txn.PlanID != nil && *txn.PlanID == origin.ID {
+						delete(e.txns.byID, id)
+					}
+				}
+			}
+		}
+
+		_, err := e.svc.RescheduleInstalment(context.Background(), e.rescheduleOf(origin.ID))
+
+		if !errors.Is(err, model.ErrNotFound) {
+			t.Fatalf("err = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+func TestRescheduleInstalmentRefusesWhatCannotBeDoneAndWritesNothing(t *testing.T) {
+	type refusal struct {
+		name    string
+		prepare func(e *env) usecase.RescheduleInstalmentInput
+		want    error
+	}
+	tests := []refusal{
+		{"an id nothing has", func(e *env) usecase.RescheduleInstalmentInput {
+			return e.rescheduleOf(uuid.Must(uuid.NewV7()))
+		}, model.ErrNotFound},
+		{"the id of a period", func(e *env) usecase.RescheduleInstalmentInput {
+			origin := e.recordPlan("laptop-00000001")
+			return e.rescheduleOf(e.planOf(origin).Periods[2].ID)
+		}, model.ErrNotFound},
+		{"the id of a transaction that is in no plan", func(e *env) usecase.RescheduleInstalmentInput {
+			return e.rescheduleOf(e.recordLunch("lunch-0000001a").ID)
+		}, model.ErrNotFound},
+		{"a plan that is void", func(e *env) usecase.RescheduleInstalmentInput {
+			origin := e.recordPlan("laptop-00000001")
+			e.confirm(origin)
+			if _, err := e.svc.VoidTransaction(context.Background(), origin.ID); err != nil {
+				e.t.Fatalf("VoidTransaction: %v", err)
+			}
+			return e.rescheduleOf(origin.ID)
+		}, model.ErrPlanVoid},
+		{"principals that do not add up to the principal of the plan", func(e *env) usecase.RescheduleInstalmentInput {
+			in := e.rescheduleOf(e.recordPlan("laptop-00000001").ID)
+			in.Schedule.Periods[3].Principal = dec("2999")
+			return in
+		}, model.ErrPrincipalMismatch},
+		{"no periods", func(e *env) usecase.RescheduleInstalmentInput {
+			in := e.rescheduleOf(e.recordPlan("laptop-00000001").ID)
+			in.Schedule.Periods = nil
+			return in
+		}, model.ErrNoPeriods},
+		{"days that do not follow each other", func(e *env) usecase.RescheduleInstalmentInput {
+			in := e.rescheduleOf(e.recordPlan("laptop-00000001").ID)
+			in.Schedule.Periods[2].DueOn = in.Schedule.Periods[1].DueOn
+			return in
+		}, model.ErrDueDatesNotIncreasing},
+		{"a first period before the origin", func(e *env) usecase.RescheduleInstalmentInput {
+			in := e.rescheduleOf(e.recordPlan("laptop-00000001").ID)
+			in.Schedule.Periods[0].DueOn = day.AddDate(0, 0, -1)
+			return in
+		}, model.ErrFirstDueTooEarly},
+		{"interest without a category", func(e *env) usecase.RescheduleInstalmentInput {
+			in := e.rescheduleOf(e.recordPlan("laptop-00000001").ID)
+			in.Schedule.InterestCategoryID = nil
+			return in
+		}, model.ErrInterestCategoryRequired},
+		{"an interest category that does not exist", func(e *env) usecase.RescheduleInstalmentInput {
+			in := e.rescheduleOf(e.recordPlan("laptop-00000001").ID)
+			in.Schedule.InterestCategoryID = new(uuid.Must(uuid.NewV7()))
+			return in
+		}, model.ErrNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			in := tt.prepare(e)
+			before := e.statuses()
+			stored, deleted, inserted := len(e.txns.byID), len(e.txns.deleted), e.txns.inserts
+
+			_, err := e.svc.RescheduleInstalment(context.Background(), in)
+
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("err = %v, want %v", err, tt.want)
+			}
+			if len(e.txns.byID) != stored || len(e.txns.deleted) != deleted || e.txns.inserts != inserted || !reflect.DeepEqual(e.statuses(), before) {
+				t.Errorf("%d stored, %d deleted, %d inserted, want what there was: %d, %d, %d: nothing is written when it is refused",
+					len(e.txns.byID), len(e.txns.deleted), e.txns.inserts, stored, deleted, inserted)
+			}
+		})
+	}
+}
+
+// What the mismatch says is both amounts: what the schedule adds up to, and what
+// the plan splits.
+func TestRescheduleInstalmentToAnotherAmountSaysBothAmounts(t *testing.T) {
+	e := newEnv(t)
+	in := e.rescheduleOf(e.recordPlan("laptop-00000001").ID)
+	in.Schedule.Periods[3].Principal = dec("2999")
+
+	_, err := e.svc.RescheduleInstalment(context.Background(), in)
+
+	var mismatch *model.PrincipalMismatchError
+	if !errors.As(err, &mismatch) || !mismatch.Principals.Equal(dec("11999")) || !mismatch.Amount.Equal(dec("12000")) {
+		t.Fatalf("err = %v, want a mismatch of the 11999 the schedule adds up to and the 12000 of the plan", err)
 	}
 }

@@ -137,7 +137,7 @@ func (s InstalmentSchedule) check(originDay time.Time, instrument, base Instrume
 		return ErrInterestCategoryRequired
 	}
 	if !principals.Equal(amount) {
-		return fmt.Errorf("%w: they add up to %s, and %s %s is split", ErrPrincipalMismatch, principals, amount, instrument.Code)
+		return &PrincipalMismatchError{Principals: principals, Amount: amount, InstrumentCode: instrument.Code}
 	}
 	return nil
 }
@@ -208,6 +208,73 @@ func newPlan(kind Kind, h Header, postings []Posting, accountID uuid.UUID, instr
 		return InstalmentPlan{}, err
 	}
 	periods, err := s.periods(h, accountID, instrument, base)
+	if err != nil {
+		return InstalmentPlan{}, err
+	}
+	return InstalmentPlan{Origin: origin, Periods: periods}, nil
+}
+
+// InstrumentID returns the instrument the plan is counted in, which the instalment
+// posting of its origin is of, and false for an origin that has none.
+func (p InstalmentPlan) InstrumentID() (uuid.UUID, bool) {
+	posting, ok := p.Origin.instalmentPosting()
+	return posting.InstrumentID, ok
+}
+
+// instalmentPosting returns the instalment posting of the transaction: that of the
+// origin of a plan holds what is split, with its sign, and that of a period what it
+// charges.
+func (t Transaction) instalmentPosting() (Posting, bool) {
+	for _, p := range t.Postings {
+		if p.Book == BookInstalment {
+			return p, true
+		}
+	}
+	return Posting{}, false
+}
+
+// Reschedule returns the plan with a new schedule: the origin as it is, and a
+// transaction for each period of the schedule in the place of those the plan had,
+// which are not in what is returned. Each of the new periods is a draft made as the
+// periods of a plan are when it is recorded (InstalmentSchedule.periods): it has
+// the day, the principal and the interest the schedule says, the project, area,
+// texts and tags of the origin, the id the schedule gives it, and the key made of
+// the plan and its position. Giving them the status of the plan, and storing them
+// in the place of the old ones, is for the caller.
+//
+// What cannot change is the origin and the amount that is split: the principals of
+// the schedule must add up to the principal of the plan, which the instalment
+// posting of the origin holds, or it is a *PrincipalMismatchError. To change it is
+// to change the purchase, which is voided and recorded again. The schedule is
+// checked as it is when a plan is recorded, from the day of the origin. A plan that
+// is void is ErrPlanVoid. instrument is what the plan is counted in, and base the
+// base currency.
+func (p InstalmentPlan) Reschedule(instrument, base Instrument, s InstalmentSchedule) (InstalmentPlan, error) {
+	origin := p.Origin
+	if origin.Status == StatusVoid {
+		return InstalmentPlan{}, ErrPlanVoid
+	}
+	for _, period := range p.Periods {
+		if period.Status != origin.Status {
+			return InstalmentPlan{}, fmt.Errorf("%w: period %s is %s, and the origin is %s", ErrMalformedPlan, period.ID, period.Status, origin.Status)
+		}
+	}
+	posting, ok := origin.instalmentPosting()
+	if !ok || posting.AccountID == nil {
+		return InstalmentPlan{}, fmt.Errorf("%w: the origin has no instalment posting of an account", ErrMalformedPlan)
+	}
+	if posting.InstrumentID != instrument.ID {
+		return InstalmentPlan{}, fmt.Errorf("%w: the plan is counted in instrument %s, not %s", ErrMalformedPlan, posting.InstrumentID, instrument.ID)
+	}
+
+	h := Header{
+		ID: origin.ID, IdempotencyKey: origin.IdempotencyKey, OccurredOn: origin.OccurredOn, OccurredAt: origin.OccurredAt,
+		Description: origin.Description, Merchant: origin.Merchant, ProjectID: origin.ProjectID, AreaID: origin.AreaID, TagIDs: origin.TagIDs,
+	}
+	if err := s.check(DateOf(origin.OccurredOn), instrument, base, posting.Quantity.Neg()); err != nil {
+		return InstalmentPlan{}, err
+	}
+	periods, err := s.periods(h, *posting.AccountID, instrument, base)
 	if err != nil {
 		return InstalmentPlan{}, err
 	}

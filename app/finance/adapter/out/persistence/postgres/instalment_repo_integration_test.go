@@ -743,3 +743,149 @@ func TestATradeMovesBothInstrumentsAndKeepsTheBalanceGuard(t *testing.T) {
 	})
 	wantConstraint(t, err, checkViolation, "fin_transaction_balanced")
 }
+
+// reschedule does what a use case does to put a new schedule in the place of the
+// old one, in one database transaction: delete the periods, store the new ones as
+// drafts, and confirm them when the plan is confirmed.
+func (e *ledgerEnv) reschedule(old, next model.InstalmentPlan, confirm bool) error {
+	return e.inTx(func(ctx context.Context) error {
+		for _, period := range old.Periods {
+			if err := e.txns.Delete(ctx, period.ID); err != nil {
+				return fmt.Errorf("delete period %s: %w", period.ID, err)
+			}
+		}
+		for _, period := range next.Periods {
+			if _, err := e.txns.Insert(ctx, period); err != nil {
+				return fmt.Errorf("insert period %s: %w", period.ID, err)
+			}
+			if confirm {
+				if _, err := e.txns.SetStatus(ctx, period.ID, model.StatusConfirmed); err != nil {
+					return fmt.Errorf("confirm period %s: %w", period.ID, err)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// newSchedule is four periods of 3,000 that fall due on the 5th of each month from
+// December 2026, with 90 of interest on the third, which split what planOf does.
+func (e *ledgerEnv) newSchedule() model.InstalmentSchedule {
+	periods := make([]model.InstalmentPeriod, 4)
+	for i := range periods {
+		periods[i] = model.InstalmentPeriod{
+			ID: uuid.Must(uuid.NewV7()), DueOn: time.Date(2026, time.Month(12+i), 5, 0, 0, 0, 0, time.UTC), Principal: dec("3000"),
+		}
+	}
+	periods[2].Interest = decPtr("90")
+	return model.InstalmentSchedule{Periods: periods, InterestCategory: &e.interest}
+}
+
+func TestAScheduleIsReplacedInOneDatabaseTransactionWhateverTheStatusOfThePlan(t *testing.T) {
+	for _, status := range []model.Status{model.StatusDraft, model.StatusConfirmed} {
+		t.Run(string(status), func(t *testing.T) {
+			e := newLedgerEnv(t)
+			ctx := context.Background()
+			plan := e.storePlan(e.planOf("plan-resched-0001"))
+			other := e.storePlan(e.planOf("plan-resched-0002"))
+			if status == model.StatusConfirmed {
+				e.setPlanStatus(plan, model.StatusConfirmed)
+			}
+			old, err := e.txns.GetPlan(ctx, plan.Origin.ID)
+			if err != nil {
+				t.Fatalf("GetPlan: %v", err)
+			}
+			schedule := e.newSchedule()
+			next, err := old.Reschedule(e.twd, e.twd, schedule)
+			if err != nil {
+				t.Fatalf("Reschedule: %v", err)
+			}
+
+			if err := e.reschedule(old, next, status == model.StatusConfirmed); err != nil {
+				t.Fatalf("replace the schedule: %v", err)
+			}
+
+			// The old periods are gone, and what is stored is the origin as it was and the
+			// new periods in the order they fall due, of the status of the plan.
+			for _, period := range old.Periods {
+				if _, err := e.txns.Get(ctx, period.ID); !errors.Is(err, model.ErrNotFound) {
+					t.Errorf("old period %s: err = %v, want it gone", period.ID, err)
+				}
+			}
+			got, err := e.txns.GetPlan(ctx, plan.Origin.ID)
+			if err != nil {
+				t.Fatalf("GetPlan: %v", err)
+			}
+			e.wantSame("origin", got.Origin, old.Origin)
+			if len(got.Periods) != 4 {
+				t.Fatalf("%d periods stored, want the 4 of the new schedule", len(got.Periods))
+			}
+			for i, period := range got.Periods {
+				if period.ID != schedule.Periods[i].ID || period.Status != status || (status == model.StatusConfirmed) != (period.ConfirmedAt != nil) || period.VoidedAt != nil {
+					t.Errorf("period %d = %s %s confirmed at %v, want the new period %s as %s", i+1, period.ID, period.Status, period.ConfirmedAt, schedule.Periods[i].ID, status)
+				}
+				want := next.Periods[i]
+				want.Status = status
+				e.wantSame(fmt.Sprintf("period %d", i+1), period, want)
+			}
+			// Nothing of the other plan was touched.
+			if got := e.count("SELECT count(*) FROM fin_transaction WHERE plan_id = $1", other.Origin.ID); got != 13 {
+				t.Errorf("%d transactions of the other plan, want its 13", got)
+			}
+
+			// A confirmed plan counts the new schedule from the day of each period, and
+			// a draft one counts nowhere.
+			if status == model.StatusDraft {
+				if got := e.balancesOn(&e.card.ID, forever, true); len(got) != 0 {
+					t.Errorf("balances of a draft plan = %q, want none", got)
+				}
+				return
+			}
+			for _, tt := range []struct {
+				day  time.Time
+				want string
+			}{
+				{on(2026, time.December, 4), "card TWD 0 unbilled -12000"},
+				{on(2026, time.December, 5), "card TWD -3000 unbilled -9000"},
+				{on(2027, time.February, 5), "card TWD -9090 unbilled -3000"},
+				{on(2027, time.March, 5), "card TWD -12090 unbilled 0"},
+			} {
+				if got := e.balancesOn(&e.card.ID, tt.day, true); len(got) != 1 || got[0] != tt.want {
+					t.Errorf("balance of the card on %s = %q, want %q", tt.day.Format(time.DateOnly), got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// The balance trigger is what holds it all together: a period that does not add up
+// takes the whole replacement with it, and the old schedule is there as it was.
+func TestAScheduleWhosePeriodDoesNotBalanceLeavesTheOldScheduleWhole(t *testing.T) {
+	e := newLedgerEnv(t)
+	ctx := context.Background()
+	plan := e.storePlan(e.planOf("plan-resched-0003"))
+	e.setPlanStatus(plan, model.StatusConfirmed)
+	old, err := e.txns.GetPlan(ctx, plan.Origin.ID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	next, err := old.Reschedule(e.twd, e.twd, e.newSchedule())
+	if err != nil {
+		t.Fatalf("Reschedule: %v", err)
+	}
+	next.Periods[1].Postings[1].Quantity = dec("-1")
+
+	err = e.reschedule(old, next, true)
+
+	wantConstraint(t, err, checkViolation, "fin_transaction_balanced")
+	got, err := e.txns.GetPlan(ctx, plan.Origin.ID)
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if len(got.Periods) != 12 {
+		t.Fatalf("%d periods stored, want the 12 of the old schedule: the replacement is rolled back whole", len(got.Periods))
+	}
+	for i, period := range got.Periods {
+		e.wantSame(fmt.Sprintf("period %d", i+1), period, old.Periods[i])
+	}
+}

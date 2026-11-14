@@ -1,8 +1,11 @@
 package ledger
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/google/uuid"
 
@@ -85,9 +88,116 @@ func (s *Service) GetInstalmentPlan(ctx context.Context, planID uuid.UUID) (usec
 	if err != nil {
 		return usecase.InstalmentPlan{}, fmt.Errorf("instalment plan %s: %w", planID, err)
 	}
+	return toInstalmentPlan(plan), nil
+}
+
+// toInstalmentPlan returns the plan as the use cases return it.
+func toInstalmentPlan(plan model.InstalmentPlan) usecase.InstalmentPlan {
 	out := usecase.InstalmentPlan{Origin: toTransaction(plan.Origin), Periods: make([]usecase.Transaction, len(plan.Periods))}
 	for i, period := range plan.Periods {
 		out.Periods[i] = toTransaction(period)
+	}
+	return out
+}
+
+// planOf makes the plan of the transactions of one: its origin, and its periods in
+// the order of their positions.
+func planOf(txns []model.Transaction) (model.InstalmentPlan, error) {
+	var plan model.InstalmentPlan
+	found := false
+	for _, txn := range txns {
+		if txn.IsPlanOrigin() {
+			plan.Origin, found = txn, true
+			continue
+		}
+		plan.Periods = append(plan.Periods, txn)
+	}
+	if !found {
+		return model.InstalmentPlan{}, model.ErrNotFound
+	}
+	slices.SortFunc(plan.Periods, func(a, b model.Transaction) int { return cmp.Compare(*a.PlanSeq, *b.PlanSeq) })
+	return plan, nil
+}
+
+// RescheduleInstalment replaces the schedule of a plan. It locks the plan as the
+// lifecycle does (lockActed), has the domain make the periods of the new schedule
+// from the plan as it stands once locked, and then, in the one database
+// transaction, deletes the old periods and stores the new ones, which it confirms
+// when the plan is confirmed: as every transaction is stored a draft, and then
+// confirmed. The origin is not touched. Everything the domain refuses is refused
+// before anything is written.
+func (s *Service) RescheduleInstalment(ctx context.Context, in usecase.RescheduleInstalmentInput) (usecase.InstalmentPlan, error) {
+	var out usecase.InstalmentPlan
+	err := s.tx.WithinTx(ctx, func(ctx context.Context) error {
+		// An id that is not that of a plan is not found, as it is for GetInstalmentPlan.
+		// This read takes no lock: what the plan is made of is settled by the lock of
+		// its origin.
+		if _, err := s.transactions.GetPlan(ctx, in.PlanID); err != nil {
+			return fmt.Errorf("instalment plan %s: %w", in.PlanID, err)
+		}
+		acted, problems, err := s.lockActed(ctx, []uuid.UUID{in.PlanID})
+		if err != nil {
+			return err
+		}
+		if len(problems) > 0 {
+			return errors.Join(problems...)
+		}
+		plan, err := planOf(acted)
+		if err != nil {
+			return fmt.Errorf("instalment plan %s: %w", in.PlanID, err)
+		}
+
+		instrumentID, ok := plan.InstrumentID()
+		if !ok {
+			return fmt.Errorf("instalment plan %s: %w: the origin has no instalment posting", in.PlanID, model.ErrMalformedPlan)
+		}
+		instrument, err := s.instrument(ctx, instrumentID)
+		if err != nil {
+			return err
+		}
+		base, err := s.baseCurrency(ctx, instrument)
+		if err != nil {
+			return err
+		}
+		schedule, err := s.schedule(ctx, in.Schedule)
+		if err != nil {
+			return err
+		}
+		next, err := plan.Reschedule(instrument, base, schedule)
+		if err != nil {
+			return err
+		}
+
+		for _, period := range plan.Periods {
+			if err := s.transactions.Delete(ctx, period.ID); err != nil {
+				return fmt.Errorf("delete period %s: %w", period.ID, err)
+			}
+		}
+		for _, period := range next.Periods {
+			if _, err := s.transactions.Insert(ctx, period); err != nil {
+				return fmt.Errorf("store period %s: %w", period.ID, err)
+			}
+			if plan.Origin.Status != model.StatusConfirmed {
+				continue
+			}
+			confirmed, err := period.Confirm()
+			if err != nil {
+				return fmt.Errorf("confirm period %s: %w", period.ID, err)
+			}
+			if _, err := s.transactions.SetStatus(ctx, confirmed.ID, confirmed.Status); err != nil {
+				return fmt.Errorf("confirm period %s: %w", period.ID, err)
+			}
+		}
+
+		stored, err := s.transactions.GetPlan(ctx, in.PlanID)
+		if err != nil {
+			return fmt.Errorf("get instalment plan %s: %w", in.PlanID, err)
+		}
+		out = toInstalmentPlan(stored)
+		return nil
+	})
+	if err != nil {
+		return usecase.InstalmentPlan{}, err
 	}
 	return out, nil
 }

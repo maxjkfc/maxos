@@ -76,8 +76,13 @@ type TransactionRepo interface {
 	// GetForUpdate is Get that also locks the transaction against being changed or
 	// deleted by anyone else until the database transaction ends: they wait, and
 	// then see what this one left. Whoever locks several transactions locks them in
-	// the order of their ids, which keeps two such callers from waiting for each
-	// other.
+	// one order, the same for every caller, which keeps two such callers from
+	// waiting for each other: first those that are not periods of a plan, the
+	// origins of plans and the ordinary transactions, in the order of their ids; then
+	// the periods of each plan whose origin is locked, in the order of their ids.
+	// The lock of the origin is the lock of the plan: nobody else holds a period of
+	// it, and the periods of a plan, which a reschedule replaces, are read only once
+	// the origin is locked.
 	GetForUpdate(ctx context.Context, id uuid.UUID) (model.Transaction, error)
 	// GetByIdempotencyKey returns the transaction stored under the key, or
 	// model.ErrNotFound.

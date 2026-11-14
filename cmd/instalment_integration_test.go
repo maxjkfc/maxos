@@ -3,11 +3,13 @@ package cmd_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
@@ -401,5 +403,269 @@ func TestConfirmingEveryDraftListedConfirmsAPlanOnceThroughTheRealUseCases(t *te
 	// 30 of interest of the first charged, and 9,000 is still to come.
 	if got, want := l.held(t, names, nil), []string{"bank -120 unbilled 0", "card -3030 unbilled -9000"}; !slices.Equal(got, want) {
 		t.Errorf("balances = %q, want %q", got, want)
+	}
+}
+
+// cardPlan is a plan on a card that is recorded for the tests of rescheduling: 12,000
+// in 12 periods of 1,000 that fall due on the 5th of each month from December 2026,
+// 30 of interest with the first.
+type cardPlan struct {
+	card, food, interest uuid.UUID
+	origin               usecase.Transaction
+	names                map[uuid.UUID]string
+}
+
+func (l ledgerApp) cardPlan(t *testing.T, key string, confirm bool) cardPlan {
+	t.Helper()
+	ctx := context.Background()
+	card, err := l.CreateAccount.CreateAccount(ctx, usecase.CreateAccountInput{Name: "card", Kind: "card"})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	food, err := l.CreateCategory.CreateCategory(ctx, usecase.CreateCategoryInput{Direction: "expense", Name: "Food"})
+	if err != nil {
+		t.Fatalf("CreateCategory: %v", err)
+	}
+	interest, err := l.CreateCategory.CreateCategory(ctx, usecase.CreateCategoryInput{Direction: "expense", Name: "Interest"})
+	if err != nil {
+		t.Fatalf("CreateCategory: %v", err)
+	}
+	recorded, err := l.RecordExpense.RecordExpense(ctx, usecase.RecordExpenseInput{
+		RecordDetails: l.details(key), AccountID: &card.ID, InstrumentID: model.BaseCurrencyID,
+		Lines:       []usecase.CategoryLine{{CategoryID: food.ID, Amount: dec("12000")}},
+		Instalments: instalmentsOf(interest.ID),
+	})
+	if err != nil {
+		t.Fatalf("RecordExpense in instalments: %v", err)
+	}
+	if confirm {
+		l.confirm(t, recorded.Transaction)
+	}
+	return cardPlan{card: card.ID, food: food.ID, interest: interest.ID, origin: recorded.Transaction, names: map[uuid.UUID]string{card.ID: "card"}}
+}
+
+// owed is what the card holds and what is unbilled on it, as the balances say.
+func (l ledgerApp) owed(t *testing.T, p cardPlan) (held, unbilled decimal.Decimal) {
+	t.Helper()
+	out, err := l.GetBalances.GetBalances(context.Background(), usecase.GetBalancesInput{AccountID: &p.card})
+	if err != nil {
+		t.Fatalf("GetBalances: %v", err)
+	}
+	for _, b := range out.Balances {
+		held, unbilled = held.Add(b.Quantity), unbilled.Add(b.UnbilledInstalment)
+	}
+	return held, unbilled
+}
+
+// wantOwed fails the test unless the card holds held and has unbilled, and what it
+// owes in all, the two together, is total.
+func (l ledgerApp) wantOwed(t *testing.T, when string, p cardPlan, held, unbilled string) {
+	t.Helper()
+	gotHeld, gotUnbilled := l.owed(t, p)
+	if !gotHeld.Equal(dec(held)) || !gotUnbilled.Equal(dec(unbilled)) {
+		t.Errorf("%s: the card holds %s and has %s unbilled, want %s and %s", when, gotHeld, gotUnbilled, held, unbilled)
+	}
+}
+
+// postingsOf are the postings of the transaction in the book.
+func postingsOf(txn usecase.Transaction, book string) []usecase.Posting {
+	var out []usecase.Posting
+	for _, p := range txn.Postings {
+		if p.Book == book {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// Three of the 12 periods of 1,000 have fallen due, and the card is paid off of the
+// other 9,000 in one period, next month, with interest of 270. What the card owes
+// today does not change, and the interest, which is an expense, is booked on the
+// day it is charged.
+func TestPayingOffWhatRemainsOfAPlanInOnePeriodThroughTheRealUseCases(t *testing.T) {
+	ctx := context.Background()
+	clk := newTestClock(dateOn(2027, time.March, 1))
+	l := newLedgerAppOn(t, testpg.New(t), clk)
+	p := l.cardPlan(t, "instalment-tv-0005", true)
+	before, err := l.GetInstalmentPlan.GetInstalmentPlan(ctx, p.origin.ID)
+	if err != nil {
+		t.Fatalf("GetInstalmentPlan: %v", err)
+	}
+	l.wantOwed(t, "before", p, "-3030", "-9000")
+
+	got, err := l.RescheduleInstalment.RescheduleInstalment(ctx, usecase.RescheduleInstalmentInput{PlanID: p.origin.ID, Schedule: usecase.InstalmentSchedule{
+		InterestCategoryID: &p.interest,
+		Periods: []usecase.InstalmentPeriod{
+			{DueOn: dateOn(2026, time.December, 5), Principal: dec("1000"), Interest: new(dec("30"))},
+			{DueOn: dateOn(2027, time.January, 5), Principal: dec("1000")},
+			{DueOn: dateOn(2027, time.February, 5), Principal: dec("1000")},
+			{DueOn: dateOn(2027, time.April, 5), Principal: dec("9000"), Interest: new(dec("270"))},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("RescheduleInstalment: %v", err)
+	}
+
+	// The origin is as it was, and the periods are 4 new confirmed transactions.
+	if !reflect.DeepEqual(got.Origin, before.Origin) {
+		t.Errorf("origin = %+v, want it as it was: %+v", got.Origin, before.Origin)
+	}
+	if len(got.Periods) != 4 {
+		t.Fatalf("%d periods, want the 4 of the new schedule", len(got.Periods))
+	}
+	for i, period := range got.Periods {
+		if period.Status != "confirmed" || period.ConfirmedAt == nil || period.PlanSeq == nil || *period.PlanSeq != i+1 {
+			t.Errorf("period %d = %s, position %v, confirmed at %v, want it confirmed, at its position", i+1, period.Status, period.PlanSeq, period.ConfirmedAt)
+		}
+		for _, old := range before.Periods {
+			if old.ID == period.ID {
+				t.Errorf("period %d has the id of an old period", i+1)
+			}
+		}
+	}
+
+	// What the card owes today is what it owed, and the plan says what is left.
+	l.wantOwed(t, "after", p, "-3030", "-9000")
+	if got, want := l.plans(t, false), []string{"12000 3000 9000 2027-04-05"}; !slices.Equal(got, want) {
+		t.Errorf("plans = %q, want %q", got, want)
+	}
+	listed, err := l.ListTransactions.ListTransactions(ctx, usecase.ListTransactionsInput{PlanID: &p.origin.ID, Limit: 100})
+	if err != nil || len(listed.Transactions) != 5 {
+		t.Errorf("transactions of the plan = %d, %v, want the origin and the 4 new periods", len(listed.Transactions), err)
+	}
+
+	// The interest is an expense of its category, 30 on the first period and 270 on
+	// the last, and the last period charges the principal and the interest together.
+	last := got.Periods[3]
+	if instalment, account, expense := postingsOf(last, "instalment"), postingsOf(last, "account"), postingsOf(last, "expense"); len(instalment) != 1 || len(account) != 1 || len(expense) != 1 ||
+		!instalment[0].Quantity.Equal(dec("9000")) || !account[0].Quantity.Equal(dec("-9270")) || !expense[0].Quantity.Equal(dec("270")) ||
+		expense[0].CategoryID == nil || *expense[0].CategoryID != p.interest {
+		t.Errorf("last period postings = %+v, want instalment +9000, account -9270 and 270 of expense of the interest category", last.Postings)
+	}
+	interest := decimal.Zero
+	for _, period := range got.Periods {
+		for _, e := range postingsOf(period, "expense") {
+			interest = interest.Add(e.Quantity)
+		}
+	}
+	if !interest.Equal(dec("300")) {
+		t.Errorf("interest of the plan = %s, want 300: the 30 and the 270", interest)
+	}
+
+	// On the day it falls due, the card is charged it, and nothing is unbilled.
+	clk.setDay(dateOn(2027, time.April, 5))
+	l.wantOwed(t, "on the day of the last period", p, "-12300", "0")
+	if got := l.plans(t, false); len(got) != 0 {
+		t.Errorf("plans on the day of the last period = %q, want none: it is finished", got)
+	}
+	if got, want := l.plans(t, true), []string{"12000 12000 0 -"}; !slices.Equal(got, want) {
+		t.Errorf("plans with the finished ones = %q, want %q", got, want)
+	}
+}
+
+// A period that is moved across today moves what is owed between what the card
+// holds and what is unbilled on it, and what it owes in all stays the same: a
+// period that has no interest is moved, so that the interest does not move with it.
+func TestMovingAPeriodAcrossTodayMovesWhatIsOwedBetweenTheBalanceAndTheUnbilledInstalmentThroughTheRealUseCases(t *testing.T) {
+	ctx := context.Background()
+	clk := newTestClock(dateOn(2026, time.December, 20))
+	l := newLedgerAppOn(t, testpg.New(t), clk)
+	p := l.cardPlan(t, "instalment-tv-0006", true)
+	reschedule := func(schedule *usecase.InstalmentSchedule) {
+		t.Helper()
+		if _, err := l.RescheduleInstalment.RescheduleInstalment(ctx, usecase.RescheduleInstalmentInput{PlanID: p.origin.ID, Schedule: *schedule}); err != nil {
+			t.Fatalf("RescheduleInstalment: %v", err)
+		}
+	}
+	l.wantOwed(t, "to begin with, with one period fallen due", p, "-1030", "-11000")
+
+	// A period that falls due after today is moved to before it: it is charged now,
+	// and 1,000 moves from unbilled to what the card holds.
+	earlier := instalmentsOf(p.interest)
+	earlier.Periods[1].DueOn = dateOn(2026, time.December, 15)
+	reschedule(earlier)
+	l.wantOwed(t, "with a future period moved to before today", p, "-2030", "-10000")
+	if got, want := l.plans(t, false), []string{"12000 2000 10000 2027-02-05"}; !slices.Equal(got, want) {
+		t.Errorf("plans = %q, want %q", got, want)
+	}
+
+	// A period that fell due is moved to after today: it is not charged any more,
+	// and the 1,000 is unbilled again.
+	reschedule(instalmentsOf(p.interest))
+	l.wantOwed(t, "with the period moved back to after today", p, "-1030", "-11000")
+
+	// A plan that is void is not rescheduled, and counts for nothing.
+	if _, err := l.Void.VoidTransaction(ctx, p.origin.ID); err != nil {
+		t.Fatalf("VoidTransaction: %v", err)
+	}
+	_, err := l.RescheduleInstalment.RescheduleInstalment(ctx, usecase.RescheduleInstalmentInput{PlanID: p.origin.ID, Schedule: *instalmentsOf(p.interest)})
+	if !errors.Is(err, model.ErrPlanVoid) {
+		t.Fatalf("reschedule a void plan: err = %v, want ErrPlanVoid", err)
+	}
+	l.wantOwed(t, "once void", p, "0", "0")
+}
+
+// What cannot be rescheduled is refused with what is wrong, and the plan is left as
+// it was.
+func TestReschedulingWhatItCannotDoLeavesThePlanAsItWasThroughTheRealUseCases(t *testing.T) {
+	ctx := context.Background()
+	l := newLedgerApp(t)
+	p := l.cardPlan(t, "instalment-tv-0007", true)
+	before, err := l.GetInstalmentPlan.GetInstalmentPlan(ctx, p.origin.ID)
+	if err != nil {
+		t.Fatalf("GetInstalmentPlan: %v", err)
+	}
+
+	// The amount is the purchase, which is not rescheduled: the error says both.
+	other := instalmentsOf(p.interest)
+	other.Periods[11].Principal = dec("1500")
+	_, err = l.RescheduleInstalment.RescheduleInstalment(ctx, usecase.RescheduleInstalmentInput{PlanID: p.origin.ID, Schedule: *other})
+	var mismatch *model.PrincipalMismatchError
+	if !errors.As(err, &mismatch) || !mismatch.Principals.Equal(dec("12500")) || !mismatch.Amount.Equal(dec("12000")) {
+		t.Errorf("err = %v, want a mismatch of the 12500 the schedule adds up to and the 12000 of the plan", err)
+	}
+	// A period is not a plan.
+	_, err = l.RescheduleInstalment.RescheduleInstalment(ctx, usecase.RescheduleInstalmentInput{PlanID: before.Periods[0].ID, Schedule: *instalmentsOf(p.interest)})
+	if !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("reschedule a period: err = %v, want ErrNotFound", err)
+	}
+
+	after, err := l.GetInstalmentPlan.GetInstalmentPlan(ctx, p.origin.ID)
+	if err != nil || !reflect.DeepEqual(after, before) {
+		t.Errorf("plan after = %+v, %v, want it as it was: %+v", after, err, before)
+	}
+}
+
+// A draft period moved onto or before the day of a reconciliation is pending for it,
+// and is not once it is moved back: nothing is kept from one call to the next.
+func TestMovingADraftPeriodOntoTheDayOfAReconciliationMakesItPendingThroughTheRealUseCases(t *testing.T) {
+	ctx := context.Background()
+	l := newLedgerApp(t)
+	p := l.cardPlan(t, "instalment-tv-0008", false)
+	reconcile := func(key string) error {
+		details := l.details(key)
+		details.OccurredOn = dateOn(2026, time.December, 4)
+		_, err := l.Reconcile.Reconcile(ctx, usecase.ReconcileInput{RecordDetails: details, AccountID: p.card, InstrumentID: model.BaseCurrencyID, ActualBalance: dec("0")})
+		return err
+	}
+	if err := reconcile("reconcile-card-r01"); err != nil {
+		t.Fatalf("Reconcile with the first period of the plan after the day: %v, want it not held up", err)
+	}
+
+	earlier := instalmentsOf(p.interest)
+	earlier.Periods[0].DueOn = dateOn(2026, time.December, 1)
+	if _, err := l.RescheduleInstalment.RescheduleInstalment(ctx, usecase.RescheduleInstalmentInput{PlanID: p.origin.ID, Schedule: *earlier}); err != nil {
+		t.Fatalf("RescheduleInstalment: %v", err)
+	}
+	var pending *model.PendingDraftsError
+	if err := reconcile("reconcile-card-r02"); !errors.Is(err, model.ErrPendingDrafts) || !errors.As(err, &pending) || pending.Count != 1 {
+		t.Fatalf("Reconcile with the first period moved to before the day: err = %v, want 1 draft pending", err)
+	}
+
+	if _, err := l.RescheduleInstalment.RescheduleInstalment(ctx, usecase.RescheduleInstalmentInput{PlanID: p.origin.ID, Schedule: *instalmentsOf(p.interest)}); err != nil {
+		t.Fatalf("RescheduleInstalment back: %v", err)
+	}
+	if err := reconcile("reconcile-card-r03"); err != nil {
+		t.Fatalf("Reconcile with the first period moved back to after the day: %v, want it not held up", err)
 	}
 }

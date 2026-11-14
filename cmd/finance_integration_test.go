@@ -57,6 +57,8 @@ type ledgerApp struct {
 	ListInstalmentPlans  usecase.ListInstalmentPlans
 	Void                 usecase.VoidTransaction
 	Discard              usecase.DiscardDraft
+	RescheduleInstalment usecase.RescheduleInstalment
+	GetTransaction       usecase.GetTransaction
 }
 
 func newLedgerApp(t *testing.T) ledgerApp {
