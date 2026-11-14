@@ -326,3 +326,25 @@ func TestTheSystemCategoriesAreSeededUnderTheIdsOfTheModelAndNeverArchived(t *te
 		t.Errorf("List has %d system categories, want %d", found, len(system))
 	}
 }
+
+func TestTheSystemCategoriesHaveNoSubcategories(t *testing.T) {
+	ctx := context.Background()
+	r := postgres.NewCategoryRepo(testpg.New(t))
+
+	for id, direction := range map[uuid.UUID]model.Direction{
+		model.UnrecordedExpenseCategoryID: model.DirectionExpense,
+		model.UnrecordedIncomeCategoryID:  model.DirectionIncome,
+	} {
+		// The model refuses it too. The table is what holds when something goes
+		// round the model, and the parent key alone would let it through: the
+		// parent is top-level and of the same direction.
+		child := newCategory(direction, &id, "子類別")
+
+		_, err := r.Insert(ctx, child)
+
+		wantConstraint(t, err, checkViolation, "fin_category_system_parent_check")
+		if _, err := r.Get(ctx, child.ID); !errors.Is(err, model.ErrNotFound) {
+			t.Errorf("Get after the refused insert under the %s system category: err = %v, want ErrNotFound", direction, err)
+		}
+	}
+}

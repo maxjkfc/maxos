@@ -3,6 +3,7 @@ package ledger_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -342,6 +343,68 @@ func TestReconcileRefusesASecondReconciliationWhileTheFirstDraftWaits(t *testing
 	var pending *model.PendingDraftsError
 	if !errors.As(err, &pending) || pending.Count != 1 {
 		t.Fatalf("err = %v, want the draft of the first call counted: adjusting twice would book the difference twice", err)
+	}
+}
+
+func TestReconcileLocksTheAccountBeforeItLooksAtAnythingElse(t *testing.T) {
+	e := newEnv(t)
+	e.confirmedOpening("opening-0000001", e.cash, e.twd, "1000")
+	log := &callLog{}
+	e.accounts.log, e.txns.log = log, log
+
+	if _, err := e.svc.Reconcile(context.Background(), e.reconcileOf("reconcile-00001", e.cash, e.twd, "880")); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// The lock comes first, so that a reconciliation of the account that starts
+	// meanwhile waits before it reads anything, and the key comes before the drafts
+	// and the balance, so that a retry that waited is answered with the draft of
+	// the call it repeats and not refused for it.
+	want := []string{"lock the account", "look up the key", "count the drafts", "read the balance"}
+	if !slices.Equal(log.calls, want) {
+		t.Errorf("calls = %q, want %q", log.calls, want)
+	}
+	if !slices.Equal(e.accounts.locked, []uuid.UUID{e.cash.ID}) {
+		t.Errorf("locked %v, want the account that is reconciled, once", e.accounts.locked)
+	}
+}
+
+func TestReconcileStopsWhereTheAccountCannotBeLocked(t *testing.T) {
+	e := newEnv(t)
+	e.confirmedOpening("opening-0000001", e.cash, e.twd, "1000")
+	inserts := e.txns.inserts
+	boom := errors.New("lock timeout")
+	e.accounts.lockErr = boom
+
+	_, err := e.svc.Reconcile(context.Background(), e.reconcileOf("reconcile-00001", e.cash, e.twd, "880"))
+
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the failure of the lock", err)
+	}
+	if e.txns.inserts != inserts {
+		t.Errorf("%d transactions stored, want the opening balance only", e.txns.inserts)
+	}
+}
+
+// An account the lock does not find is no reason to refuse a key that was used
+// before: it is answered before the request is validated, whatever it names.
+func TestReconcileAnswersAKeyUsedBeforeWhateverAccountTheCallNames(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.confirmedOpening("opening-0000001", e.cash, e.twd, "1000")
+	first, err := e.svc.Reconcile(ctx, e.reconcileOf("reconcile-00001", e.cash, e.twd, "880"))
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	nowhere := model.Account{ID: uuid.Must(uuid.NewV7())}
+	again, err := e.svc.Reconcile(ctx, e.reconcileOf("reconcile-00001", nowhere, e.twd, "880"))
+	if err != nil {
+		t.Fatalf("Reconcile with the key again: %v", err)
+	}
+
+	if !again.Duplicate || again.Transaction == nil || again.Transaction.ID != first.Transaction.ID {
+		t.Errorf("output = %+v, want the first draft, marked as a duplicate", again)
 	}
 }
 

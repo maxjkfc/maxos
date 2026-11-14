@@ -24,6 +24,10 @@ type txKey struct{}
 // database transaction: the use cases must make all their writes in one.
 var errNotInTx = errors.New("the write was made outside a database transaction")
 
+// errNoSuchParty is what the fake catalog returns for a party it does not have:
+// an error of the catalog, which the ledger cannot tell from any other.
+var errNoSuchParty = errors.New("the catalog has no such party")
+
 func inTx(ctx context.Context) bool {
 	_, ok := ctx.Value(txKey{}).(struct{})
 	return ok
@@ -42,6 +46,16 @@ type fakeTx struct {
 func (f *fakeTx) WithinTx(ctx context.Context, fn func(ctx context.Context) error) error {
 	f.calls++
 	return fn(context.WithValue(ctx, txKey{}, struct{}{}))
+}
+
+// callLog notes, in order, the calls of the fakes that share it which a test
+// wants the order of. A fake without a log notes nothing.
+type callLog struct{ calls []string }
+
+func (l *callLog) note(call string) {
+	if l != nil {
+		l.calls = append(l.calls, call)
+	}
 }
 
 // fakeTransactions is an in-memory repo.TransactionRepo.
@@ -78,6 +92,10 @@ type fakeTransactions struct {
 	dealingRows []model.Dealing
 	// readErr, when set, is what BalanceAsOf, PendingDrafts and Dealings return.
 	readErr error
+	// log, when set, is told of the calls whose order a test checks:
+	// "look up the key" for GetByIdempotencyKey, "count the drafts" for
+	// PendingDrafts and "read the balance" for BalanceAsOf.
+	log *callLog
 }
 
 func newFakeTransactions() *fakeTransactions {
@@ -128,6 +146,7 @@ func (f *fakeTransactions) GetForUpdate(ctx context.Context, id uuid.UUID) (mode
 }
 
 func (f *fakeTransactions) GetByIdempotencyKey(_ context.Context, key string) (model.Transaction, error) {
+	f.log.note("look up the key")
 	for _, stored := range f.byID {
 		if stored.IdempotencyKey == key {
 			return stored, nil
@@ -187,6 +206,7 @@ func (f *fakeTransactions) Balances(_ context.Context, accountID *uuid.UUID) ([]
 // BalanceAsOf adds up the account postings of the confirmed transactions that
 // happened on or before the day, as the repo does.
 func (f *fakeTransactions) BalanceAsOf(_ context.Context, accountID, instrumentID uuid.UUID, day time.Time) (decimal.Decimal, error) {
+	f.log.note("read the balance")
 	if f.readErr != nil {
 		return decimal.Zero, f.readErr
 	}
@@ -207,6 +227,7 @@ func (f *fakeTransactions) BalanceAsOf(_ context.Context, accountID, instrumentI
 // PendingDrafts counts the drafts that happened on or before the day and have a
 // posting to the account in the instrument, as the repo does.
 func (f *fakeTransactions) PendingDrafts(_ context.Context, accountID, instrumentID uuid.UUID, day time.Time) (int, error) {
+	f.log.note("count the drafts")
 	if f.readErr != nil {
 		return 0, f.readErr
 	}
@@ -233,11 +254,17 @@ func (f *fakeTransactions) Dealings(_ context.Context, partyID *uuid.UUID) ([]mo
 	return f.dealingRows, nil
 }
 
-// fakeAccounts is an in-memory repo.AccountRepo of which only Get is used.
+// fakeAccounts is an in-memory repo.AccountRepo of which only Get and Lock are
+// used.
 type fakeAccounts struct {
 	repo.AccountRepo
 
 	accounts map[uuid.UUID]model.Account
+	// locked lists the ids Lock was asked for, in order, and log, when set, is
+	// told "lock the account" each time. lockErr, when set, is what Lock returns.
+	locked  []uuid.UUID
+	log     *callLog
+	lockErr error
 }
 
 func newFakeAccounts() *fakeAccounts {
@@ -262,6 +289,24 @@ func (f *fakeAccounts) Get(_ context.Context, id uuid.UUID) (model.Account, erro
 		return model.Account{}, model.ErrNotFound
 	}
 	return a, nil
+}
+
+// Lock notes that the account is locked, and returns model.ErrNotFound for an id
+// it does not know. It needs a database transaction, as the repo does: the lock
+// is held until the transaction ends, and one taken outside of it holds nothing.
+func (f *fakeAccounts) Lock(ctx context.Context, id uuid.UUID) error {
+	if !inTx(ctx) {
+		return errNotInTx
+	}
+	f.log.note("lock the account")
+	f.locked = append(f.locked, id)
+	if f.lockErr != nil {
+		return f.lockErr
+	}
+	if _, ok := f.accounts[id]; !ok {
+		return model.ErrNotFound
+	}
+	return nil
 }
 
 // fakeInstruments is an in-memory repo.InstrumentRepo of which only Get is used.
@@ -334,7 +379,8 @@ func (f *fakeCategories) Get(_ context.Context, id uuid.UUID) (model.Category, e
 // catalogusecase.ResolveProjectArea, it follows the rule of the port: the default
 // area it was given, unless that is archived, and a *ReferenceError for a project
 // that is not found or archived. As a catalogusecase.ListParties it lists its
-// parties by name, as the catalog does.
+// parties by name, as the catalog does. As a catalogusecase.GetParty it returns a
+// party, archived or not, and errNoSuchParty for one it does not have.
 type fakeReferences struct {
 	// projects, areas, parties and tags map each id the catalog has to whether it
 	// is archived.
@@ -351,6 +397,8 @@ type fakeReferences struct {
 	listedWith       catalogusecase.ListPartiesInput
 	listPartiesCalls int
 	listPartiesErr   error
+	// gotParties lists the ids GetParty was asked for, in order.
+	gotParties []uuid.UUID
 }
 
 func newFakeReferences() *fakeReferences {
@@ -406,6 +454,14 @@ func (f *fakeReferences) ListParties(_ context.Context, in catalogusecase.ListPa
 		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID.String(), b.ID.String()))
 	})
 	return out, nil
+}
+
+func (f *fakeReferences) GetParty(_ context.Context, id uuid.UUID) (catalogusecase.Party, error) {
+	f.gotParties = append(f.gotParties, id)
+	if _, ok := f.parties[id]; !ok {
+		return catalogusecase.Party{}, errNoSuchParty
+	}
+	return catalogusecase.Party{ID: id, Name: f.partyNames[id]}, nil
 }
 
 // setDefaultArea makes area the default area of project.

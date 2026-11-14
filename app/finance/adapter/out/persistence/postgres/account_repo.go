@@ -50,6 +50,16 @@ func (r *AccountRepo) Get(ctx context.Context, id uuid.UUID) (model.Account, err
 	return toAccount(row), nil
 }
 
+// Lock locks the account's row until the database transaction of the context
+// ends (queries/account.sql says which lock). Outside a transaction it holds the
+// row for no longer than the one statement, so it is of use only inside one.
+func (r *AccountRepo) Lock(ctx context.Context, id uuid.UUID) error {
+	if _, err := r.q.LockAccount(ctx, id); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
 // List returns the accounts by name.
 func (r *AccountRepo) List(ctx context.Context, includeArchived bool) ([]model.Account, error) {
 	rows, err := r.q.ListAccounts(ctx, includeArchived)

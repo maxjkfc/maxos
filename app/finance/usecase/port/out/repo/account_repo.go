@@ -23,4 +23,11 @@ type AccountRepo interface {
 	// account that is already archived is returned as it is: the time it was
 	// archived does not change.
 	Archive(ctx context.Context, id uuid.UUID) (model.Account, error)
+	// Lock locks the account's row until the database transaction the context
+	// carries ends: another transaction that locks the same account waits for it,
+	// and then sees what it committed. It is how use cases that read about an
+	// account and then write make sure that nobody else does the same meanwhile.
+	// Recording a posting to the account is not held up by it. It returns
+	// model.ErrNotFound when there is no such account.
+	Lock(ctx context.Context, id uuid.UUID) error
 }

@@ -105,8 +105,9 @@ var (
 	// ErrSameAccount is returned for a transfer from an account to itself.
 	ErrSameAccount = errors.New("a transfer needs two different accounts")
 
-	// ErrNotCurrency is returned for an exchange or a dealing that has an
-	// instrument which is not a currency. Buying and selling such an instrument is
+	// ErrNotCurrency is returned for an exchange, a dealing, or an expense that has
+	// shares or was paid by a party, whose instrument is not a currency: what a
+	// party owes is counted in a currency. Buying and selling such an instrument is
 	// a trade.
 	ErrNotCurrency = errors.New("the instrument must be a currency")
 
@@ -183,8 +184,9 @@ var (
 	ErrDiscountNotAllowed = errors.New("only an expense can have a discount")
 
 	// ErrSystemCategory is returned for a system category that is used in a line
-	// or a fee, or is to be archived: the ledger keeps them for reconciliations.
-	ErrSystemCategory = errors.New("a system category is for reconciliations only, and is never archived")
+	// or a fee, that is to be archived, or that is to be the parent of a new
+	// category: the ledger keeps them for reconciliations.
+	ErrSystemCategory = errors.New("a system category is for reconciliations only, and is never archived or divided into subcategories")
 
 	// ErrBaseAmountNotAllowed is returned for the difference of the reconciliation
 	// of an instrument that is not a currency that comes with an amount in the base

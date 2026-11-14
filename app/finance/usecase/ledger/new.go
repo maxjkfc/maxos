@@ -11,9 +11,10 @@ import (
 
 // New returns the ledger use cases. They need the repos of what a transaction
 // refers to, the catalog to check the projects, areas, parties and tags it
-// names, to find the project of a day, to find the default area of a project and
-// to list the parties (their names put the dealings in order), and a transactor
-// to keep what they write together.
+// names, to find the project of a day, to find the default area of a project, to
+// list the parties (their names put the dealings in order) and to get one (the
+// dealings of one party need no order, but the party must be there), and a
+// transactor to keep what they write together.
 func New(
 	transactor tx.Transactor,
 	transactions repo.TransactionRepo,
@@ -23,7 +24,8 @@ func New(
 	references catalogusecase.VerifyReferences,
 	defaults catalogusecase.ResolveProjectDefaults,
 	projectAreas catalogusecase.ResolveProjectArea,
-	parties catalogusecase.ListParties,
+	listParties catalogusecase.ListParties,
+	getParty catalogusecase.GetParty,
 ) *Service {
 	return &Service{
 		tx:           transactor,
@@ -34,7 +36,8 @@ func New(
 		references:   references,
 		defaults:     defaults,
 		projectAreas: projectAreas,
-		parties:      parties,
+		listParties:  listParties,
+		getParty:     getParty,
 	}
 }
 
@@ -45,8 +48,8 @@ func New(
 // GetDealings, all backed by one Service. It needs a tx.Transactor, a
 // repo.TransactionRepo, a repo.AccountRepo, a repo.InstrumentRepo, a
 // repo.CategoryRepo, and the catalog's usecase.VerifyReferences,
-// usecase.ResolveProjectDefaults, usecase.ResolveProjectArea and
-// usecase.ListParties.
+// usecase.ResolveProjectDefaults, usecase.ResolveProjectArea,
+// usecase.ListParties and usecase.GetParty.
 func Module() fx.Option {
 	return fx.Provide(fx.Annotate(New,
 		fx.As(new(usecase.RecordExpense)),

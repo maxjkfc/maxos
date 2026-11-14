@@ -167,6 +167,8 @@ func TestCreateCategoryRejectsInvalidInputWithoutStoring(t *testing.T) {
 	sub := r.seed(t, model.DirectionExpense, &top, "早餐")
 	archived := r.seedArchived(t, model.DirectionExpense, "舊的")
 	unknown := uuid.Must(uuid.NewV7())
+	system := model.UnrecordedExpenseCategoryID
+	r.categories[system] = model.Category{ID: system, Direction: model.DirectionExpense, Name: "未記錄"}
 	before := len(r.categories)
 
 	tests := []struct {
@@ -181,6 +183,7 @@ func TestCreateCategoryRejectsInvalidInputWithoutStoring(t *testing.T) {
 		{"archived parent", usecase.CreateCategoryInput{Direction: "expense", ParentID: &archived, Name: "x"}, model.ErrArchived},
 		{"parent is a subcategory", usecase.CreateCategoryInput{Direction: "expense", ParentID: &sub, Name: "x"}, model.ErrCategoryTooDeep},
 		{"parent has the other direction", usecase.CreateCategoryInput{Direction: "income", ParentID: &top, Name: "x"}, model.ErrCategoryDirectionMismatch},
+		{"parent is a system category", usecase.CreateCategoryInput{Direction: "expense", ParentID: &system, Name: "x"}, model.ErrSystemCategory},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

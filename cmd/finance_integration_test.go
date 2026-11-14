@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 	"go.uber.org/fx"
 
@@ -49,10 +50,17 @@ type ledgerApp struct {
 
 func newLedgerApp(t *testing.T) ledgerApp {
 	t.Helper()
+	return newLedgerAppOn(t, testpg.New(t))
+}
+
+// newLedgerAppOn puts the app together on a pool of the caller, for a test that
+// needs a say in how the database is reached.
+func newLedgerAppOn(t *testing.T, pool *pgxpool.Pool) ledgerApp {
+	t.Helper()
 	var l ledgerApp
 	app := fx.New(
 		fx.NopLogger,
-		fx.Supply(testpg.New(t)),
+		fx.Supply(pool),
 		cmd.CatalogModule(),
 		cmd.FinanceModule(),
 		fx.Populate(&l),

@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -15,6 +16,26 @@ import (
 // drafts it was worked out beside, and the draft it records are read and written
 // together.
 //
+// Reconciliations of one account are made one at a time. The first statement of
+// the transaction locks the account (repo.AccountRepo.Lock) until it ends, so a
+// second reconciliation of it that starts meanwhile waits there and then reads
+// what the first committed: its draft, which refuses it (*model.PendingDraftsError),
+// or, with the same key, its transaction, which it returns. Without the lock both
+// would read the same balance and the same empty list of drafts, and each would
+// draft the difference. The transaction is READ COMMITTED, as all of them are, so
+// the statements after the lock do see what the other one committed. The lock is
+// on the account, not on the account and the instrument: that is more than the
+// check needs, and reconciling two instruments of one account at once is not
+// something to make fast.
+//
+// The lock is taken before the key is looked up, not after it. A retry that
+// overlaps its first call has to be answered with what that call recorded;
+// looked up first, the key is not there yet, the retry waits for the lock, and it
+// is then refused for a draft that is its own. An account that is not found does
+// not fail the lock: a key that was used before is answered whatever became of
+// the account, and the account is looked at further down, where the request is
+// validated.
+//
 // The recorded balance counts the confirmed postings of the account and the
 // instrument up to and including the day, so it is not known while a draft is
 // dated on or before the day with a posting to them: the draft may be confirmed
@@ -24,8 +45,9 @@ import (
 // stale, and is not detected.
 //
 // A key that was used before returns the transaction recorded under it, as it
-// does for the use cases that record, and is answered before anything else is
-// looked at: the draft it recorded is itself one of the pending drafts.
+// does for the use cases that record, and is answered right after the lock,
+// before anything else is looked at: the draft it recorded is itself one of the
+// pending drafts.
 // RecordedBalance and Difference are not worked out then. A reconciliation with
 // no difference records nothing, so it has no key to repeat.
 func (s *Service) Reconcile(ctx context.Context, in usecase.ReconcileInput) (usecase.ReconcileOutput, error) {
@@ -36,6 +58,9 @@ func (s *Service) Reconcile(ctx context.Context, in usecase.ReconcileInput) (use
 
 	var out usecase.ReconcileOutput
 	err = s.tx.WithinTx(ctx, func(ctx context.Context) error {
+		if err := s.accounts.Lock(ctx, in.AccountID); err != nil && !errors.Is(err, model.ErrNotFound) {
+			return fmt.Errorf("lock account %s: %w", in.AccountID, err)
+		}
 		existing, found, err := s.recordedUnder(ctx, key)
 		if err != nil {
 			return err

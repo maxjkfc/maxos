@@ -81,7 +81,7 @@ M1 不含 MCP 工具（M3）、匯入（M2）、報表（M4）。use case 以測
 | 對帳（幣別，比記錄多） | 帳戶實際比記錄多 80 | `account +80`；`income(未記錄) −80, base −80` |
 | 對帳（非幣別標的） | 數量比記錄多 1.5 | `account +1.5`；`adjustment −1.5` |
 
-- **分攤與代付**：種類仍是支出。我自己的份是 `expense`，替別人付的部分是各對象一筆 `dealing`（為正：他們欠我），帳戶損失兩者的總和。別人替我付時沒有帳戶分錄，只有一筆 `dealing`（為負：我欠他），金額是我自己的份的總和；這時不能再有分攤。全部替別人付、自己沒有份的不是支出，是往來（`RecordDealing`）。同一個對象在一筆支出裡只能出現一次。分攤給對象的金額用支出的標的，沒有 `base_amount`。
+- **分攤與代付**：種類仍是支出。我自己的份是 `expense`，替別人付的部分是各對象一筆 `dealing`（為正：他們欠我），帳戶損失兩者的總和。別人替我付時沒有帳戶分錄，只有一筆 `dealing`（為負：我欠他），金額是我自己的份的總和；這時不能再有分攤。全部替別人付、自己沒有份的不是支出，是往來（`RecordDealing`）。同一個對象在一筆支出裡只能出現一次。分攤給對象的金額用支出的標的，沒有 `base_amount`。分攤與別人代付的標的必須是幣別（與往來相同，`NewExpense` 回 `ErrNotCurrency`）；沒有分攤、也不是別人代付的支出，標的不限。
 - **往來**：標的必須是幣別（`is_currency`），因為往來以雙方結算的幣別計。方向 `paid_out`（往來增加）是帳戶減少、`dealing` 為正；`received`（往來減少）反過來。往來不是支出或收入，不進任何類別。
 - **手續費**：隨收入、轉帳、換匯、往來、回饋而來的費用，各自是一對分錄：`account(手續費的帳戶) −金額` 與 `expense(類別) +金額`，`base_amount` 的規則與支出相同。**一律是自己的一對分錄，不併入主金額的帳戶分錄**，即使兩者是同一個帳戶與標的，所以上表轉帳的 A 有兩筆分錄（−1000 與 −15）；手續費的帳戶與標的可以和主交易不同。手續費排在主交易的分錄之後，依輸入的順序。支出的手續費就是另一個類別行，沒有獨立的欄位。手續費的類別必須是支出方向，且不能是系統類別。
 - **折扣**只是支出分錄上的 `discount` 欄位，上表折扣那一列的 `account −450` 與 `expense +450` 沒有為折扣多出任何分錄。
@@ -124,8 +124,8 @@ M1b 的資料庫變更全在這一個 migration；`0001`–`0004` 已合併，�
 
 - `fin_transaction_kind_check`：`kind` 加入 `reward`、`dealing`、`reconciliation`。
 - `fin_posting`：加 `party_id uuid`、`discount numeric` 兩個欄位與 `(party_id)` 索引；`fin_posting_book_check` 加入 `dealing`、`reward`、`adjustment`；`fin_posting_base_amount_check` 改為只有 `expense`／`income`／`reward` 有 `base_amount`；新增 `fin_posting_party_id_check` 與 `fin_posting_discount_check`（內容見上）。其他 CHECK 不變。平衡檢查的 trigger 不必改：新的 book 照樣依標的加總。
-- **系統類別**：內建兩個頂層類別，名稱都是「未記錄」，一個方向 `expense`、一個方向 `income`，id 固定（`00000000-0000-7000-8000-000000000101`、`00000000-0000-7000-8000-000000000102`），就是 `model.UnrecordedExpenseCategoryID`、`model.UnrecordedIncomeCategoryID` 的值，與 `BaseCurrencyID` 同一個做法，兩邊必須相等（有測試把對帳的分錄存進資料庫，外鍵會擋下不相等的 id）。名稱受 `UNIQUE NULLS NOT DISTINCT (direction, parent_id, name)` 約束：資料庫裡已有同方向、同名的頂層類別時，這個 migration 會失敗並整個還原，要先改名（有測試）。`fin_category_system_not_archived_check` 讓這兩筆不能被封存，use case 也擋（`ErrSystemCategory`）。一般的類別行與手續費不能用系統類別，只有對帳寫入它們。
-- **Down** 還原成 `0004` 的 schema（有測試：與只套用到 `0004` 的資料庫比對 catalog 裡的欄位、約束、索引、trigger 與種子資料），並刪掉兩個系統類別。帳本裡已有 M1b 才有的資料時，Down **中止並報錯，不刪資料**：選「中止」而不是「刪除」，是因為帳本資料不該被 migration 靜默刪掉。算作 M1b 的資料：種類為 `reward`／`dealing`／`reconciliation` 的交易；`dealing`／`reward`／`adjustment` 的分錄；有 `discount` 的分錄；指向系統類別的分錄；以及手續費，也就是不在「支出」交易裡的 `expense` 分錄。要退回，先自行刪除這些交易。
+- **系統類別**：內建兩個頂層類別，名稱都是「未記錄」，一個方向 `expense`、一個方向 `income`，id 固定（`00000000-0000-7000-8000-000000000101`、`00000000-0000-7000-8000-000000000102`），就是 `model.UnrecordedExpenseCategoryID`、`model.UnrecordedIncomeCategoryID` 的值，與 `BaseCurrencyID` 同一個做法，兩邊必須相等（有測試把對帳的分錄存進資料庫，外鍵會擋下不相等的 id）。名稱受 `UNIQUE NULLS NOT DISTINCT (direction, parent_id, name)` 約束：資料庫裡已有任一方向、同名的頂層類別時，這個 migration 在播種之前就以 `cannot apply 0005_fin_dealings: a top-level category is already called 未記錄` 中止並整個還原，HINT 說要先改名（有測試）；沒有這道檢查的話，會是 `fin_category_name_key` 的唯一性錯誤，看不出該怎麼辦。`fin_category_system_not_archived_check` 讓這兩筆不能被封存，use case 也擋（`ErrSystemCategory`）。`fin_category_system_parent_check` 讓它們沒有子類別（`parent_id` 不能是這兩個 id），`NewCategory` 與 `CreateCategory` 也擋（`ErrSystemCategory`）：類別行不能用系統類別，卻可以用它的子類別，一般的支出就會記在「未記錄」底下，繞過下一句的規則（有測試）。一般的類別行與手續費不能用系統類別，只有對帳寫入它們。
+- **Down** 還原成 `0004` 的 schema（有測試：與只套用到 `0004` 的資料庫比對 catalog 裡的欄位、約束、索引、trigger 與種子資料），並刪掉兩個系統類別與它們的兩個 CHECK。帳本裡已有 M1b 才有的資料時，Down **中止並報錯，不刪資料**：選「中止」而不是「刪除」，是因為帳本資料不該被 migration 靜默刪掉。算作 M1b 的資料：種類為 `reward`／`dealing`／`reconciliation` 的交易；`dealing`／`reward`／`adjustment` 的分錄；有 `discount` 的分錄；指向系統類別的分錄；以及手續費，也就是不在「支出」交易裡的 `expense` 分錄。要退回，先自行刪除這些交易。放在系統類別底下的類別也一樣：`fin_category_system_parent_check` 在的時候不會有，被拿掉才會；這時刪除系統類別，外鍵會丟出一個看不出原因的錯誤，所以 Down 先自己檢查，以 `cannot roll back 0005_fin_dealings: a category is a subcategory of 未記錄` 中止，不動資料；先移走或刪掉那些類別（有測試）。
 
 ## 5. Use case（M1a、M1b）
 
@@ -159,22 +159,24 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 
 ### 帳本（M1b，`app/finance`）
 
-- `RecordExpense`：`AccountID`（指標）與 `PaidByPartyID` 兩者擇一，兩者都給回 `ErrTwoPayers`，都沒有回 `ErrNoPayer`。`Shares []Share{PartyID, Amount, Memo}` 是替別人付的部分，用支出的標的；`Lines` 只放自己的份；帳戶損失所有 `Lines` 與 `Shares` 的總和。同一個對象只能有一份（`ErrDuplicateParty`）。`PaidByPartyID` 時不能有 `Shares`（`ErrSharesWithPaidBy`）。沒有自己的行、只有分攤的不是支出（`ErrNoLines`，訊息指向 `RecordDealing`）。`Line.Discount` 記下店家當場折掉的金額，只有支出的行可以有（收入的行給了回 `ErrDiscountNotAllowed`）。
+- `RecordExpense`：`AccountID`（指標）與 `PaidByPartyID` 兩者擇一，兩者都給回 `ErrTwoPayers`，都沒有回 `ErrNoPayer`。`Shares []Share{PartyID, Amount, Memo}` 是替別人付的部分，用支出的標的；`Lines` 只放自己的份；帳戶損失所有 `Lines` 與 `Shares` 的總和。同一個對象只能有一份（`ErrDuplicateParty`）。`PaidByPartyID` 時不能有 `Shares`（`ErrSharesWithPaidBy`）。沒有自己的行、只有分攤的不是支出（`ErrNoLines`，訊息指向 `RecordDealing`）。`Line.Discount` 記下店家當場折掉的金額，只有支出的行可以有（收入的行給了回 `ErrDiscountNotAllowed`）。有 `Shares` 或 `PaidByPartyID` 時，標的必須是幣別（`ErrNotCurrency`），與 `RecordDealing` 相同：分攤與代付都是對象欠我、或我欠對象，往來以幣別計；沒有分攤、也不是別人代付的支出，標的不限（用 BTC 付一杯咖啡仍是支出）。
 - `Fees []Fee{AccountID, InstrumentID, CategoryID, Amount, BaseAmount, Memo}`：`RecordIncome`、`RecordTransfer`、`RecordExchange`、`RecordDealing`、`RecordReward` 的輸入都有；支出的手續費就是另一個類別行。分錄的形狀見第 3 節。類別必須是支出方向（`ErrWrongCategoryDirection`），不能是系統類別；`BaseAmount` 的規則與類別行相同。錯誤訊息會說是第幾筆手續費。
 - `RecordDealing{AccountID, PartyID, InstrumentID, Amount, Direction}`：`Direction` 是 `paid_out` 或 `received`（`ErrInvalidDealingDirection`）；標的必須是幣別（`ErrNotCurrency`）。`RecordReward{AccountID, InstrumentID, Amount, BaseAmount}`。
 - 對象經 catalog 的 `VerifyReferences`（`PartyIDs`）驗證存在且未封存，錯誤是 catalog 的 `*ReferenceError`：分攤的對象、別人替我付時的那個對象、往來的對象都是。
 - `Reconcile{帳戶, 標的, ActualBalance, DifferenceBaseAmount?}` → `ReconcileOutput{RecordedBalance, Difference, Transaction, Duplicate}`：
   - `OccurredOn` 是觀察餘額的那一天（只看日期）。記錄的餘額 = 該帳戶、該標的、`occurred_on` 在該天或之前的已確認分錄加總：當天算入，隔天不算（`TransactionRepo.BalanceAsOf`，有測試）。`Difference` = 實際 − 記錄。
   - 有草稿在該帳戶、該標的上有分錄、日期在該天或之前時拒絕，回 `*PendingDraftsError`（`errors.Is` 為 `ErrPendingDrafts`，帶草稿的張數，一張草稿只算一次；`TransactionRepo.PendingDrafts`）：記錄的餘額要等它們確認或捨棄才知道。這也擋下上一次對帳的草稿還在時又對帳一次，否則差額會記兩次。
+  - **同一個帳戶的對帳一次只做一個。** 資料庫交易的第一個語句鎖住帳戶列（`AccountRepo.Lock`：`SELECT id FROM fin_account WHERE id = $1 FOR NO KEY UPDATE`，交易結束才放），之後才查鍵、數草稿、讀餘額。後來的對帳在鎖上等，等到前一個提交（或回滾）才往下讀，讀到的就是前一個寫的草稿，所以被 `*PendingDraftsError` 擋下。沒有鎖的話，同時進來、鍵各不相同的對帳在 `READ COMMITTED` 下讀到同一個餘額與同一個「沒有草稿」，每一個都記一筆差額（併發測試在沒有鎖時寫出 4 張草稿，確認後餘額是 1920，不是 1980）。這個做法靠交易是 `READ COMMITTED`：鎖之後的每個語句都看得到前一個對帳提交的內容；`REPEATABLE READ` 的快照在第一個語句（也就是鎖）就定了，鎖之後讀到的仍是舊的資料，擋不住重複。用 `FOR NO KEY UPDATE`，不用 `FOR UPDATE`：記到這個帳戶的分錄，外鍵取的是 `FOR KEY SHARE`，與前者不衝突，所以對帳不會擋住別的交易記帳（有測試）。鎖的是帳戶，不分標的：比檢查需要的粗，但同一個帳戶同時對兩個標的對帳不值得做得更細。
+  - **鎖在查冪等鍵之前，不在之後。** 與還在跑的那一次同鍵的重送，先查鍵的話查不到（前一次還沒提交），接著等鎖，等到時前一次的草稿已經在了，重送就被它擋下（`*PendingDraftsError`），而不是拿到那一次的結果。先鎖，重送等到前一次提交之後才查鍵，查到就回傳那一次的草稿（`Duplicate`）（併發測試涵蓋）。帳戶不存在時鎖不算失敗（略過 `ErrNotFound`）：用過的鍵不管它寫的是哪個帳戶都先被回答，帳戶在後面驗證請求時才檢查。
   - 差額為 0：不寫任何交易，`Transaction` 為空。**M1b 不存「差額為 0 的對帳」這種紀錄**；要保留對帳的日期與結果，等需要時再加。
   - 幣別：差額記成「未記錄」類別的支出（比記錄少）或收入（比記錄多）。外幣必須給 `DifferenceBaseAmount`（正數，不論差額的正負）；沒給回 `*DifferenceBaseAmountRequiredError`（`errors.Is` 為 `ErrBaseAmountRequired`），帶著差額與標的代碼，呼叫端算出本位幣金額後帶著再呼叫一次。本位幣可以不給，給了必須等於差額的絕對值。
   - 非幣別標的：用 `adjustment` 只修正數量；給了 `DifferenceBaseAmount` 回 `ErrBaseAmountNotAllowed`。
   - `ActualBalance` 可以是負的（欠款的帳戶），小數位數不超過標的的 `decimals`。結果與其他交易一樣是草稿，確認後帳戶的餘額就是 `ActualBalance`（有測試）。
-  - 冪等與其他 Record* 一樣：鍵已用過時先回傳當初的交易（`Duplicate` 為真），不看帳戶有沒有被封存、有沒有草稿在等（當初那張草稿自己就是在等的草稿）；這時不計算 `RecordedBalance` 與 `Difference`。
+  - 冪等與其他 Record* 一樣：鎖了帳戶之後、其他任何東西之前先查鍵，鍵已用過時回傳當初的交易（`Duplicate` 為真），不看帳戶有沒有被封存、有沒有草稿在等（當初那張草稿自己就是在等的草稿）；這時不計算 `RecordedBalance` 與 `Difference`。
   - **已知的限制**：對帳草稿做出之後、確認之前，才記下並確認的、日期在對帳那天或之前的交易，會讓這張調整過時。M1b 不偵測。
-- `GetDealings(partyID?)`：每個對象每個標的一列，已確認的 `dealing` 分錄加總（`paid_out` 與 `received` 互相抵銷），加總為 0 的列仍列出。`TransactionRepo.Dealings` 依對象 id、標的代碼排序；對象的名稱在 catalog，所以 use case 再依 catalog 列出對象的順序（`ListParties`，含已封存的：他們欠我的仍然算）重排，同一個對象內保持標的代碼的順序。這樣不必新增 catalog 的 port 方法，順序也與 catalog 的名稱順序一致。有 `dealing` 分錄的對象在 catalog 找不到時回 `ErrNotFound`，不猜名稱。
+- `GetDealings(partyID?)`：每個對象每個標的一列，已確認的 `dealing` 分錄加總（`paid_out` 與 `received` 互相抵銷），加總為 0 的列仍列出。`TransactionRepo.Dealings` 依對象 id、標的代碼排序；對象的名稱在 catalog，所以 use case 再依 catalog 列出對象的順序（`ListParties`，含已封存的：他們欠我的仍然算）重排，同一個對象內保持標的代碼的順序。這樣不必新增 catalog 的 port 方法，順序也與 catalog 的名稱順序一致。有 `dealing` 分錄的對象在 catalog 找不到時回 `ErrNotFound`，不猜名稱。給了 `partyID` 時只有一個對象，沒有順序要排：用 catalog 既有的 `GetParty`（含已封存的）確認這個對象，不呼叫 `ListParties`，也不重排，repo 的順序（標的代碼）就是結果的順序。catalog 沒有這個對象就回它的錯誤（前面加上 `party <id>:`），而且不讀 repo：問一個不存在的對象是錯誤，不是「沒有往來」。這個錯誤不是 finance 的 `ErrNotFound`：catalog 的 `ErrNotFound` 在它的 domain，finance 不能 import。
 - `ListTransactions` 的篩選多一個 `PartyID`：有該對象 `dealing` 分錄的交易（含分攤，以及別人替我付的支出）。
-- `ArchiveCategory` 對系統類別回 `ErrSystemCategory`；資料庫的 CHECK 是最後一道。
+- `ArchiveCategory` 對系統類別回 `ErrSystemCategory`；`CreateCategory` 以系統類別為父類別時也回 `ErrSystemCategory`（系統類別沒有子類別）。資料庫的 CHECK（`fin_category_system_not_archived_check`、`fin_category_system_parent_check`）是最後一道。
 
 驗證沿用 M1a：參照存在且未封存（對象經 catalog）、金額為正、小數位數不超過標的的 `decimals`、冪等不變、一律是草稿、全部在同一個資料庫交易內。
 
@@ -185,8 +187,9 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 - postgres adapter：整合測試，含 CHECK 限制、平衡檢查（不平衡的交易在提交時被拒絕）、餘額查詢只計已確認、草稿確認後餘額改變、作廢後餘額還原、捨棄草稿連分錄一起刪、全有或全無、併發重複冪等鍵。冪等與全有或全無的測試在 repo 層（`WithinTx` 加 `TransactionRepo`）：adapter 依 depguard 不能 import use case。
 - `pkg/postgres`：`WithinTx` 的整合測試，含巢狀 savepoint 的各種失敗（內層回傳錯誤、內層 context 在提交前已結束、內層忽略失敗的語句後回傳 nil、panic、多層）：內層的寫入還原，外層交易仍可繼續使用；`WithinSnapshot` 讀到的是開始時已提交的資料。
 - `TransactionRepo.List` 的快照：以 pgx tracer 在列 id 的語句之後、讀列的語句之前，從另一條連線刪除或改狀態，驗證頁面仍是列 id 時看到的那一頁；不用 sleep，所以每次執行都一樣。
-- M1b domain：第 3 節 M1b 表的每一種分錄（逐筆比對分錄），外幣分攤；拒絕的情形（對象重複、兩種付款人、別人付時有分攤、沒有自己的行、非支出的折扣、手續費用收入類別、系統類別、非幣別的往來、對帳的 `DifferenceBaseAmount`）；手續費與主金額一樣大時仍認得出手續費；`Validate` 對新種類與新分錄的各種錯誤。
-- M1b use case：以假的 port 測驗證（對象經 catalog、手續費各自載入）、冪等、對帳的各個分支（差額 0、少、多、非幣別、缺本位幣金額、有草稿在等）與以日期計的餘額、`GetDealings` 的順序。假的 repo 的 `BalanceAsOf`、`PendingDrafts` 依記憶體裡的交易照真實語意計算，所以「對帳草稿確認後餘額等於實際餘額」在 use case 層就能驗證。
-- M1b postgres adapter：新的 CHECK 擋下錯誤的 book 與欄位組合；新的 book 仍受平衡檢查；`Dealings` 只計已確認、抵銷往來增減、加總為 0 仍列出；`BalanceAsOf`（當天算入、隔天不算，草稿、作廢與其他帳戶、標的不算）；`PendingDrafts`（一張草稿只算一次）；`PartyID` 篩選；系統類別的 id 與不可封存。
-- migration：`migrations/` 的整合測試把 `0005` 往下再往上，與只套用到 `0004` 的資料庫比對 catalog；帳本裡有 M1b 的資料時 Down 中止且不動資料；已有同名的頂層類別時 Up 失敗並整個還原。
+- M1b domain：第 3 節 M1b 表的每一種分錄（逐筆比對分錄），外幣分攤；拒絕的情形（對象重複、兩種付款人、別人付時有分攤、沒有自己的行、非支出的折扣、手續費用收入類別、系統類別、系統類別底下的子類別、非幣別的往來、分攤或別人代付用非幣別標的（沒有分攤的非幣別支出仍可以）、對帳的 `DifferenceBaseAmount`）；手續費與主金額一樣大時仍認得出手續費；`Validate` 對新種類與新分錄的各種錯誤。
+- M1b use case：以假的 port 測驗證（對象經 catalog、手續費各自載入）、冪等、對帳的各個分支（差額 0、少、多、非幣別、缺本位幣金額、有草稿在等）與以日期計的餘額、`GetDealings` 的順序，以及給對象時只問 `GetParty`（不存在的對象不讀 repo，已封存的可以）；對帳先鎖帳戶、再查鍵、再數草稿與讀餘額（假的 repo 與假的帳戶共用一份呼叫紀錄，驗證順序），鎖失敗就停，用過的鍵不管帳戶存不存在都先回答。假的 repo 的 `BalanceAsOf`、`PendingDrafts` 依記憶體裡的交易照真實語意計算，所以「對帳草稿確認後餘額等於實際餘額」在 use case 層就能驗證。
+- M1b postgres adapter：新的 CHECK 擋下錯誤的 book 與欄位組合；新的 book 仍受平衡檢查；`Dealings` 只計已確認、抵銷往來增減、加總為 0 仍列出；`BalanceAsOf`（當天算入、隔天不算，草稿、作廢與其他帳戶、標的不算）；`PendingDrafts`（一張草稿只算一次）；`PartyID` 篩選；系統類別的 id、不可封存與沒有子類別；`AccountRepo.Lock`（不存在的 id、鎖住時另一個鎖被擋、外鍵的 `KEY SHARE` 不被擋；用 `NOWAIT`，所以不必等）。
+- migration：`migrations/` 的整合測試把 `0005` 往下再往上，與只套用到 `0004` 的資料庫比對 catalog；帳本裡有 M1b 的資料時 Down 中止且不動資料；有類別放在系統類別底下時（要先拿掉 CHECK 才放得進去）Down 以自己的訊息中止、不動資料，而不是丟出外鍵錯誤；已有同名的頂層類別時 Up 以自己的訊息與 HINT 中止並整個還原，而不是丟出唯一性錯誤。
 - `cmd/` 的整合測試：真的 Fx 模組（`CatalogModule`、`FinanceModule`）加真的 PostgreSQL，把分攤、往來增減、回饋與對帳走過一遍（確認後 `GetDealings` 與餘額，對帳少與多的草稿確認後餘額等於實際餘額）。adapter 不能 import use case，use case 也不能 import adapter，只有 `cmd/` 同時知道兩邊，所以端到端的測試放在這裡。
+- `cmd/` 的併發測試：同一個帳戶的對帳同時進來，鍵各不相同時只寫一張草稿、其餘回 `ErrPendingDrafts`，確認後餘額等於實際餘額；鍵相同的重送回傳第一個的草稿，不被那張草稿擋下。不用 sleep：pgx tracer 把第一個呼叫停在數完草稿之後，其他呼叫在那時才啟動，然後問 PostgreSQL（`pg_stat_activity` 的 `wait_event_type = 'Lock'`）每個呼叫是已經結束、還是在等鎖，都有了答案才放第一個呼叫走，所以每次執行都一樣。沒有鎖時，兩個測試都會失敗；鎖放在查鍵之後時，第二個會失敗。

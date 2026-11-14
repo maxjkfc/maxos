@@ -35,7 +35,8 @@ type Service struct {
 	references   catalogusecase.VerifyReferences
 	defaults     catalogusecase.ResolveProjectDefaults
 	projectAreas catalogusecase.ResolveProjectArea
-	parties      catalogusecase.ListParties
+	listParties  catalogusecase.ListParties
+	getParty     catalogusecase.GetParty
 }
 
 var (

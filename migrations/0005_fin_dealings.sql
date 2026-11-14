@@ -59,8 +59,20 @@ CREATE INDEX fin_posting_party_id_idx ON fin_posting (party_id);
 -- to them.
 --
 -- A top-level category name is unique per direction (fin_category_name_key), so
--- this migration stops, and rolls back, in a database where a top-level
--- category of either direction is already called 未記錄: rename it first.
+-- the seed cannot go in where a top-level category of either direction is
+-- already called 未記錄. The check below stops there, with a message that says
+-- what to do, and the migration rolls back: rename that category first.
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM fin_category WHERE parent_id IS NULL AND name = '未記錄') THEN
+        RAISE EXCEPTION 'cannot apply 0005_fin_dealings: a top-level category is already called 未記錄'
+            USING HINT = 'Rename that category first: this migration adds system categories of that name.';
+    END IF;
+END
+$$;
+-- +goose StatementEnd
+
 INSERT INTO fin_category (id, direction, parent_id, name) VALUES
     ('00000000-0000-7000-8000-000000000101', 'expense', NULL, '未記錄'),
     ('00000000-0000-7000-8000-000000000102', 'income', NULL, '未記錄');
@@ -72,6 +84,14 @@ ALTER TABLE fin_category ADD CONSTRAINT fin_category_system_not_archived_check
         '00000000-0000-7000-8000-000000000101',
         '00000000-0000-7000-8000-000000000102'));
 
+-- A system category has no subcategories. A line may not use a system category
+-- but could use a subcategory of one, which would put what is recorded under
+-- the name of what is not.
+ALTER TABLE fin_category ADD CONSTRAINT fin_category_system_parent_check
+    CHECK (parent_id IS NULL OR parent_id NOT IN (
+        '00000000-0000-7000-8000-000000000101',
+        '00000000-0000-7000-8000-000000000102'));
+
 -- +goose Down
 
 -- Down restores the schema of 0004 and does not delete ledger data: it stops
@@ -79,7 +99,10 @@ ALTER TABLE fin_category ADD CONSTRAINT fin_category_system_not_archived_check
 -- leaves the database as it was. What does: a transaction of the kind reward,
 -- dealing or reconciliation; a posting to the book dealing, reward or adjustment;
 -- a discount; a posting to a system category; and a fee, which is an expense
--- posting inside a transaction that is not an expense. Delete those first.
+-- posting inside a transaction that is not an expense. Delete those first. It
+-- stops too for a category that goes under a system category, which the check
+-- above keeps out unless it was dropped: the foreign key would refuse to delete
+-- the system category, and say less. Move or delete that category first.
 -- +goose StatementBegin
 DO $$
 BEGIN
@@ -94,10 +117,18 @@ BEGIN
         RAISE EXCEPTION 'cannot roll back 0005_fin_dealings: the ledger holds dealings, rewards, reconciliations, discounts or fees'
             USING HINT = 'Delete those transactions first: this migration does not delete ledger data.';
     END IF;
+    IF EXISTS (SELECT 1 FROM fin_category WHERE parent_id IN (
+        '00000000-0000-7000-8000-000000000101',
+        '00000000-0000-7000-8000-000000000102'))
+    THEN
+        RAISE EXCEPTION 'cannot roll back 0005_fin_dealings: a category is a subcategory of 未記錄'
+            USING HINT = 'Move or delete the subcategories first: this migration does not delete categories that are not its own.';
+    END IF;
 END
 $$;
 -- +goose StatementEnd
 
+ALTER TABLE fin_category DROP CONSTRAINT fin_category_system_parent_check;
 ALTER TABLE fin_category DROP CONSTRAINT fin_category_system_not_archived_check;
 DELETE FROM fin_category WHERE id IN (
     '00000000-0000-7000-8000-000000000101',

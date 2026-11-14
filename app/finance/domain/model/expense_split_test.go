@@ -157,10 +157,38 @@ func TestNewExpenseKeepsTheDiscountAsARecordOnly(t *testing.T) {
 	)
 }
 
+// Only what a party owes, or is owed, is counted in a currency. Paying with an
+// instrument that is not one is an expense like any other, while nobody owes
+// anything.
+func TestNewExpenseInAnInstrumentThatIsNotACurrencyIsAllowedWhileNobodyOwesAnything(t *testing.T) {
+	wallet := newCash(t, "錢包")
+	food := topLevel(t, model.DirectionExpense, "飲食")
+	btc := newNonCurrency(t, "BTC", model.InstrumentKindCrypto, 8)
+	twd := newTWD(t)
+	names := map[uuid.UUID]string{wallet.ID: "錢包", food.ID: "飲食", btc.ID: "BTC", twd.ID: "TWD"}
+
+	txn, err := model.NewExpense(model.ExpenseParams{
+		Header:       header(testKey),
+		Account:      &wallet,
+		Instrument:   btc,
+		BaseCurrency: twd,
+		Lines:        []model.CategoryLine{{Category: food, Amount: dec("0.0005"), BaseAmount: decPtr("1500")}},
+	})
+	if err != nil {
+		t.Fatalf("NewExpense: %v, want an expense paid with an instrument that is not a currency", err)
+	}
+
+	wantPostings(t, txn, names,
+		"account(錢包) -0.0005 BTC",
+		"expense(飲食) +0.0005 BTC, base +1500",
+	)
+}
+
 func TestNewExpenseSplitRefuses(t *testing.T) {
 	cash := newCash(t, "現金")
 	food := topLevel(t, model.DirectionExpense, "飲食")
 	twd := newTWD(t)
+	btc := newNonCurrency(t, "BTC", model.InstrumentKindCrypto, 8)
 	a, b, friend := newParty(), newParty(), newParty()
 	valid := func() model.ExpenseParams {
 		return model.ExpenseParams{
@@ -203,6 +231,16 @@ func TestNewExpenseSplitRefuses(t *testing.T) {
 			archived := archivedAccount(cash)
 			p.Account = &archived
 		}, model.ErrArchived},
+		// Both are valid but for the instrument: a dealing is counted in a currency.
+		{"shares in an instrument that is not a currency", func(p *model.ExpenseParams) {
+			p.Instrument, p.BaseCurrency = btc, twd
+			p.Lines[0].BaseAmount = decPtr("9000000")
+		}, model.ErrNotCurrency},
+		{"a party that paid, in an instrument that is not a currency", func(p *model.ExpenseParams) {
+			p.Account, p.PaidBy, p.Shares = nil, &friend, nil
+			p.Instrument, p.BaseCurrency = btc, twd
+			p.Lines[0].BaseAmount = decPtr("9000000")
+		}, model.ErrNotCurrency},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

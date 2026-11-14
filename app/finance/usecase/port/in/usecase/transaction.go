@@ -190,7 +190,9 @@ type RecordExpenseInput struct {
 	// lines come to; the money does not come out of any account. It must be a party
 	// that exists and is not archived. Shares are not allowed with it.
 	PaidByPartyID *uuid.UUID
-	// InstrumentID is what was paid in.
+	// InstrumentID is what was paid in. It must be a currency when a party paid or
+	// there are Shares (ErrNotCurrency): what a party owes is counted in a
+	// currency.
 	InstrumentID uuid.UUID
 	// Lines are my own share of the payment, at least one: a payment made only for
 	// others is not an expense, and is recorded with RecordDealing. When an account

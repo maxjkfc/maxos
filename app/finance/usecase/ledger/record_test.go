@@ -77,7 +77,7 @@ func newEnv(t *testing.T) *env {
 		}
 		e.categories.categories[id] = model.Category{ID: id, Direction: direction, Name: "未記錄"}
 	}
-	e.svc = ledger.New(e.tx, e.txns, e.accounts, e.instruments, e.categories, e.refs, e.projects, e.refs, e.refs)
+	e.svc = ledger.New(e.tx, e.txns, e.accounts, e.instruments, e.categories, e.refs, e.projects, e.refs, e.refs, e.refs)
 	return e
 }
 

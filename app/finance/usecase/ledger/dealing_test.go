@@ -163,6 +163,19 @@ func TestRecordExpenseRefusesWhatMakesNoSenseOfWhoPaidAndForWhom(t *testing.T) {
 		{"a system category in a line", func(e *env, in *usecase.RecordExpenseInput) {
 			in.Lines[0].CategoryID = model.UnrecordedExpenseCategoryID
 		}, model.ErrSystemCategory},
+		// Valid but for the instrument: a dealing is counted in a currency.
+		{"shares in an instrument that is not a currency", func(e *env, in *usecase.RecordExpenseInput) {
+			in.InstrumentID = e.btc.ID
+			in.Lines[0].BaseAmount = decPtr("120")
+			in.Shares = []usecase.Share{{PartyID: e.refs.addParty("A", false), Amount: dec("0.5")}}
+		}, model.ErrNotCurrency},
+		{"a party that paid, in an instrument that is not a currency", func(e *env, in *usecase.RecordExpenseInput) {
+			friend := e.refs.addParty("F", false)
+			in.AccountID = nil
+			in.PaidByPartyID = &friend
+			in.InstrumentID = e.btc.ID
+			in.Lines[0].BaseAmount = decPtr("120")
+		}, model.ErrNotCurrency},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -559,20 +572,59 @@ func TestGetDealingsPutsThePartiesInTheOrderOfTheirNames(t *testing.T) {
 	}
 }
 
-func TestGetDealingsAsksForOnePartyAndSkipsTheCatalogWhenThereIsNothing(t *testing.T) {
+// One party has nothing to put in order, so the catalog is asked about that
+// party alone, and not for the list of all of them.
+func TestGetDealingsOfOnePartyAsksTheCatalogAboutThatPartyAndKeepsTheOrderOfTheRepo(t *testing.T) {
 	e := newEnv(t)
-	party := e.refs.addParty("Amy", false)
+	amy := e.refs.addParty("Amy", true) // archived: what an archived party owes still counts
+	e.txns.dealingRows = []model.Dealing{
+		{PartyID: amy, InstrumentID: e.btc.ID, Quantity: dec("1")},
+		{PartyID: amy, InstrumentID: e.twd.ID, Quantity: dec("100")},
+	}
 
-	out, err := e.svc.GetDealings(context.Background(), usecase.GetDealingsInput{PartyID: &party})
+	out, err := e.svc.GetDealings(context.Background(), usecase.GetDealingsInput{PartyID: &amy})
 	if err != nil {
 		t.Fatalf("GetDealings: %v", err)
 	}
 
-	if e.txns.dealingsFor == nil || *e.txns.dealingsFor != party {
+	if e.txns.dealingsFor == nil || *e.txns.dealingsFor != amy {
 		t.Errorf("the repo was asked for %v, want the party", e.txns.dealingsFor)
 	}
+	if !slices.Equal(e.refs.gotParties, []uuid.UUID{amy}) || e.refs.listPartiesCalls != 0 {
+		t.Errorf("the catalog was asked for the parties %v and %d times for the list, want the party once and no list", e.refs.gotParties, e.refs.listPartiesCalls)
+	}
+	if len(out.Dealings) != 2 || out.Dealings[0].InstrumentID != e.btc.ID || out.Dealings[1].InstrumentID != e.twd.ID {
+		t.Errorf("dealings = %+v, want the two of the party, in the order of the repo", out.Dealings)
+	}
+}
+
+func TestGetDealingsOfOnePartyThatOwesNothingIsEmpty(t *testing.T) {
+	e := newEnv(t)
+	amy := e.refs.addParty("Amy", false)
+
+	out, err := e.svc.GetDealings(context.Background(), usecase.GetDealingsInput{PartyID: &amy})
+	if err != nil {
+		t.Fatalf("GetDealings: %v", err)
+	}
+
 	if len(out.Dealings) != 0 || e.refs.listPartiesCalls != 0 {
-		t.Errorf("dealings = %+v, %d catalog calls, want none of either for a party with nothing", out.Dealings, e.refs.listPartiesCalls)
+		t.Errorf("dealings = %+v, %d list calls, want none of either for a party with nothing", out.Dealings, e.refs.listPartiesCalls)
+	}
+}
+
+// A party the catalog does not know has no dealings to show: asking for it is a
+// mistake, which is not the same as an answer of none.
+func TestGetDealingsOfAPartyTheCatalogDoesNotKnowIsRefusedBeforeTheRepoIsAsked(t *testing.T) {
+	e := newEnv(t)
+	stranger := uuid.Must(uuid.NewV7())
+
+	_, err := e.svc.GetDealings(context.Background(), usecase.GetDealingsInput{PartyID: &stranger})
+
+	if !errors.Is(err, errNoSuchParty) || !strings.Contains(err.Error(), stranger.String()) {
+		t.Fatalf("err = %v, want the error of the catalog, naming the party", err)
+	}
+	if e.txns.dealingsFor != nil {
+		t.Errorf("the repo was asked for %v, want it not to be asked", e.txns.dealingsFor)
 	}
 }
 

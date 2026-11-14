@@ -106,23 +106,45 @@ func (s *Service) GetBalances(ctx context.Context, in usecase.GetBalancesInput) 
 
 // GetDealings returns what the parties owe me. Adding up the confirmed dealing
 // postings is the repo's to do, and it lists them by party id and then
-// instrument code. The names of the parties are the catalog's, so the use case
-// puts the parties in the order the catalog lists them, by name, and keeps the
-// instruments of each in the order of the repo.
+// instrument code. The names of the parties are the catalog's, so for all the
+// parties the use case puts them in the order the catalog lists them, by name,
+// and keeps the instruments of each in the order of the repo.
+//
+// For one party (PartyID) there is nothing to put in order, so the catalog is
+// asked about that party and not for the list of all of them. A party it does
+// not know is an error, whatever the repo holds; an archived party is not one:
+// what it owes still counts.
 func (s *Service) GetDealings(ctx context.Context, in usecase.GetDealingsInput) (usecase.GetDealingsOutput, error) {
+	if in.PartyID != nil {
+		if _, err := s.getParty.GetParty(ctx, *in.PartyID); err != nil {
+			return usecase.GetDealingsOutput{}, fmt.Errorf("party %s: %w", *in.PartyID, err)
+		}
+	}
 	dealings, err := s.transactions.Dealings(ctx, in.PartyID)
 	if err != nil {
 		return usecase.GetDealingsOutput{}, fmt.Errorf("get dealings: %w", err)
 	}
-	out := usecase.GetDealingsOutput{Dealings: make([]usecase.Dealing, len(dealings))}
-	if len(dealings) == 0 {
-		return out, nil
+	if in.PartyID == nil && len(dealings) > 0 {
+		if err := s.sortByPartyName(ctx, dealings); err != nil {
+			return usecase.GetDealingsOutput{}, err
+		}
 	}
 
+	out := usecase.GetDealingsOutput{Dealings: make([]usecase.Dealing, len(dealings))}
+	for i, d := range dealings {
+		out.Dealings[i] = usecase.Dealing{PartyID: d.PartyID, InstrumentID: d.InstrumentID, Quantity: d.Quantity}
+	}
+	return out, nil
+}
+
+// sortByPartyName puts the dealings in the order the catalog lists the parties,
+// by name, and keeps the instruments of each party in the order they are in. It
+// fails for a dealing of a party the list does not have.
+func (s *Service) sortByPartyName(ctx context.Context, dealings []model.Dealing) error {
 	// Archived parties are listed too: what they owe me still counts.
-	listed, err := s.parties.ListParties(ctx, catalogusecase.ListPartiesInput{IncludeArchived: true})
+	listed, err := s.listParties.ListParties(ctx, catalogusecase.ListPartiesInput{IncludeArchived: true})
 	if err != nil {
-		return usecase.GetDealingsOutput{}, fmt.Errorf("list parties: %w", err)
+		return fmt.Errorf("list parties: %w", err)
 	}
 	rank := make(map[uuid.UUID]int, len(listed.Parties))
 	for i, party := range listed.Parties {
@@ -130,13 +152,9 @@ func (s *Service) GetDealings(ctx context.Context, in usecase.GetDealingsInput) 
 	}
 	for _, d := range dealings {
 		if _, known := rank[d.PartyID]; !known {
-			return usecase.GetDealingsOutput{}, fmt.Errorf("party %s: %w", d.PartyID, model.ErrNotFound)
+			return fmt.Errorf("party %s: %w", d.PartyID, model.ErrNotFound)
 		}
 	}
 	slices.SortStableFunc(dealings, func(a, b model.Dealing) int { return cmp.Compare(rank[a.PartyID], rank[b.PartyID]) })
-
-	for i, d := range dealings {
-		out.Dealings[i] = usecase.Dealing{PartyID: d.PartyID, InstrumentID: d.InstrumentID, Quantity: d.Quantity}
-	}
-	return out, nil
+	return nil
 }

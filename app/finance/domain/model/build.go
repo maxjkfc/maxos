@@ -152,7 +152,8 @@ type ExpenseParams struct {
 	// come to: an id of a catalog entry, which the use case checks. Exactly one of
 	// Account and PaidBy is set, and a party that paid has no Shares.
 	PaidBy *uuid.UUID
-	// Instrument is what was paid, and must be in use.
+	// Instrument is what was paid, and must be in use. It must be a currency when
+	// a party paid or there are Shares: what a party owes is counted in a currency.
 	Instrument Instrument
 	// BaseCurrency is the base currency, which the base amounts are checked
 	// against. It is only used for an instrument other than the base currency.
@@ -195,6 +196,9 @@ func NewExpense(p ExpenseParams) (Transaction, error) {
 			return Transaction{}, fmt.Errorf("%w: money spent only for others is a dealing, not an expense", ErrNoLines)
 		}
 		return Transaction{}, ErrNoLines
+	}
+	if (len(p.Shares) > 0 || p.PaidBy != nil) && !p.Instrument.IsCurrency {
+		return Transaction{}, fmt.Errorf("%w: a dealing is counted in a currency, and %s is not one", ErrNotCurrency, p.Instrument.Code)
 	}
 	if p.Account != nil {
 		if err := checkAccount(*p.Account); err != nil {
