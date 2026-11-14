@@ -37,16 +37,20 @@ func decPtr(s string) *decimal.Decimal {
 }
 
 // ledgerEnv is a database holding what transactions point at: two accounts, the
-// base currency and USD, an expense category and an income category. The names
-// are ASCII, so that the order they are listed in does not depend on a collation.
+// base currency, USD and BTC (which is not a currency), expense categories for
+// food and for fees, an income category, and two parties, which are only ids: a
+// posting holds the id of a catalog party and the table has no foreign key to it.
+// The names are ASCII, so that the order they are listed in does not depend on a
+// collation.
 type ledgerEnv struct {
-	t            *testing.T
-	pool         *pgxpool.Pool
-	db           *pkgpostgres.DB
-	txns         *postgres.TransactionRepo
-	cash, bank   model.Account
-	twd, usd     model.Instrument
-	food, salary model.Category
+	t                  *testing.T
+	pool               *pgxpool.Pool
+	db                 *pkgpostgres.DB
+	txns               *postgres.TransactionRepo
+	cash, bank         model.Account
+	twd, usd, btc      model.Instrument
+	food, fees, salary model.Category
+	partyA, partyB     uuid.UUID
 }
 
 func newLedgerEnv(t *testing.T) *ledgerEnv {
@@ -68,6 +72,15 @@ func newLedgerEnv(t *testing.T) *ledgerEnv {
 	if usd, err = instruments.Insert(ctx, usd); err != nil {
 		t.Fatalf("Insert USD: %v", err)
 	}
+	btc, err := model.NewInstrument(model.NewInstrumentParams{
+		ID: uuid.Must(uuid.NewV7()), Code: "BTC", Name: "Bitcoin", Kind: model.InstrumentKindCrypto, Decimals: 8,
+	})
+	if err != nil {
+		t.Fatalf("NewInstrument: %v", err)
+	}
+	if btc, err = instruments.Insert(ctx, btc); err != nil {
+		t.Fatalf("Insert BTC: %v", err)
+	}
 
 	accounts := postgres.NewAccountRepo(pool)
 	categories := postgres.NewCategoryRepo(pool)
@@ -80,14 +93,20 @@ func newLedgerEnv(t *testing.T) *ledgerEnv {
 		bank:   insertAccount(t, accounts, "bank"),
 		twd:    twd,
 		usd:    usd,
+		btc:    btc,
 		food:   insertCategory(t, categories, model.DirectionExpense, nil, "food"),
+		fees:   insertCategory(t, categories, model.DirectionExpense, nil, "fees"),
 		salary: insertCategory(t, categories, model.DirectionIncome, nil, "salary"),
+		partyA: uuid.Must(uuid.NewV7()),
+		partyB: uuid.Must(uuid.NewV7()),
 	}
 }
 
 func (e *ledgerEnv) names() map[uuid.UUID]string {
 	return map[uuid.UUID]string{
-		e.cash.ID: "cash", e.bank.ID: "bank", e.twd.ID: "TWD", e.usd.ID: "USD", e.food.ID: "food", e.salary.ID: "salary",
+		e.cash.ID: "cash", e.bank.ID: "bank", e.twd.ID: "TWD", e.usd.ID: "USD", e.btc.ID: "BTC",
+		e.food.ID: "food", e.fees.ID: "fees", e.salary.ID: "salary", e.partyA: "A", e.partyB: "B",
+		model.UnrecordedExpenseCategoryID: "unrecorded", model.UnrecordedIncomeCategoryID: "unrecorded",
 	}
 }
 
@@ -99,9 +118,9 @@ func (e *ledgerEnv) header(key string, day time.Time) model.Header {
 // with the header.
 func (e *ledgerEnv) expenseOf(h model.Header, amount string) model.Transaction {
 	e.t.Helper()
-	txn, err := model.NewExpense(model.CategorizedParams{
+	txn, err := model.NewExpense(model.ExpenseParams{
 		Header:       h,
-		Account:      e.cash,
+		Account:      &e.cash,
 		Instrument:   e.twd,
 		BaseCurrency: e.twd,
 		Lines:        []model.CategoryLine{{Category: e.food, Amount: dec(amount)}},
@@ -199,9 +218,15 @@ func (e *ledgerEnv) lines(txn model.Transaction) []string {
 		if p.CategoryID != nil {
 			target += "(" + names[*p.CategoryID] + ")"
 		}
+		if p.PartyID != nil {
+			target += "(" + names[*p.PartyID] + ")"
+		}
 		line := fmt.Sprintf("%d %s %s %s", p.Seq, target, p.Quantity, names[p.InstrumentID])
 		if p.BaseAmount != nil {
 			line += fmt.Sprintf(" base %s", *p.BaseAmount)
+		}
+		if p.Discount != nil {
+			line += fmt.Sprintf(" discount %s", *p.Discount)
 		}
 		if p.Memo != "" {
 			line += fmt.Sprintf(" memo %q", p.Memo)
@@ -277,9 +302,9 @@ func TestInsertRoundTripsATransactionWithItsPostingsAndTags(t *testing.T) {
 	h.Merchant = "Shake Shack"
 	h.ProjectID, h.AreaID = &project, &area
 	h.TagIDs = []uuid.UUID{tagB, tagA}
-	txn, err := model.NewExpense(model.CategorizedParams{
+	txn, err := model.NewExpense(model.ExpenseParams{
 		Header:       h,
-		Account:      e.bank,
+		Account:      &e.bank,
 		Instrument:   e.usd,
 		BaseCurrency: e.twd,
 		Lines: []model.CategoryLine{
@@ -712,7 +737,7 @@ func TestThePostingTableChecksWhatEachBookNeeds(t *testing.T) {
 		{"a conversion posting with a category", []model.Posting{with(conversion, func(p *model.Posting) { p.CategoryID = &food })}, checkViolation, "fin_posting_category_id_check"},
 		{"a conversion posting with a base amount", []model.Posting{with(conversion, func(p *model.Posting) { p.BaseAmount = decPtr("1") })}, checkViolation, "fin_posting_base_amount_check"},
 		{"an opening posting with a base amount", []model.Posting{with(opening, func(p *model.Posting) { p.BaseAmount = decPtr("-1") })}, checkViolation, "fin_posting_base_amount_check"},
-		{"a posting made to a book that is not one", []model.Posting{with(conversion, func(p *model.Posting) { p.Book = "dealing" })}, checkViolation, "fin_posting_book_check"},
+		{"a posting made to a book that is not one", []model.Posting{with(conversion, func(p *model.Posting) { p.Book = "payable" })}, checkViolation, "fin_posting_book_check"},
 		{"a posting that moves nothing", []model.Posting{with(conversion, func(p *model.Posting) { p.Quantity = dec("0") })}, checkViolation, "fin_posting_quantity_check"},
 		{"a base amount of the other sign", []model.Posting{with(expense, func(p *model.Posting) { p.BaseAmount = decPtr("-1") })}, checkViolation, "fin_posting_base_amount_sign_check"},
 		{"a base amount of zero", []model.Posting{with(expense, func(p *model.Posting) { p.BaseAmount = decPtr("0") })}, checkViolation, "fin_posting_base_amount_sign_check"},
@@ -813,7 +838,7 @@ func TestListFiltersAndPagesNewestFirst(t *testing.T) {
 
 	h := e.header("list-00000005", day(15))
 	h.TagIDs = []uuid.UUID{tag}
-	income, err := model.NewIncome(model.CategorizedParams{
+	income, err := model.NewIncome(model.IncomeParams{
 		Header: h, Account: e.bank, Instrument: e.twd, BaseCurrency: e.twd,
 		Lines: []model.CategoryLine{{Category: e.salary, Amount: dec("100")}},
 	})

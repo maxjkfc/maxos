@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -83,9 +84,11 @@ func (r *TransactionRepo) Insert(ctx context.Context, txn model.Transaction) (mo
 			Book:          string(p.Book),
 			AccountID:     nullUUID(p.AccountID),
 			CategoryID:    nullUUID(p.CategoryID),
+			PartyID:       nullUUID(p.PartyID),
 			InstrumentID:  p.InstrumentID,
 			Quantity:      p.Quantity,
 			BaseAmount:    nullDecimal(p.BaseAmount),
+			Discount:      nullDecimal(p.Discount),
 			Memo:          p.Memo,
 		})
 		if err != nil {
@@ -219,6 +222,43 @@ func (r *TransactionRepo) Balances(ctx context.Context, accountID *uuid.UUID) ([
 	return balances, nil
 }
 
+// BalanceAsOf adds up the quantities of the postings to the account in the
+// instrument, of the confirmed transactions that happened on or before the day,
+// the day itself included.
+func (r *TransactionRepo) BalanceAsOf(ctx context.Context, accountID, instrumentID uuid.UUID, day time.Time) (decimal.Decimal, error) {
+	return r.q.GetBalanceAsOf(ctx, dbgen.GetBalanceAsOfParams{
+		AccountID:    nullUUID(&accountID),
+		InstrumentID: instrumentID,
+		Day:          day,
+	})
+}
+
+// PendingDrafts counts the drafts that happened on or before the day and have a
+// posting to the account in the instrument.
+func (r *TransactionRepo) PendingDrafts(ctx context.Context, accountID, instrumentID uuid.UUID, day time.Time) (int, error) {
+	n, err := r.q.CountPendingDrafts(ctx, dbgen.CountPendingDraftsParams{
+		AccountID:    nullUUID(&accountID),
+		InstrumentID: instrumentID,
+		Day:          day,
+	})
+	return int(n), err
+}
+
+// Dealings adds up the quantities of the dealing postings, of the confirmed
+// transactions only, for each party and instrument; for one party when partyID
+// is set.
+func (r *TransactionRepo) Dealings(ctx context.Context, partyID *uuid.UUID) ([]model.Dealing, error) {
+	rows, err := r.q.ListDealings(ctx, nullUUID(partyID))
+	if err != nil {
+		return nil, err
+	}
+	dealings := make([]model.Dealing, len(rows))
+	for i, row := range rows {
+		dealings[i] = model.Dealing{PartyID: row.PartyID, InstrumentID: row.InstrumentID, Quantity: row.Quantity}
+	}
+	return dealings, nil
+}
+
 // loadOne returns the transaction a row holds, with its postings and tags.
 func (r *TransactionRepo) loadOne(ctx context.Context, row dbgen.FinTransaction) (model.Transaction, error) {
 	txns, err := r.load(ctx, []dbgen.FinTransaction{row})
@@ -292,6 +332,7 @@ func toPosting(row dbgen.FinPosting) model.Posting {
 		Book:         model.Book(row.Book),
 		AccountID:    optionalUUID(row.AccountID),
 		CategoryID:   optionalUUID(row.CategoryID),
+		PartyID:      optionalUUID(row.PartyID),
 		InstrumentID: row.InstrumentID,
 		Quantity:     row.Quantity,
 		Memo:         row.Memo,
@@ -299,6 +340,10 @@ func toPosting(row dbgen.FinPosting) model.Posting {
 	if row.BaseAmount.Valid {
 		base := row.BaseAmount.Decimal
 		p.BaseAmount = &base
+	}
+	if row.Discount.Valid {
+		discount := row.Discount.Decimal
+		p.Discount = &discount
 	}
 	return p
 }

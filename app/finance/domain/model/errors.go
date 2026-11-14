@@ -3,6 +3,8 @@ package model
 import (
 	"errors"
 	"fmt"
+
+	"github.com/shopspring/decimal"
 )
 
 var (
@@ -68,20 +70,23 @@ var (
 	// ErrDateRequired is returned for a transaction with no date.
 	ErrDateRequired = errors.New("the date of the transaction is required")
 
-	// ErrNoLines is returned for an expense or an income with no category line.
+	// ErrNoLines is returned for an expense or an income with no category line. An
+	// expense that was only paid for others has none either: that is a dealing.
 	ErrNoLines = errors.New("at least one category line is required")
 
 	// ErrAmountNotPositive is returned for an amount that is zero or negative
-	// where the amount of an expense, an income, a transfer or an exchange must be
-	// greater than zero.
+	// where it must be greater than zero: the amount of an expense, an income, a
+	// transfer, an exchange, a dealing, a reward, a share or a fee, and a discount.
 	ErrAmountNotPositive = errors.New("the amount must be greater than zero")
 
-	// ErrAmountZero is returned for an opening balance of nothing.
+	// ErrAmountZero is returned for an opening balance of nothing, and for a
+	// difference of nothing to reconcile.
 	ErrAmountZero = errors.New("the amount must not be zero")
 
-	// ErrBaseAmountRequired is returned for an expense or an income in an
-	// instrument other than the base currency that comes without the amount in the
-	// base currency.
+	// ErrBaseAmountRequired is returned for an expense, an income, a reward or a
+	// fee in an instrument other than the base currency that comes without the
+	// amount in the base currency, and for the difference of a reconciliation of
+	// such a currency (see DifferenceBaseAmountRequiredError).
 	ErrBaseAmountRequired = errors.New("the amount in the base currency is required")
 
 	// ErrBaseAmountNotPositive is returned for an amount in the base currency that
@@ -100,9 +105,11 @@ var (
 	// ErrSameAccount is returned for a transfer from an account to itself.
 	ErrSameAccount = errors.New("a transfer needs two different accounts")
 
-	// ErrNotCurrency is returned for an exchange that has an instrument which is
-	// not a currency. Buying and selling such an instrument is a trade.
-	ErrNotCurrency = errors.New("an exchange is between two currencies")
+	// ErrNotCurrency is returned for an exchange, a dealing, or an expense that has
+	// shares or was paid by a party, whose instrument is not a currency: what a
+	// party owes is counted in a currency. Buying and selling such an instrument is
+	// a trade.
+	ErrNotCurrency = errors.New("the instrument must be a currency")
 
 	// ErrSameInstrument is returned for an exchange between an instrument and
 	// itself. Moving an instrument between accounts is a transfer.
@@ -152,7 +159,79 @@ var (
 	// ErrInvalidPage is returned for a page of a list that has a negative size or
 	// offset.
 	ErrInvalidPage = errors.New("the page size and offset must not be negative")
+
+	// ErrNoPayer is returned for an expense that does not say who paid: neither
+	// the account the money came out of nor the party that paid.
+	ErrNoPayer = errors.New("an expense needs the account it is paid from, or the party that paid it")
+
+	// ErrTwoPayers is returned for an expense that says both the account the money
+	// came out of and the party that paid.
+	ErrTwoPayers = errors.New("an expense is paid from an account or by a party, not both")
+
+	// ErrSharesWithPaidBy is returned for an expense that a party paid and that has
+	// shares: only what I pay from an account can be paid for others.
+	ErrSharesWithPaidBy = errors.New("an expense paid by a party has no shares")
+
+	// ErrDuplicateParty is returned for an expense that has the same party twice.
+	ErrDuplicateParty = errors.New("a party can be in an expense only once")
+
+	// ErrInvalidDealingDirection is returned for a dealing whose direction is
+	// neither paid out nor received.
+	ErrInvalidDealingDirection = errors.New("invalid dealing direction")
+
+	// ErrDiscountNotAllowed is returned for a discount on a line of an income:
+	// only an expense has one.
+	ErrDiscountNotAllowed = errors.New("only an expense can have a discount")
+
+	// ErrSystemCategory is returned for a system category that is used in a line
+	// or a fee, that is to be archived, or that is to be the parent of a new
+	// category: the ledger keeps them for reconciliations.
+	ErrSystemCategory = errors.New("a system category is for reconciliations only, and is never archived or divided into subcategories")
+
+	// ErrBaseAmountNotAllowed is returned for the difference of the reconciliation
+	// of an instrument that is not a currency that comes with an amount in the base
+	// currency: only a currency has one.
+	ErrBaseAmountNotAllowed = errors.New("the amount in the base currency is only for a currency")
+
+	// ErrPendingDrafts is returned, as a *PendingDraftsError, for reconciling an
+	// account that has drafts waiting: what it holds is not known until they are
+	// confirmed or discarded.
+	ErrPendingDrafts = errors.New("drafts are waiting to be confirmed or discarded")
 )
+
+// PendingDraftsError is what reconciling an account returns while drafts that
+// touch it, in the instrument and up to the day, are still drafts. It is an
+// ErrPendingDrafts.
+type PendingDraftsError struct {
+	// Count is how many drafts there are.
+	Count int
+}
+
+func (e *PendingDraftsError) Error() string {
+	return fmt.Sprintf("%d draft(s) are waiting to be confirmed or discarded", e.Count)
+}
+
+func (e *PendingDraftsError) Unwrap() error { return ErrPendingDrafts }
+
+// DifferenceBaseAmountRequiredError is what the reconciliation of an account in a
+// currency other than the base currency returns when it finds a difference and
+// comes without that difference in the base currency. It carries the difference,
+// so that the caller can work out its amount in the base currency and ask again.
+// It is an ErrBaseAmountRequired.
+type DifferenceBaseAmountRequiredError struct {
+	// InstrumentCode is the code of the currency.
+	InstrumentCode string
+	// Difference is what the account holds minus what the ledger says it holds: it
+	// is negative when the account holds less.
+	Difference decimal.Decimal
+}
+
+func (e *DifferenceBaseAmountRequiredError) Error() string {
+	return fmt.Sprintf("%v: the difference is %s %s, and its amount in the base currency is needed to record it",
+		ErrBaseAmountRequired, e.Difference, e.InstrumentCode)
+}
+
+func (e *DifferenceBaseAmountRequiredError) Unwrap() error { return ErrBaseAmountRequired }
 
 // IdempotencyKeyLengthError is returned when the idempotency key of a
 // transaction is shorter than MinKeyRunes or longer than MaxKeyRunes.

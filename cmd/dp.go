@@ -88,8 +88,8 @@ func InboxModule() fx.Option {
 }
 
 // CatalogModule wires the catalog context: its Postgres repos and its use cases.
-// The finance ledger calls VerifyReferences, ResolveProjectDefaults and
-// ResolveProjectArea; the MCP tools will use the rest.
+// The finance ledger calls VerifyReferences, ResolveProjectDefaults,
+// ResolveProjectArea and ListParties; the MCP tools will use the rest.
 func CatalogModule() fx.Option {
 	return fx.Module("catalog",
 		fx.Provide(

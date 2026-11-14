@@ -13,6 +13,30 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+const countPendingDrafts = `-- name: CountPendingDrafts :one
+SELECT count(DISTINCT t.id)
+FROM fin_posting p
+JOIN fin_transaction t ON t.id = p.transaction_id
+WHERE t.status = 'draft' AND p.book = 'account'
+  AND p.account_id = $1 AND p.instrument_id = $2
+  AND t.occurred_on <= $3
+`
+
+type CountPendingDraftsParams struct {
+	AccountID    uuid.NullUUID
+	InstrumentID uuid.UUID
+	Day          time.Time
+}
+
+// How many drafts happened on or before the day and have a posting to the account
+// in the instrument. A draft counts once, however many such postings it has.
+func (q *Queries) CountPendingDrafts(ctx context.Context, arg CountPendingDraftsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countPendingDrafts, arg.AccountID, arg.InstrumentID, arg.Day)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteTransaction = `-- name: DeleteTransaction :execrows
 DELETE FROM fin_transaction WHERE id = $1
 `
@@ -24,6 +48,31 @@ func (q *Queries) DeleteTransaction(ctx context.Context, id uuid.UUID) (int64, e
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const getBalanceAsOf = `-- name: GetBalanceAsOf :one
+SELECT COALESCE(sum(p.quantity), 0)::numeric AS quantity
+FROM fin_posting p
+JOIN fin_transaction t ON t.id = p.transaction_id
+WHERE t.status = 'confirmed' AND p.book = 'account'
+  AND p.account_id = $1 AND p.instrument_id = $2
+  AND t.occurred_on <= $3
+`
+
+type GetBalanceAsOfParams struct {
+	AccountID    uuid.NullUUID
+	InstrumentID uuid.UUID
+	Day          time.Time
+}
+
+// What an account holds of an instrument on a day: the quantities of its account
+// postings in the confirmed transactions that happened on or before the day (the
+// day itself is in), added up. Zero when there are none.
+func (q *Queries) GetBalanceAsOf(ctx context.Context, arg GetBalanceAsOfParams) (decimal.Decimal, error) {
+	row := q.db.QueryRow(ctx, getBalanceAsOf, arg.AccountID, arg.InstrumentID, arg.Day)
+	var quantity decimal.Decimal
+	err := row.Scan(&quantity)
+	return quantity, err
 }
 
 const getTransaction = `-- name: GetTransaction :one
@@ -143,8 +192,8 @@ func (q *Queries) GetTransactionsByIDs(ctx context.Context, ids []uuid.UUID) ([]
 }
 
 const insertPosting = `-- name: InsertPosting :exec
-INSERT INTO fin_posting (id, transaction_id, seq, book, account_id, category_id, instrument_id, quantity, base_amount, memo)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+INSERT INTO fin_posting (id, transaction_id, seq, book, account_id, category_id, party_id, instrument_id, quantity, base_amount, discount, memo)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 `
 
 type InsertPostingParams struct {
@@ -154,9 +203,11 @@ type InsertPostingParams struct {
 	Book          string
 	AccountID     uuid.NullUUID
 	CategoryID    uuid.NullUUID
+	PartyID       uuid.NullUUID
 	InstrumentID  uuid.UUID
 	Quantity      decimal.Decimal
 	BaseAmount    decimal.NullDecimal
+	Discount      decimal.NullDecimal
 	Memo          string
 }
 
@@ -168,9 +219,11 @@ func (q *Queries) InsertPosting(ctx context.Context, arg InsertPostingParams) er
 		arg.Book,
 		arg.AccountID,
 		arg.CategoryID,
+		arg.PartyID,
 		arg.InstrumentID,
 		arg.Quantity,
 		arg.BaseAmount,
+		arg.Discount,
 		arg.Memo,
 	)
 	return err
@@ -295,8 +348,50 @@ func (q *Queries) ListBalances(ctx context.Context, accountID uuid.NullUUID) ([]
 	return items, nil
 }
 
+const listDealings = `-- name: ListDealings :many
+SELECT p.party_id::uuid AS party_id, i.id AS instrument_id, sum(p.quantity)::numeric AS quantity
+FROM fin_posting p
+JOIN fin_transaction t ON t.id = p.transaction_id
+JOIN fin_instrument i ON i.id = p.instrument_id
+WHERE t.status = 'confirmed' AND p.book = 'dealing'
+  AND ($1::uuid IS NULL OR p.party_id = $1)
+GROUP BY p.party_id, i.id, i.code
+ORDER BY p.party_id, i.code, i.id
+`
+
+type ListDealingsRow struct {
+	PartyID      uuid.UUID
+	InstrumentID uuid.UUID
+	Quantity     decimal.Decimal
+}
+
+// What each party owes me of each instrument: the quantities of the dealing
+// postings made to it, added up, counting only the confirmed transactions.
+// Nothing is stored. With a party_id it is that party's only. party_id is a plain
+// uuid column, so no row of another table says which parties exist: the use case
+// orders them by name, and this by id and then instrument code.
+func (q *Queries) ListDealings(ctx context.Context, partyID uuid.NullUUID) ([]ListDealingsRow, error) {
+	rows, err := q.db.Query(ctx, listDealings, partyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListDealingsRow
+	for rows.Next() {
+		var i ListDealingsRow
+		if err := rows.Scan(&i.PartyID, &i.InstrumentID, &i.Quantity); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPostings = `-- name: ListPostings :many
-SELECT id, transaction_id, seq, book, account_id, category_id, instrument_id, quantity, base_amount, memo FROM fin_posting
+SELECT id, transaction_id, seq, book, account_id, category_id, instrument_id, quantity, base_amount, memo, party_id, discount FROM fin_posting
 WHERE transaction_id = ANY($1::uuid[])
 ORDER BY transaction_id, seq
 `
@@ -321,6 +416,8 @@ func (q *Queries) ListPostings(ctx context.Context, transactionIds []uuid.UUID) 
 			&i.Quantity,
 			&i.BaseAmount,
 			&i.Memo,
+			&i.PartyID,
+			&i.Discount,
 		); err != nil {
 			return nil, err
 		}

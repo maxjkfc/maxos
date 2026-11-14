@@ -1,6 +1,7 @@
-// Package ledger implements the ledger use cases: recording expenses, incomes,
-// transfers, exchanges and opening balances as drafts; confirming, discarding
-// and voiding them; and reading transactions and balances.
+// Package ledger implements the ledger use cases: recording expenses (with the
+// parts paid for others), incomes, transfers, exchanges, dealings, rewards and
+// opening balances as drafts, and reconciling accounts; confirming, discarding
+// and voiding the drafts; and reading transactions, balances and dealings.
 package ledger
 
 import (
@@ -19,8 +20,9 @@ import (
 )
 
 // Service implements usecase.RecordExpense, RecordIncome, RecordTransfer,
-// RecordExchange, SetOpeningBalance, ConfirmTransactions, DiscardDraft,
-// VoidTransaction, GetTransaction, ListTransactions and GetBalances.
+// RecordExchange, RecordDealing, RecordReward, SetOpeningBalance, Reconcile,
+// ConfirmTransactions, DiscardDraft, VoidTransaction, GetTransaction,
+// ListTransactions, GetBalances and GetDealings.
 //
 // Every use case that writes does all of it, the reads that check the request
 // included, in one database transaction.
@@ -33,6 +35,7 @@ type Service struct {
 	references   catalogusecase.VerifyReferences
 	defaults     catalogusecase.ResolveProjectDefaults
 	projectAreas catalogusecase.ResolveProjectArea
+	listParties  catalogusecase.ListParties
 }
 
 var (
@@ -40,13 +43,17 @@ var (
 	_ usecase.RecordIncome        = (*Service)(nil)
 	_ usecase.RecordTransfer      = (*Service)(nil)
 	_ usecase.RecordExchange      = (*Service)(nil)
+	_ usecase.RecordDealing       = (*Service)(nil)
+	_ usecase.RecordReward        = (*Service)(nil)
 	_ usecase.SetOpeningBalance   = (*Service)(nil)
+	_ usecase.Reconcile           = (*Service)(nil)
 	_ usecase.ConfirmTransactions = (*Service)(nil)
 	_ usecase.DiscardDraft        = (*Service)(nil)
 	_ usecase.VoidTransaction     = (*Service)(nil)
 	_ usecase.GetTransaction      = (*Service)(nil)
 	_ usecase.ListTransactions    = (*Service)(nil)
 	_ usecase.GetBalances         = (*Service)(nil)
+	_ usecase.GetDealings         = (*Service)(nil)
 )
 
 // record is what the use cases that record a transaction have in common. build
@@ -64,24 +71,20 @@ func (s *Service) record(
 	d usecase.RecordDetails,
 	build func(ctx context.Context, h model.Header) (model.Transaction, error),
 ) (usecase.RecordOutput, error) {
-	key, err := model.NormalizeIdempotencyKey(d.IdempotencyKey)
+	key, id, err := identify(d)
 	if err != nil {
 		return usecase.RecordOutput{}, err
-	}
-	id, err := uuid.NewV7()
-	if err != nil {
-		return usecase.RecordOutput{}, fmt.Errorf("generate transaction id: %w", err)
 	}
 
 	var out usecase.RecordOutput
 	err = s.tx.WithinTx(ctx, func(ctx context.Context) error {
-		existing, err := s.transactions.GetByIdempotencyKey(ctx, key)
-		switch {
-		case err == nil:
+		existing, found, err := s.recordedUnder(ctx, key)
+		if err != nil {
+			return err
+		}
+		if found {
 			out = usecase.RecordOutput{Transaction: toTransaction(existing), Duplicate: true}
 			return nil
-		case !errors.Is(err, model.ErrNotFound):
-			return fmt.Errorf("look up idempotency key: %w", err)
 		}
 
 		h, err := s.header(ctx, id, key, d)
@@ -92,28 +95,59 @@ func (s *Service) record(
 		if err != nil {
 			return err
 		}
-
-		stored, err := s.transactions.Insert(ctx, txn)
-		if errors.Is(err, repo.ErrDuplicateKey) {
-			// Another call recorded the key after the look-up above; its commit is
-			// what the insert waited for.
-			existing, err := s.transactions.GetByIdempotencyKey(ctx, key)
-			if err != nil {
-				return fmt.Errorf("get the transaction recorded under the idempotency key: %w", err)
-			}
-			out = usecase.RecordOutput{Transaction: toTransaction(existing), Duplicate: true}
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("store transaction: %w", err)
-		}
-		out = usecase.RecordOutput{Transaction: toTransaction(stored)}
-		return nil
+		out, err = s.store(ctx, key, txn)
+		return err
 	})
 	if err != nil {
 		return usecase.RecordOutput{}, err
 	}
 	return out, nil
+}
+
+// identify checks the idempotency key of a request, returning it as the
+// transaction keeps it, and makes the id of the transaction the request records.
+func identify(d usecase.RecordDetails) (key string, id uuid.UUID, err error) {
+	key, err = model.NormalizeIdempotencyKey(d.IdempotencyKey)
+	if err != nil {
+		return "", uuid.Nil, err
+	}
+	id, err = uuid.NewV7()
+	if err != nil {
+		return "", uuid.Nil, fmt.Errorf("generate transaction id: %w", err)
+	}
+	return key, id, nil
+}
+
+// recordedUnder returns the transaction recorded under the key, and whether there
+// is one.
+func (s *Service) recordedUnder(ctx context.Context, key string) (model.Transaction, bool, error) {
+	existing, err := s.transactions.GetByIdempotencyKey(ctx, key)
+	switch {
+	case err == nil:
+		return existing, true, nil
+	case errors.Is(err, model.ErrNotFound):
+		return model.Transaction{}, false, nil
+	default:
+		return model.Transaction{}, false, fmt.Errorf("look up idempotency key: %w", err)
+	}
+}
+
+// store inserts the draft. When another call recorded its key after the look-up
+// of recordedUnder, whose commit is what the insert waited for, it returns what
+// that call recorded, as a duplicate.
+func (s *Service) store(ctx context.Context, key string, txn model.Transaction) (usecase.RecordOutput, error) {
+	stored, err := s.transactions.Insert(ctx, txn)
+	if errors.Is(err, repo.ErrDuplicateKey) {
+		existing, err := s.transactions.GetByIdempotencyKey(ctx, key)
+		if err != nil {
+			return usecase.RecordOutput{}, fmt.Errorf("get the transaction recorded under the idempotency key: %w", err)
+		}
+		return usecase.RecordOutput{Transaction: toTransaction(existing), Duplicate: true}, nil
+	}
+	if err != nil {
+		return usecase.RecordOutput{}, fmt.Errorf("store transaction: %w", err)
+	}
+	return usecase.RecordOutput{Transaction: toTransaction(stored)}, nil
 }
 
 // header makes the header of a new transaction from what the caller gave. It
@@ -235,4 +269,95 @@ func (s *Service) category(ctx context.Context, id uuid.UUID) (model.Category, e
 		return model.Category{}, fmt.Errorf("category %s: %w", id, err)
 	}
 	return category, nil
+}
+
+// verifyParties checks with the catalog that the parties can be used: that they
+// exist and are not archived. It does nothing for no party.
+func (s *Service) verifyParties(ctx context.Context, ids ...uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if err := s.references.VerifyReferences(ctx, catalogusecase.VerifyReferencesInput{PartyIDs: ids}); err != nil {
+		return fmt.Errorf("check the parties: %w", err)
+	}
+	return nil
+}
+
+// requireParty checks with the catalog that the party exists. It is the one check
+// of a party that lets an archived one through: what an archived party owes still
+// counts. A party the catalog does not know is model.ErrNotFound, as it is when a
+// dealing names a party that the catalog does not list; the catalog's own
+// *ReferenceError is not what the callers of the ledger can be expected to match.
+// Any other failure of the catalog is returned as it is, with what was being done.
+func (s *Service) requireParty(ctx context.Context, id uuid.UUID) error {
+	err := s.references.VerifyReferences(ctx, catalogusecase.VerifyReferencesInput{PartyIDs: []uuid.UUID{id}})
+	var refErr *catalogusecase.ReferenceError
+	if !errors.As(err, &refErr) {
+		if err != nil {
+			return fmt.Errorf("check party %s: %w", id, err)
+		}
+		return nil
+	}
+	for _, problem := range refErr.Problems {
+		if !problem.Archived {
+			return fmt.Errorf("party %s: %w", id, model.ErrNotFound)
+		}
+	}
+	return nil
+}
+
+// lines loads the categories the lines of an expense or an income name, each
+// once, and returns the lines as the domain takes them. A category that does not
+// exist is an error that names the line; whether it can be used is for the model.
+func (s *Service) lines(ctx context.Context, lines []usecase.CategoryLine) ([]model.CategoryLine, error) {
+	categories := make(map[uuid.UUID]model.Category, len(lines))
+	out := make([]model.CategoryLine, len(lines))
+	for i, line := range lines {
+		category, loaded := categories[line.CategoryID]
+		if !loaded {
+			var err error
+			if category, err = s.category(ctx, line.CategoryID); err != nil {
+				return nil, fmt.Errorf("line %d: %w", i+1, err)
+			}
+			categories[line.CategoryID] = category
+		}
+		out[i] = model.CategoryLine{
+			Category:   category,
+			Amount:     line.Amount,
+			BaseAmount: line.BaseAmount,
+			Discount:   line.Discount,
+			Memo:       line.Memo,
+		}
+	}
+	return out, nil
+}
+
+// fees loads the account, the instrument and the category each fee names, and
+// returns the fees as the domain takes them. Whether they can be used is for the
+// model; one that does not exist is an error that names the fee.
+func (s *Service) fees(ctx context.Context, fees []usecase.Fee) ([]model.Fee, error) {
+	out := make([]model.Fee, len(fees))
+	for i, fee := range fees {
+		account, err := s.account(ctx, fee.AccountID)
+		if err != nil {
+			return nil, fmt.Errorf("fee %d: %w", i+1, err)
+		}
+		instrument, err := s.instrument(ctx, fee.InstrumentID)
+		if err != nil {
+			return nil, fmt.Errorf("fee %d: %w", i+1, err)
+		}
+		category, err := s.category(ctx, fee.CategoryID)
+		if err != nil {
+			return nil, fmt.Errorf("fee %d: %w", i+1, err)
+		}
+		out[i] = model.Fee{
+			Account:    account,
+			Instrument: instrument,
+			Category:   category,
+			Amount:     fee.Amount,
+			BaseAmount: fee.BaseAmount,
+			Memo:       fee.Memo,
+		}
+	}
+	return out, nil
 }

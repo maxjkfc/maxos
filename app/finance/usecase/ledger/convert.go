@@ -34,9 +34,11 @@ func toTransaction(t model.Transaction) usecase.Transaction {
 			Book:         string(p.Book),
 			AccountID:    clone(p.AccountID),
 			CategoryID:   clone(p.CategoryID),
+			PartyID:      clone(p.PartyID),
 			InstrumentID: p.InstrumentID,
 			Quantity:     p.Quantity,
 			BaseAmount:   clone(p.BaseAmount),
+			Discount:     clone(p.Discount),
 			Memo:         p.Memo,
 		}
 	}

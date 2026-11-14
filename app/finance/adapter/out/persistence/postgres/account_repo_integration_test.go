@@ -6,10 +6,12 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/maxjkfc/maxos/app/finance/adapter/out/persistence/postgres"
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/internal/testpg"
+	pkgpostgres "github.com/maxjkfc/maxos/pkg/postgres"
 )
 
 // newAccount returns a cash account, with no institution, ready to be stored.
@@ -133,6 +135,53 @@ func TestAccountMethodsReportAnUnknownID(t *testing.T) {
 	}
 	if _, err := r.Archive(ctx, unknown); !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("Archive: err = %v, want ErrNotFound", err)
+	}
+	if err := r.Lock(ctx, unknown); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("Lock: err = %v, want ErrNotFound", err)
+	}
+}
+
+// The SQLSTATE of a statement that would have waited for a lock and was told not
+// to.
+const lockNotAvailable = "55P03"
+
+// The lock lasts until the database transaction ends and keeps out another lock,
+// but not the one a foreign key takes when a posting refers to the account: that
+// posting must not wait for a reconciliation. NOWAIT turns what would be a wait
+// into an error, so the test waits for nothing.
+func TestAccountLockKeepsOutAnotherLockUntilTheTransactionEndsAndLetsPostingsRefer(t *testing.T) {
+	ctx := context.Background()
+	pool := testpg.New(t)
+	r := postgres.NewAccountRepo(pool)
+	a := insertAccount(t, r, "錢包")
+	// The other transaction, on a connection of its own.
+	other := func(lock string) error {
+		_, err := pool.Exec(ctx, `SELECT id FROM fin_account WHERE id = $1 FOR `+lock+` NOWAIT`, a.ID)
+		return err
+	}
+	notAvailable := func(err error) bool {
+		var pgErr *pgconn.PgError
+		return errors.As(err, &pgErr) && pgErr.Code == lockNotAvailable
+	}
+
+	err := pkgpostgres.NewDB(pool).WithinTx(ctx, func(ctx context.Context) error {
+		if err := r.Lock(ctx, a.ID); err != nil {
+			return err
+		}
+		if err := other("NO KEY UPDATE"); !notAvailable(err) {
+			t.Errorf("a second lock while the first is held: err = %v, want it refused", err)
+		}
+		if err := other("KEY SHARE"); err != nil {
+			t.Errorf("the lock of a foreign key while the account is locked: err = %v, want it let through", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Lock in a transaction: %v", err)
+	}
+
+	if err := other("NO KEY UPDATE"); err != nil {
+		t.Errorf("a lock once the transaction is over: err = %v, want the account free", err)
 	}
 }
 

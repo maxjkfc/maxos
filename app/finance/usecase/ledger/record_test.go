@@ -30,7 +30,9 @@ func decPtr(s string) *decimal.Decimal {
 }
 
 // env is a ledger on fakes, with what the transactions it records refer to: two
-// accounts, three instruments, two expense categories and an income category.
+// accounts, three instruments, three expense categories, an income category and
+// the two system categories that migration 0005 seeds. Parties are added to the
+// catalog by the tests that need them (refs.addParty).
 type env struct {
 	t           *testing.T
 	tx          *fakeTx
@@ -42,9 +44,9 @@ type env struct {
 	projects    *fakeProjects
 	svc         *ledger.Service
 
-	cash, bank              model.Account
-	twd, usd, btc           model.Instrument
-	food, household, salary model.Category
+	cash, bank                    model.Account
+	twd, usd, btc                 model.Instrument
+	food, household, fees, salary model.Category
 }
 
 func newEnv(t *testing.T) *env {
@@ -66,16 +68,30 @@ func newEnv(t *testing.T) *env {
 	e.btc = e.instruments.add(model.Instrument{ID: uuid.Must(uuid.NewV7()), Code: "BTC", Name: "BTC", Kind: model.InstrumentKindCrypto, Decimals: 8})
 	e.food = e.categories.add(model.DirectionExpense, "food")
 	e.household = e.categories.add(model.DirectionExpense, "household")
+	e.fees = e.categories.add(model.DirectionExpense, "fees")
 	e.salary = e.categories.add(model.DirectionIncome, "salary")
-	e.svc = ledger.New(e.tx, e.txns, e.accounts, e.instruments, e.categories, e.refs, e.projects, e.refs)
+	for _, id := range []uuid.UUID{model.UnrecordedExpenseCategoryID, model.UnrecordedIncomeCategoryID} {
+		direction := model.DirectionExpense
+		if id == model.UnrecordedIncomeCategoryID {
+			direction = model.DirectionIncome
+		}
+		e.categories.categories[id] = model.Category{ID: id, Direction: direction, Name: "未記錄"}
+	}
+	e.svc = ledger.New(e.tx, e.txns, e.accounts, e.instruments, e.categories, e.refs, e.projects, e.refs, e.refs)
 	return e
 }
 
+// names says what to call each id the tests write postings with.
 func (e *env) names() map[uuid.UUID]string {
-	return map[uuid.UUID]string{
+	names := map[uuid.UUID]string{
 		e.cash.ID: "cash", e.bank.ID: "bank", e.twd.ID: "TWD", e.usd.ID: "USD", e.btc.ID: "BTC",
-		e.food.ID: "food", e.household.ID: "household", e.salary.ID: "salary",
+		e.food.ID: "food", e.household.ID: "household", e.fees.ID: "fees", e.salary.ID: "salary",
+		model.UnrecordedExpenseCategoryID: "未記錄", model.UnrecordedIncomeCategoryID: "未記錄",
 	}
+	for id, name := range e.refs.partyNames {
+		names[id] = name
+	}
+	return names
 }
 
 func signed(d decimal.Decimal) string {
@@ -96,10 +112,15 @@ func (e *env) lines(txn usecase.Transaction) []string {
 			target += "(" + names[*p.AccountID] + ")"
 		case p.CategoryID != nil:
 			target += "(" + names[*p.CategoryID] + ")"
+		case p.PartyID != nil:
+			target += "(" + names[*p.PartyID] + ")"
 		}
 		line := fmt.Sprintf("%s %s %s", target, signed(p.Quantity), names[p.InstrumentID])
 		if p.BaseAmount != nil {
 			line += ", base " + signed(*p.BaseAmount)
+		}
+		if p.Discount != nil {
+			line += ", discount " + p.Discount.String()
 		}
 		out = append(out, line)
 	}
@@ -121,7 +142,7 @@ func (e *env) details(key string) usecase.RecordDetails {
 func (e *env) lunch(key string) usecase.RecordExpenseInput {
 	return usecase.RecordExpenseInput{
 		RecordDetails: e.details(key),
-		AccountID:     e.cash.ID,
+		AccountID:     &e.cash.ID,
 		InstrumentID:  e.twd.ID,
 		Lines:         []usecase.CategoryLine{{CategoryID: e.food.ID, Amount: dec("120")}},
 	}
@@ -252,7 +273,7 @@ func TestEveryKindIsRecordedThroughItsConstructorInTheDomain(t *testing.T) {
 func TestRecordExpenseInAForeignCurrencyKeepsTheBaseAmountGiven(t *testing.T) {
 	e := newEnv(t)
 	in := e.lunch("usd-lunch-00001")
-	in.AccountID = e.bank.ID
+	in.AccountID = &e.bank.ID
 	in.InstrumentID = e.usd.ID
 	in.Lines = []usecase.CategoryLine{{CategoryID: e.food.ID, Amount: dec("100"), BaseAmount: decPtr("3200")}}
 
@@ -305,7 +326,7 @@ func TestRecordRefusesWhatTheRequestGetsWrongAndStoresNothing(t *testing.T) {
 		mutate func(e *env, in *usecase.RecordExpenseInput)
 		want   error
 	}{
-		{"an account that does not exist", func(e *env, in *usecase.RecordExpenseInput) { in.AccountID = unknown }, model.ErrNotFound},
+		{"an account that does not exist", func(e *env, in *usecase.RecordExpenseInput) { in.AccountID = &unknown }, model.ErrNotFound},
 		{"an instrument that does not exist", func(e *env, in *usecase.RecordExpenseInput) { in.InstrumentID = unknown }, model.ErrNotFound},
 		{"a category that does not exist", func(e *env, in *usecase.RecordExpenseInput) { in.Lines[0].CategoryID = unknown }, model.ErrNotFound},
 		{"an archived account", func(e *env, in *usecase.RecordExpenseInput) { e.accounts.archive(e.cash.ID) }, model.ErrArchived},
@@ -341,7 +362,7 @@ func TestRecordNamesWhatItCouldNotFind(t *testing.T) {
 	unknownAccount, unknownCategory := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 
 	in := e.lunch("names-000000001")
-	in.AccountID = unknownAccount
+	in.AccountID = &unknownAccount
 	_, err := e.svc.RecordExpense(context.Background(), in)
 	if err == nil || !strings.Contains(err.Error(), "account "+unknownAccount.String()) {
 		t.Errorf("err = %v, want it to name the account", err)

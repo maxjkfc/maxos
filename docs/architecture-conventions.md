@@ -127,6 +127,7 @@ adapter  →  usecase  →  domain
 | `usecase` | 單元測試，port 用假實作 |
 | `adapter/out/persistence` | `*_integration_test.go`，用真的 PostgreSQL |
 | `adapter/in` | 透過真的協定客戶端呼叫（MCP 用記憶體內 transport） |
+| `cmd` | `cmd/*_integration_test.go`，用 `cmd/` 的 Fx 模組（`CatalogModule`、`FinanceModule`…）加真的 PostgreSQL，驗證跨 context、使用者看得到的行為，不是測接線；adapter 與 use case 互相不能 import，只有 `cmd/` 同時知道兩邊，所以這類測試放在這裡 |
 
 - 整合測試用 `internal/testpg`：每個測試程式建一次套完 migration 的 template database，每個測試從它複製出獨立的空資料庫。
 - 測試要能抓到使用者看得到的錯誤；不測接線、不測產生碼、不測預設值。

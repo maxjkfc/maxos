@@ -60,6 +60,8 @@ type FinPosting struct {
 	Quantity      decimal.Decimal
 	BaseAmount    decimal.NullDecimal
 	Memo          string
+	PartyID       uuid.NullUUID
+	Discount      decimal.NullDecimal
 }
 
 type FinTransaction struct {

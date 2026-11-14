@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 )
@@ -24,6 +25,9 @@ type TransactionFilter struct {
 	From, To *time.Time
 	// AccountID limits the list to the transactions with a posting to that account.
 	AccountID *uuid.UUID
+	// PartyID limits the list to the transactions with a dealing posting to that
+	// party.
+	PartyID *uuid.UUID
 	// ProjectID and AreaID limit the list to the transactions of that project and
 	// of that area.
 	ProjectID *uuid.UUID
@@ -86,4 +90,20 @@ type TransactionRepo interface {
 	// postings of the confirmed transactions only, by account name and then
 	// instrument code. A nil accountID returns every account's balances.
 	Balances(ctx context.Context, accountID *uuid.UUID) ([]model.Balance, error)
+	// BalanceAsOf returns what the account holds of the instrument on the day: the
+	// quantities of its account postings in the confirmed transactions that
+	// happened on or before the day, both the day itself and all before it, added
+	// up. It is zero when there are none. day is a date as model.DateOf makes it.
+	BalanceAsOf(ctx context.Context, accountID, instrumentID uuid.UUID, day time.Time) (decimal.Decimal, error)
+	// PendingDrafts returns how many drafts happened on or before the day and have
+	// a posting to the account in the instrument: transactions that would change
+	// BalanceAsOf once confirmed. day is a date as model.DateOf makes it.
+	PendingDrafts(ctx context.Context, accountID, instrumentID uuid.UUID, day time.Time) (int, error)
+	// Dealings returns what each party owes me of each instrument, from the
+	// confirmed transactions only: the quantities of the dealing postings made to
+	// the party, added up. A nil partyID returns every party's. It lists a party
+	// and instrument whose postings add up to zero, and it is ordered by party id
+	// and then instrument code: the names of the parties are the catalog's, so
+	// ordering by them is for the use case.
+	Dealings(ctx context.Context, partyID *uuid.UUID) ([]model.Dealing, error)
 }

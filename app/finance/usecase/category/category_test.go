@@ -167,6 +167,8 @@ func TestCreateCategoryRejectsInvalidInputWithoutStoring(t *testing.T) {
 	sub := r.seed(t, model.DirectionExpense, &top, "早餐")
 	archived := r.seedArchived(t, model.DirectionExpense, "舊的")
 	unknown := uuid.Must(uuid.NewV7())
+	system := model.UnrecordedExpenseCategoryID
+	r.categories[system] = model.Category{ID: system, Direction: model.DirectionExpense, Name: "未記錄"}
 	before := len(r.categories)
 
 	tests := []struct {
@@ -181,6 +183,7 @@ func TestCreateCategoryRejectsInvalidInputWithoutStoring(t *testing.T) {
 		{"archived parent", usecase.CreateCategoryInput{Direction: "expense", ParentID: &archived, Name: "x"}, model.ErrArchived},
 		{"parent is a subcategory", usecase.CreateCategoryInput{Direction: "expense", ParentID: &sub, Name: "x"}, model.ErrCategoryTooDeep},
 		{"parent has the other direction", usecase.CreateCategoryInput{Direction: "income", ParentID: &top, Name: "x"}, model.ErrCategoryDirectionMismatch},
+		{"parent is a system category", usecase.CreateCategoryInput{Direction: "expense", ParentID: &system, Name: "x"}, model.ErrSystemCategory},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -257,6 +260,27 @@ func TestArchiveCategory(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), unknown.String()) {
 			t.Errorf("err = %q, want it to name the id", err)
+		}
+	})
+
+	t.Run("refuses the system categories, which a reconciliation records to", func(t *testing.T) {
+		r := newFakeRepo()
+		for id, direction := range map[uuid.UUID]model.Direction{
+			model.UnrecordedExpenseCategoryID: model.DirectionExpense,
+			model.UnrecordedIncomeCategoryID:  model.DirectionIncome,
+		} {
+			r.categories[id] = model.Category{ID: id, Direction: direction, Name: "未記錄"}
+		}
+		svc := category.New(r)
+
+		for _, id := range []uuid.UUID{model.UnrecordedExpenseCategoryID, model.UnrecordedIncomeCategoryID} {
+			_, err := svc.ArchiveCategory(ctx, id)
+			if !errors.Is(err, model.ErrSystemCategory) {
+				t.Fatalf("ArchiveCategory(%s): err = %v, want ErrSystemCategory", id, err)
+			}
+			if r.categories[id].IsArchived() {
+				t.Errorf("category %s is archived, want it left in use", id)
+			}
 		}
 	})
 }

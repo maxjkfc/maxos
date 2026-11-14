@@ -44,7 +44,8 @@ type CreateCategoryInput struct {
 // ArchiveCategory retires a category: it stays for the transactions that already
 // use it, but new ones may no longer use it. Archiving a top-level category
 // archives its subcategories with it. Archiving an archived category changes
-// nothing and returns it as it is.
+// nothing and returns it as it is. The two system categories called 未記錄
+// (unrecorded) cannot be archived: reconciliations record to them.
 type ArchiveCategory interface {
 	ArchiveCategory(ctx context.Context, id uuid.UUID) (Category, error)
 }

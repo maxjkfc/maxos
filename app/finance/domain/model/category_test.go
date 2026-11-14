@@ -81,3 +81,18 @@ func TestASubcategoryHasTheDirectionOfItsParent(t *testing.T) {
 		t.Fatalf("err = %v, want ErrCategoryDirectionMismatch", err)
 	}
 }
+
+func TestASystemCategoryHasNoSubcategories(t *testing.T) {
+	for _, direction := range []model.Direction{model.DirectionExpense, model.DirectionIncome} {
+		parent := unrecordedCategory(direction)
+
+		_, err := model.NewCategory(model.NewCategoryParams{
+			ID: uuid.Must(uuid.NewV7()), Direction: direction, Name: "子類別", Parent: &parent,
+		})
+
+		// A line may not use a system category, but could use a subcategory of one.
+		if !errors.Is(err, model.ErrSystemCategory) {
+			t.Errorf("%s: err = %v, want ErrSystemCategory", direction, err)
+		}
+	}
+}

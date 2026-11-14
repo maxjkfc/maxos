@@ -219,7 +219,7 @@ func TestValidateRefuses(t *testing.T) {
 			bookPosting(model.BookOpening, twd, "0")), model.ErrMalformedPosting},
 		{"a posting made to no book", raw(model.KindOpening,
 			accountPosting(acctA, twd, "1000"),
-			bookPosting(model.Book("dealing"), twd, "-1000")), model.ErrMalformedPosting},
+			bookPosting(model.Book("payable"), twd, "-1000")), model.ErrMalformedPosting},
 
 		// The base amount of an amount in the base currency is that amount.
 		{"a base amount that is not the quantity, in the base currency", raw(model.KindExpense,

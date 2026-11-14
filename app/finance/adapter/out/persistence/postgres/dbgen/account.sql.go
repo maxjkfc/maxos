@@ -114,3 +114,19 @@ func (q *Queries) ListAccounts(ctx context.Context, includeArchived bool) ([]Fin
 	}
 	return items, nil
 }
+
+const lockAccount = `-- name: LockAccount :one
+SELECT id FROM fin_account WHERE id = $1 FOR NO KEY UPDATE
+`
+
+// Holds the row until the database transaction ends, and another transaction that
+// locks it waits for that. It is FOR NO KEY UPDATE, not FOR UPDATE: the foreign
+// key of a posting to the account takes only FOR KEY SHARE, which does not
+// conflict with it, so recording to the account is not held up. Returns no row
+// when there is no such account.
+func (q *Queries) LockAccount(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, lockAccount, id)
+	var id_2 uuid.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
+}

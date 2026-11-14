@@ -1,11 +1,14 @@
 package ledger_test
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
@@ -41,6 +44,16 @@ func (f *fakeTx) WithinTx(ctx context.Context, fn func(ctx context.Context) erro
 	return fn(context.WithValue(ctx, txKey{}, struct{}{}))
 }
 
+// callLog notes, in order, the calls of the fakes that share it which a test
+// wants the order of. A fake without a log notes nothing.
+type callLog struct{ calls []string }
+
+func (l *callLog) note(call string) {
+	if l != nil {
+		l.calls = append(l.calls, call)
+	}
+}
+
 // fakeTransactions is an in-memory repo.TransactionRepo.
 type fakeTransactions struct {
 	byID map[uuid.UUID]model.Transaction
@@ -69,6 +82,16 @@ type fakeTransactions struct {
 	// returns.
 	balancesFor *uuid.UUID
 	balanceRows []model.Balance
+	// dealingsFor is the party Dealings was last asked for; dealingRows what it
+	// returns, in the order the repo promises: by party id, then instrument code.
+	dealingsFor *uuid.UUID
+	dealingRows []model.Dealing
+	// readErr, when set, is what BalanceAsOf, PendingDrafts and Dealings return.
+	readErr error
+	// log, when set, is told of the calls whose order a test checks:
+	// "look up the key" for GetByIdempotencyKey, "count the drafts" for
+	// PendingDrafts and "read the balance" for BalanceAsOf.
+	log *callLog
 }
 
 func newFakeTransactions() *fakeTransactions {
@@ -119,6 +142,7 @@ func (f *fakeTransactions) GetForUpdate(ctx context.Context, id uuid.UUID) (mode
 }
 
 func (f *fakeTransactions) GetByIdempotencyKey(_ context.Context, key string) (model.Transaction, error) {
+	f.log.note("look up the key")
 	for _, stored := range f.byID {
 		if stored.IdempotencyKey == key {
 			return stored, nil
@@ -175,11 +199,68 @@ func (f *fakeTransactions) Balances(_ context.Context, accountID *uuid.UUID) ([]
 	return f.balanceRows, nil
 }
 
-// fakeAccounts is an in-memory repo.AccountRepo of which only Get is used.
+// BalanceAsOf adds up the account postings of the confirmed transactions that
+// happened on or before the day, as the repo does.
+func (f *fakeTransactions) BalanceAsOf(_ context.Context, accountID, instrumentID uuid.UUID, day time.Time) (decimal.Decimal, error) {
+	f.log.note("read the balance")
+	if f.readErr != nil {
+		return decimal.Zero, f.readErr
+	}
+	sum := decimal.Zero
+	for _, txn := range f.byID {
+		if txn.Status != model.StatusConfirmed || txn.OccurredOn.After(day) {
+			continue
+		}
+		for _, p := range txn.Postings {
+			if p.Book == model.BookAccount && *p.AccountID == accountID && p.InstrumentID == instrumentID {
+				sum = sum.Add(p.Quantity)
+			}
+		}
+	}
+	return sum, nil
+}
+
+// PendingDrafts counts the drafts that happened on or before the day and have a
+// posting to the account in the instrument, as the repo does.
+func (f *fakeTransactions) PendingDrafts(_ context.Context, accountID, instrumentID uuid.UUID, day time.Time) (int, error) {
+	f.log.note("count the drafts")
+	if f.readErr != nil {
+		return 0, f.readErr
+	}
+	pending := 0
+	for _, txn := range f.byID {
+		if txn.Status != model.StatusDraft || txn.OccurredOn.After(day) {
+			continue
+		}
+		for _, p := range txn.Postings {
+			if p.Book == model.BookAccount && *p.AccountID == accountID && p.InstrumentID == instrumentID {
+				pending++
+				break
+			}
+		}
+	}
+	return pending, nil
+}
+
+func (f *fakeTransactions) Dealings(_ context.Context, partyID *uuid.UUID) ([]model.Dealing, error) {
+	f.dealingsFor = partyID
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	return f.dealingRows, nil
+}
+
+// fakeAccounts is an in-memory repo.AccountRepo of which only Get and Lock are
+// used.
 type fakeAccounts struct {
 	repo.AccountRepo
 
 	accounts map[uuid.UUID]model.Account
+	// locked lists the ids Lock was asked for, in order, and log, when set, is
+	// told "lock the account" each time. lockErr, when set, is what Lock returns.
+	locked  []uuid.UUID
+	log     *callLog
+	lockErr error
 }
 
 func newFakeAccounts() *fakeAccounts {
@@ -204,6 +285,24 @@ func (f *fakeAccounts) Get(_ context.Context, id uuid.UUID) (model.Account, erro
 		return model.Account{}, model.ErrNotFound
 	}
 	return a, nil
+}
+
+// Lock notes that the account is locked, and returns model.ErrNotFound for an id
+// it does not know. It needs a database transaction, as the repo does: the lock
+// is held until the transaction ends, and one taken outside of it holds nothing.
+func (f *fakeAccounts) Lock(ctx context.Context, id uuid.UUID) error {
+	if !inTx(ctx) {
+		return errNotInTx
+	}
+	f.log.note("lock the account")
+	f.locked = append(f.locked, id)
+	if f.lockErr != nil {
+		return f.lockErr
+	}
+	if _, ok := f.accounts[id]; !ok {
+		return model.ErrNotFound
+	}
+	return nil
 }
 
 // fakeInstruments is an in-memory repo.InstrumentRepo of which only Get is used.
@@ -270,28 +369,40 @@ func (f *fakeCategories) Get(_ context.Context, id uuid.UUID) (model.Category, e
 	return c, nil
 }
 
-// fakeReferences is the catalog as the ledger sees it, with some projects, areas
-// and tags. As a catalogusecase.VerifyReferences, an id it does not know is not
-// found and one it knows as archived is archived. As a
+// fakeReferences is the catalog as the ledger sees it, with some projects, areas,
+// parties and tags. As a catalogusecase.VerifyReferences, an id it does not know
+// is not found and one it knows as archived is archived. As a
 // catalogusecase.ResolveProjectArea, it follows the rule of the port: the default
 // area it was given, unless that is archived, and a *ReferenceError for a project
-// that is not found or archived.
+// that is not found or archived. As a catalogusecase.ListParties it lists its
+// parties by name, as the catalog does.
 type fakeReferences struct {
-	// projects, areas and tags map each id the catalog has to whether it is
-	// archived.
-	projects, areas, tags map[uuid.UUID]bool
+	// projects, areas, parties and tags map each id the catalog has to whether it
+	// is archived.
+	projects, areas, parties, tags map[uuid.UUID]bool
+	// partyNames maps each party to its name.
+	partyNames map[uuid.UUID]string
 	// defaultAreas maps the projects that have a default area to it.
 	defaultAreas map[uuid.UUID]uuid.UUID
 	calls        []catalogusecase.VerifyReferencesInput
+	// verifyErr, when set, is what VerifyReferences returns.
+	verifyErr error
 	// resolveAreaErr, when set, is what ResolveProjectArea returns.
 	resolveAreaErr error
+	// listedWith is what ListParties was last asked for, and listPartiesCalls how
+	// often it was called; listPartiesErr, when set, is what it returns.
+	listedWith       catalogusecase.ListPartiesInput
+	listPartiesCalls int
+	listPartiesErr   error
 }
 
 func newFakeReferences() *fakeReferences {
 	return &fakeReferences{
 		projects:     map[uuid.UUID]bool{},
 		areas:        map[uuid.UUID]bool{},
+		parties:      map[uuid.UUID]bool{},
 		tags:         map[uuid.UUID]bool{},
+		partyNames:   map[uuid.UUID]string{},
 		defaultAreas: map[uuid.UUID]uuid.UUID{},
 	}
 }
@@ -314,6 +425,32 @@ func (f *fakeReferences) addTag(archived bool) uuid.UUID {
 	return id
 }
 
+func (f *fakeReferences) addParty(name string, archived bool) uuid.UUID {
+	id := uuid.Must(uuid.NewV7())
+	f.parties[id] = archived
+	f.partyNames[id] = name
+	return id
+}
+
+func (f *fakeReferences) ListParties(_ context.Context, in catalogusecase.ListPartiesInput) (catalogusecase.ListPartiesOutput, error) {
+	f.listedWith = in
+	f.listPartiesCalls++
+	if f.listPartiesErr != nil {
+		return catalogusecase.ListPartiesOutput{}, f.listPartiesErr
+	}
+	var out catalogusecase.ListPartiesOutput
+	for id, archived := range f.parties {
+		if archived && !in.IncludeArchived {
+			continue
+		}
+		out.Parties = append(out.Parties, catalogusecase.Party{ID: id, Name: f.partyNames[id]})
+	}
+	slices.SortFunc(out.Parties, func(a, b catalogusecase.Party) int {
+		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID.String(), b.ID.String()))
+	})
+	return out, nil
+}
+
 // setDefaultArea makes area the default area of project.
 func (f *fakeReferences) setDefaultArea(project, area uuid.UUID) {
 	f.defaultAreas[project] = area
@@ -321,6 +458,9 @@ func (f *fakeReferences) setDefaultArea(project, area uuid.UUID) {
 
 func (f *fakeReferences) VerifyReferences(_ context.Context, in catalogusecase.VerifyReferencesInput) error {
 	f.calls = append(f.calls, in)
+	if f.verifyErr != nil {
+		return f.verifyErr
+	}
 	var problems []catalogusecase.ReferenceProblem
 	check := func(kind catalogusecase.ReferenceKind, known map[uuid.UUID]bool, ids []uuid.UUID) {
 		for _, id := range ids {
@@ -333,6 +473,7 @@ func (f *fakeReferences) VerifyReferences(_ context.Context, in catalogusecase.V
 	}
 	check(catalogusecase.ReferenceProject, f.projects, in.ProjectIDs)
 	check(catalogusecase.ReferenceArea, f.areas, in.AreaIDs)
+	check(catalogusecase.ReferenceParty, f.parties, in.PartyIDs)
 	check(catalogusecase.ReferenceTag, f.tags, in.TagIDs)
 	if len(problems) > 0 {
 		return &catalogusecase.ReferenceError{Problems: problems}

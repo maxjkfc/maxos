@@ -44,15 +44,15 @@ type NewCategoryParams struct {
 	Direction Direction
 	Name      string
 	// Parent is the category the new one goes under, nil for a top-level
-	// category. It must itself be top-level and have the same Direction. Whether it
-	// is archived is for the use case to check.
+	// category. It must itself be top-level, have the same Direction and not be a
+	// system category. Whether it is archived is for the use case to check.
 	Parent *Category
 }
 
 // NewCategory validates a category and returns it. The whitespace around the name
-// is trimmed. It returns ErrCategoryTooDeep when the parent is a subcategory
-// itself, and ErrCategoryDirectionMismatch when the parent has the other
-// direction.
+// is trimmed. It returns ErrSystemCategory when the parent is a system category,
+// ErrCategoryTooDeep when the parent is a subcategory itself, and
+// ErrCategoryDirectionMismatch when the parent has the other direction.
 func NewCategory(p NewCategoryParams) (Category, error) {
 	name, err := normalizeName(p.Name)
 	if err != nil {
@@ -63,6 +63,9 @@ func NewCategory(p NewCategoryParams) (Category, error) {
 	}
 	category := Category{ID: p.ID, Direction: p.Direction, Name: name}
 	if p.Parent != nil {
+		if p.Parent.IsSystem() {
+			return Category{}, fmt.Errorf("%w: %q cannot have subcategories", ErrSystemCategory, p.Parent.Name)
+		}
 		if p.Parent.ParentID != nil {
 			return Category{}, fmt.Errorf("%w: %q is already a subcategory", ErrCategoryTooDeep, p.Parent.Name)
 		}
@@ -78,4 +81,33 @@ func NewCategory(p NewCategoryParams) (Category, error) {
 // IsArchived reports whether the category is archived.
 func (c Category) IsArchived() bool {
 	return c.ArchivedAt != nil
+}
+
+// The ids of the two system categories, both called 未記錄 (unrecorded): what a
+// reconciliation books when an account holds less of a currency than the ledger
+// says (an expense) or more (an income). They are the ids migration 0005 gives
+// the two rows it seeds, and the two must stay equal. A system category is never
+// archived, and only a reconciliation records to it.
+var (
+	UnrecordedExpenseCategoryID = uuid.MustParse("00000000-0000-7000-8000-000000000101")
+	UnrecordedIncomeCategoryID  = uuid.MustParse("00000000-0000-7000-8000-000000000102")
+)
+
+// IsSystemCategory reports whether id is the id of a system category.
+func IsSystemCategory(id uuid.UUID) bool {
+	return id == UnrecordedExpenseCategoryID || id == UnrecordedIncomeCategoryID
+}
+
+// IsSystem reports whether the category is a system category.
+func (c Category) IsSystem() bool {
+	return IsSystemCategory(c.ID)
+}
+
+// CheckArchivable returns ErrSystemCategory for a system category, which is never
+// archived, and nil for every other category.
+func (c Category) CheckArchivable() error {
+	if c.IsSystem() {
+		return fmt.Errorf("%w: %q cannot be archived", ErrSystemCategory, c.Name)
+	}
+	return nil
 }
