@@ -21,6 +21,7 @@ import (
 	financeinstitution "github.com/maxjkfc/maxos/app/finance/usecase/institution"
 	financeinstrument "github.com/maxjkfc/maxos/app/finance/usecase/instrument"
 	financeledger "github.com/maxjkfc/maxos/app/finance/usecase/ledger"
+	financeclock "github.com/maxjkfc/maxos/app/finance/usecase/port/out/clock"
 	financerepo "github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
 	financetx "github.com/maxjkfc/maxos/app/finance/usecase/port/out/tx"
 	inboxmcp "github.com/maxjkfc/maxos/app/inbox/adapter/in/mcp"
@@ -29,6 +30,7 @@ import (
 	"github.com/maxjkfc/maxos/app/inbox/usecase/listrecent"
 	inboxrepo "github.com/maxjkfc/maxos/app/inbox/usecase/port/out/repo"
 	"github.com/maxjkfc/maxos/pkg/cfaccess"
+	"github.com/maxjkfc/maxos/pkg/clock"
 	"github.com/maxjkfc/maxos/pkg/config"
 	"github.com/maxjkfc/maxos/pkg/log"
 	"github.com/maxjkfc/maxos/pkg/mcpserver"
@@ -40,16 +42,23 @@ import (
 // registrar into this group.
 const registrarGroup = `group:"mcp.registrars"`
 
-// InfraModule provides what every command needs: the logger and the Postgres
-// pool. The command supplies config.Config itself (fx.Supply), so that a
-// configuration mistake reaches the user as a plain error.
+// InfraModule provides what every command needs: the logger, the Postgres pool
+// and the clock, which tells the time in the timezone of the config. The command
+// supplies config.Config itself (fx.Supply), so that a configuration mistake
+// reaches the user as a plain error.
 func InfraModule() fx.Option {
 	return fx.Options(
 		// Failures come back to the command as errors; Fx's own event log would
 		// only repeat them.
 		fx.NopLogger,
-		fx.Provide(log.New, newPool),
+		fx.Provide(log.New, newPool, newClock),
 	)
+}
+
+// newClock is the clock the finance use cases tell today by: the wall clock in
+// the timezone the application is configured with (MAXOS_TIMEZONE).
+func newClock(cfg config.Config) financeclock.Clock {
+	return clock.New(cfg.Timezone)
 }
 
 // newPool builds the pool and ties it to the app: the database is checked when
@@ -109,7 +118,9 @@ func CatalogModule() fx.Option {
 // FinanceModule wires the finance context: its Postgres repos and its use cases.
 // That is the reference data (instruments, institutions, accounts, categories) and
 // the ledger. The ledger opens its database transactions through the same pool as
-// the repos, and calls the catalog, so the app must include CatalogModule too.
+// the repos, and calls the catalog, so the app must include CatalogModule too. It
+// tells today by a financeclock.Clock, which InfraModule provides and a test
+// supplies.
 func FinanceModule() fx.Option {
 	return fx.Module("finance",
 		fx.Provide(

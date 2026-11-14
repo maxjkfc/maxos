@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
+	financeclock "github.com/maxjkfc/maxos/app/finance/usecase/port/out/clock"
 	"github.com/maxjkfc/maxos/cmd"
 	"github.com/maxjkfc/maxos/internal/testpg"
 )
@@ -47,21 +49,30 @@ type ledgerApp struct {
 	ListTransactions  usecase.ListTransactions
 	GetBalances       usecase.GetBalances
 	GetDealings       usecase.GetDealings
+
+	CreateInstrument     usecase.CreateInstrument
+	RecordBillInstalment usecase.RecordBillInstalment
+	RecordTrade          usecase.RecordTrade
+	GetInstalmentPlan    usecase.GetInstalmentPlan
+	ListInstalmentPlans  usecase.ListInstalmentPlans
+	Void                 usecase.VoidTransaction
+	Discard              usecase.DiscardDraft
 }
 
 func newLedgerApp(t *testing.T) ledgerApp {
 	t.Helper()
-	return newLedgerAppOn(t, testpg.New(t))
+	return newLedgerAppOn(t, testpg.New(t), newTestClock(day))
 }
 
-// newLedgerAppOn puts the app together on a pool of the caller, for a test that
-// needs a say in how the database is reached.
-func newLedgerAppOn(t *testing.T, pool *pgxpool.Pool) ledgerApp {
+// newLedgerAppOn puts the app together on a pool and a clock of the caller, for a
+// test that needs a say in how the database is reached or in what day it is.
+func newLedgerAppOn(t *testing.T, pool *pgxpool.Pool, clk financeclock.Clock) ledgerApp {
 	t.Helper()
 	var l ledgerApp
 	app := fx.New(
 		fx.NopLogger,
 		fx.Supply(pool),
+		fx.Provide(func() financeclock.Clock { return clk }),
 		cmd.CatalogModule(),
 		cmd.FinanceModule(),
 		fx.Populate(&l),
@@ -70,6 +81,27 @@ func newLedgerAppOn(t *testing.T, pool *pgxpool.Pool) ledgerApp {
 		t.Fatalf("assemble the modules: %v", err)
 	}
 	return l
+}
+
+// userZone is where the user lives, as an offset, so that no test needs a timezone
+// database.
+var userZone = time.FixedZone("UTC+8", 8*60*60)
+
+// testClock is the time of the app in a test: noon, in the zone of the user, of the
+// day it was last set to. It is safe for the calls of a test that run together.
+type testClock struct{ now atomic.Pointer[time.Time] }
+
+func newTestClock(on time.Time) *testClock {
+	c := &testClock{}
+	c.setDay(on)
+	return c
+}
+
+func (c *testClock) Now() time.Time { return *c.now.Load() }
+
+// setDay moves the clock to noon on the date of on, in whatever zone on is.
+func (c *testClock) setDay(on time.Time) {
+	c.now.Store(new(time.Date(on.Year(), on.Month(), on.Day(), 12, 0, 0, 0, userZone)))
 }
 
 func dec(s string) decimal.Decimal {

@@ -62,10 +62,16 @@ func (e *ledgerEnv) splitOf(key string, day time.Time, party uuid.UUID) model.Tr
 	return txn
 }
 
-// dealings returns what Dealings returns, one to a line.
+// dealings returns what Dealings returns on a day after all that is stored, one to a line.
 func (e *ledgerEnv) dealings(partyID *uuid.UUID) []string {
 	e.t.Helper()
-	got, err := e.txns.Dealings(context.Background(), partyID)
+	return e.dealingsOn(partyID, forever)
+}
+
+// dealingsOn returns what Dealings returns on the day, one to a line.
+func (e *ledgerEnv) dealingsOn(partyID *uuid.UUID, day time.Time) []string {
+	e.t.Helper()
+	got, err := e.txns.Dealings(context.Background(), partyID, day)
 	if err != nil {
 		e.t.Fatalf("Dealings: %v", err)
 	}
@@ -363,7 +369,7 @@ func (e *ledgerEnv) wantDealings(partyID *uuid.UUID, want ...string) {
 	}
 }
 
-func TestBalanceAsOfIncludesTheDayItselfAndLeavesOutTheNextOne(t *testing.T) {
+func TestBalancesOfADayIncludeTheDayItselfAndLeaveOutTheNextOne(t *testing.T) {
 	e := newLedgerEnv(t)
 	ctx := context.Background()
 	spend := func(key string, day time.Time, amount string) model.Transaction {
@@ -393,24 +399,30 @@ func TestBalanceAsOfIncludesTheDayItselfAndLeavesOutTheNextOne(t *testing.T) {
 		day        time.Time
 		want       string
 	}{
-		{"the day before anything", e.cash.ID, e.twd.ID, nov(9), "0"},
+		{"the day before anything, when there is no balance", e.cash.ID, e.twd.ID, nov(9), ""},
 		{"the day of the opening balance", e.cash.ID, e.twd.ID, nov(10), "1000"},
 		{"a day with nothing of its own", e.cash.ID, e.twd.ID, nov(13), "1000"},
 		{"a day with a transaction of its own, which is counted", e.cash.ID, e.twd.ID, nov(14), "880"},
 		{"the day after, which is not counted on the day before", e.cash.ID, e.twd.ID, nov(15), "830"},
 		{"a day long after", e.cash.ID, e.twd.ID, nov(30), "830"},
-		{"another instrument of the account, before its transaction", e.cash.ID, e.usd.ID, nov(13), "0"},
+		{"another instrument of the account, before its transaction", e.cash.ID, e.usd.ID, nov(13), ""},
 		{"another instrument of the account, on the day of its transaction", e.cash.ID, e.usd.ID, nov(14), "-5"},
 		{"another account", e.bank.ID, e.twd.ID, nov(14), "5000"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := e.txns.BalanceAsOf(ctx, tt.account, tt.instrument, tt.day)
+			got, err := e.txns.Balances(ctx, repo.BalanceFilter{AccountID: &tt.account, InstrumentID: &tt.instrument, Day: tt.day})
 			if err != nil {
-				t.Fatalf("BalanceAsOf: %v", err)
+				t.Fatalf("Balances: %v", err)
 			}
-			if !got.Equal(decimal.RequireFromString(tt.want)) {
-				t.Fatalf("balance = %s, want %s", got, tt.want)
+			if tt.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("balances = %v, want none: nothing is posted to them by that day", got)
+				}
+				return
+			}
+			if len(got) != 1 || !got[0].Quantity.Equal(decimal.RequireFromString(tt.want)) {
+				t.Fatalf("balances = %v, want the one balance of %s", got, tt.want)
 			}
 		})
 	}

@@ -52,6 +52,10 @@ func NewTransactionRepo(pool *pgxpool.Pool) *TransactionRepo {
 // written. When a concurrent database transaction holds the key without having
 // committed, the insert waits until it has, so what "stored" means is settled by
 // then.
+//
+// A transaction of an instalment plan stores its place in it, which the table
+// checks (fin_transaction_plan_*): a period refers to the origin of its plan, so
+// the origin is stored before the periods.
 func (r *TransactionRepo) Insert(ctx context.Context, txn model.Transaction) (model.Transaction, error) {
 	row, err := r.q.InsertTransaction(ctx, dbgen.InsertTransactionParams{
 		ID:             txn.ID,
@@ -64,6 +68,8 @@ func (r *TransactionRepo) Insert(ctx context.Context, txn model.Transaction) (mo
 		ProjectID:      nullUUID(txn.ProjectID),
 		AreaID:         nullUUID(txn.AreaID),
 		IdempotencyKey: txn.IdempotencyKey,
+		PlanID:         nullUUID(txn.PlanID),
+		PlanSeq:        planSeqColumn(txn.PlanSeq),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Transaction{}, repo.ErrDuplicateKey
@@ -134,6 +140,31 @@ func (r *TransactionRepo) GetByIdempotencyKey(ctx context.Context, key string) (
 		return model.Transaction{}, mapError(err)
 	}
 	return r.loadOne(ctx, row)
+}
+
+// GetPlan returns the instalment plan whose origin has the id: the origin, and
+// the periods in the order they fall due. The rows of the plan are read by one
+// statement, so they agree on what status they have. An id that no plan has, a
+// period's among them, is model.ErrNotFound.
+func (r *TransactionRepo) GetPlan(ctx context.Context, planID uuid.UUID) (model.InstalmentPlan, error) {
+	rows, err := r.q.ListPlanTransactions(ctx, nullUUID(&planID))
+	if err != nil {
+		return model.InstalmentPlan{}, fmt.Errorf("list the transactions of plan %s: %w", planID, err)
+	}
+	if len(rows) == 0 {
+		return model.InstalmentPlan{}, model.ErrNotFound
+	}
+	txns, err := r.load(ctx, rows)
+	if err != nil {
+		return model.InstalmentPlan{}, err
+	}
+	if !txns[0].IsPlanOrigin() || txns[0].ID != planID {
+		// The table does not let a period refer to anything but a stored transaction,
+		// and an origin is the transaction its plan is named after; this is what it
+		// would take to get here, and not what a plan looks like.
+		return model.InstalmentPlan{}, fmt.Errorf("instalment plan %s has no origin: its first transaction is %s", planID, txns[0].ID)
+	}
+	return model.InstalmentPlan{Origin: txns[0], Periods: txns[1:]}, nil
 }
 
 // SetStatus moves the transaction to the status and stamps the time it got there.
@@ -208,29 +239,29 @@ func (r *TransactionRepo) List(ctx context.Context, filter repo.TransactionFilte
 }
 
 // Balances adds up the quantities of the postings to accounts, of the confirmed
-// transactions only, for each account and instrument; for one account when
-// accountID is set.
-func (r *TransactionRepo) Balances(ctx context.Context, accountID *uuid.UUID) ([]model.Balance, error) {
-	rows, err := r.q.ListBalances(ctx, nullUUID(accountID))
+// transactions that happened on or before the day, for each account and
+// instrument: the account postings are what the account holds, and the
+// instalment postings what has not fallen due of its instalment plans. For one
+// account, or one instrument, or both, when the filter says so.
+func (r *TransactionRepo) Balances(ctx context.Context, filter repo.BalanceFilter) ([]model.Balance, error) {
+	rows, err := r.q.ListBalances(ctx, dbgen.ListBalancesParams{
+		Day:          filter.Day,
+		AccountID:    nullUUID(filter.AccountID),
+		InstrumentID: nullUUID(filter.InstrumentID),
+	})
 	if err != nil {
 		return nil, err
 	}
 	balances := make([]model.Balance, len(rows))
 	for i, row := range rows {
-		balances[i] = model.Balance{AccountID: row.AccountID, InstrumentID: row.InstrumentID, Quantity: row.Quantity}
+		balances[i] = model.Balance{
+			AccountID:          row.AccountID,
+			InstrumentID:       row.InstrumentID,
+			Quantity:           row.Quantity,
+			UnbilledInstalment: row.UnbilledInstalment,
+		}
 	}
 	return balances, nil
-}
-
-// BalanceAsOf adds up the quantities of the postings to the account in the
-// instrument, of the confirmed transactions that happened on or before the day,
-// the day itself included.
-func (r *TransactionRepo) BalanceAsOf(ctx context.Context, accountID, instrumentID uuid.UUID, day time.Time) (decimal.Decimal, error) {
-	return r.q.GetBalanceAsOf(ctx, dbgen.GetBalanceAsOfParams{
-		AccountID:    nullUUID(&accountID),
-		InstrumentID: instrumentID,
-		Day:          day,
-	})
 }
 
 // PendingDrafts counts the drafts that happened on or before the day and have a
@@ -245,10 +276,10 @@ func (r *TransactionRepo) PendingDrafts(ctx context.Context, accountID, instrume
 }
 
 // Dealings adds up the quantities of the dealing postings, of the confirmed
-// transactions only, for each party and instrument; for one party when partyID
-// is set.
-func (r *TransactionRepo) Dealings(ctx context.Context, partyID *uuid.UUID) ([]model.Dealing, error) {
-	rows, err := r.q.ListDealings(ctx, nullUUID(partyID))
+// transactions that happened on or before the day, for each party and
+// instrument; for one party when partyID is set.
+func (r *TransactionRepo) Dealings(ctx context.Context, partyID *uuid.UUID, day time.Time) ([]model.Dealing, error) {
+	rows, err := r.q.ListDealings(ctx, dbgen.ListDealingsParams{Day: day, PartyID: nullUUID(partyID)})
 	if err != nil {
 		return nil, err
 	}
@@ -257,6 +288,32 @@ func (r *TransactionRepo) Dealings(ctx context.Context, partyID *uuid.UUID) ([]m
 		dealings[i] = model.Dealing{PartyID: row.PartyID, InstrumentID: row.InstrumentID, Quantity: row.Quantity}
 	}
 	return dealings, nil
+}
+
+// InstalmentPlans returns where each confirmed instalment plan stands on the day,
+// newest first. The statement adds up what the plans and their periods say; which
+// of them are finished is for the use case.
+func (r *TransactionRepo) InstalmentPlans(ctx context.Context, accountID *uuid.UUID, day time.Time) ([]model.InstalmentPlanSummary, error) {
+	rows, err := r.q.ListInstalmentPlans(ctx, dbgen.ListInstalmentPlansParams{Day: day, AccountID: nullUUID(accountID)})
+	if err != nil {
+		return nil, err
+	}
+	plans := make([]model.InstalmentPlanSummary, len(rows))
+	for i, row := range rows {
+		nextDueOn, err := optionalDay(row.NextDueOn)
+		if err != nil {
+			return nil, fmt.Errorf("plan %s: next due day: %w", row.PlanID, err)
+		}
+		plans[i] = model.InstalmentPlanSummary{
+			PlanID:       row.PlanID,
+			AccountID:    row.AccountID,
+			InstrumentID: row.InstrumentID,
+			Principal:    row.Principal,
+			Charged:      row.Charged,
+			NextDueOn:    nextDueOn,
+		}
+	}
+	return plans, nil
 }
 
 // loadOne returns the transaction a row holds, with its postings and tags.
@@ -318,6 +375,8 @@ func toTransaction(row dbgen.FinTransaction) model.Transaction {
 		ProjectID:      optionalUUID(row.ProjectID),
 		AreaID:         optionalUUID(row.AreaID),
 		IdempotencyKey: row.IdempotencyKey,
+		PlanID:         optionalUUID(row.PlanID),
+		PlanSeq:        planSeq(row.PlanSeq),
 		CreatedAt:      row.CreatedAt,
 		ConfirmedAt:    row.ConfirmedAt,
 		VoidedAt:       row.VoidedAt,
@@ -354,4 +413,35 @@ func nullDecimal(d *decimal.Decimal) decimal.NullDecimal {
 		return decimal.NullDecimal{}
 	}
 	return decimal.NullDecimal{Decimal: *d, Valid: true}
+}
+
+// planSeqColumn returns the column value of the position in a plan, which is
+// NULL for a transaction that is in none.
+func planSeqColumn(seq *int) *int32 {
+	if seq == nil {
+		return nil
+	}
+	return new(int32(*seq))
+}
+
+// planSeq returns the position in a plan that a column holds, nil for NULL.
+func planSeq(column *int32) *int {
+	if column == nil {
+		return nil
+	}
+	return new(int(*column))
+}
+
+// optionalDay returns the day that the value of a date column that may be NULL
+// holds: the statement that reads it is an aggregate, whose type sqlc does not
+// know, so it comes as it was scanned. NULL is nil.
+func optionalDay(v any) (*time.Time, error) {
+	switch day := v.(type) {
+	case nil:
+		return nil, nil
+	case time.Time:
+		return &day, nil
+	default:
+		return nil, fmt.Errorf("a %T, want a date", v)
+	}
 }

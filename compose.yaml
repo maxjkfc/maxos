@@ -29,6 +29,7 @@ services:
       MAXOS_HTTP_ADDR: ":8080"
       MAXOS_ACCESS_TEAM_DOMAIN: ${MAXOS_ACCESS_TEAM_DOMAIN:-}
       MAXOS_ACCESS_AUD: ${MAXOS_ACCESS_AUD:-}
+      MAXOS_TIMEZONE: ${MAXOS_TIMEZONE:-}
     entrypoint: ["sh", "-c", "maxos migrate && exec maxos serve"]
     depends_on:
       postgres:

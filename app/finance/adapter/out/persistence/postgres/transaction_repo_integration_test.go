@@ -47,9 +47,10 @@ type ledgerEnv struct {
 	pool               *pgxpool.Pool
 	db                 *pkgpostgres.DB
 	txns               *postgres.TransactionRepo
-	cash, bank         model.Account
+	cash, bank, card   model.Account
 	twd, usd, btc      model.Instrument
 	food, fees, salary model.Category
+	interest           model.Category
 	partyA, partyB     uuid.UUID
 }
 
@@ -85,27 +86,29 @@ func newLedgerEnv(t *testing.T) *ledgerEnv {
 	accounts := postgres.NewAccountRepo(pool)
 	categories := postgres.NewCategoryRepo(pool)
 	return &ledgerEnv{
-		t:      t,
-		pool:   pool,
-		db:     pkgpostgres.NewDB(pool),
-		txns:   postgres.NewTransactionRepo(pool),
-		cash:   insertAccount(t, accounts, "cash"),
-		bank:   insertAccount(t, accounts, "bank"),
-		twd:    twd,
-		usd:    usd,
-		btc:    btc,
-		food:   insertCategory(t, categories, model.DirectionExpense, nil, "food"),
-		fees:   insertCategory(t, categories, model.DirectionExpense, nil, "fees"),
-		salary: insertCategory(t, categories, model.DirectionIncome, nil, "salary"),
-		partyA: uuid.Must(uuid.NewV7()),
-		partyB: uuid.Must(uuid.NewV7()),
+		t:        t,
+		pool:     pool,
+		db:       pkgpostgres.NewDB(pool),
+		txns:     postgres.NewTransactionRepo(pool),
+		cash:     insertAccount(t, accounts, "cash"),
+		bank:     insertAccount(t, accounts, "bank"),
+		card:     insertAccount(t, accounts, "card"),
+		twd:      twd,
+		usd:      usd,
+		btc:      btc,
+		food:     insertCategory(t, categories, model.DirectionExpense, nil, "food"),
+		fees:     insertCategory(t, categories, model.DirectionExpense, nil, "fees"),
+		salary:   insertCategory(t, categories, model.DirectionIncome, nil, "salary"),
+		interest: insertCategory(t, categories, model.DirectionExpense, nil, "interest"),
+		partyA:   uuid.Must(uuid.NewV7()),
+		partyB:   uuid.Must(uuid.NewV7()),
 	}
 }
 
 func (e *ledgerEnv) names() map[uuid.UUID]string {
 	return map[uuid.UUID]string{
-		e.cash.ID: "cash", e.bank.ID: "bank", e.twd.ID: "TWD", e.usd.ID: "USD", e.btc.ID: "BTC",
-		e.food.ID: "food", e.fees.ID: "fees", e.salary.ID: "salary", e.partyA: "A", e.partyB: "B",
+		e.cash.ID: "cash", e.bank.ID: "bank", e.card.ID: "card", e.twd.ID: "TWD", e.usd.ID: "USD", e.btc.ID: "BTC",
+		e.food.ID: "food", e.fees.ID: "fees", e.salary.ID: "salary", e.interest.ID: "interest", e.partyA: "A", e.partyB: "B",
 		model.UnrecordedExpenseCategoryID: "unrecorded", model.UnrecordedIncomeCategoryID: "unrecorded",
 	}
 }
@@ -243,6 +246,13 @@ func samePtr(a, b *uuid.UUID) bool {
 	return *a == *b
 }
 
+func sameInt(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 func sameTime(a, b *time.Time) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -258,6 +268,7 @@ func (e *ledgerEnv) wantSame(name string, got, want model.Transaction) {
 		!got.OccurredOn.Equal(want.OccurredOn) || !sameTime(got.OccurredAt, want.OccurredAt) ||
 		got.Description != want.Description || got.Merchant != want.Merchant || got.IdempotencyKey != want.IdempotencyKey ||
 		!samePtr(got.ProjectID, want.ProjectID) || !samePtr(got.AreaID, want.AreaID) ||
+		!samePtr(got.PlanID, want.PlanID) || !sameInt(got.PlanSeq, want.PlanSeq) ||
 		!slices.Equal(got.TagIDs, want.TagIDs) {
 		e.t.Errorf("%s = %+v, want %+v", name, got, want)
 	}
@@ -266,11 +277,22 @@ func (e *ledgerEnv) wantSame(name string, got, want model.Transaction) {
 	}
 }
 
-// balances returns the balances of the account, or of every account for nil, one
-// to a line.
+// forever is a day after everything the tests store.
+var forever = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// balances returns the balances of the account, or of every account for nil, on a
+// day after all that is stored, one to a line.
 func (e *ledgerEnv) balances(accountID *uuid.UUID) []string {
 	e.t.Helper()
-	got, err := e.txns.Balances(context.Background(), accountID)
+	return e.balancesOn(accountID, forever, false)
+}
+
+// balancesOn returns the balances of the account, or of every account for nil, on
+// the day, one to a line. A line says what is unbilled when it is something, or
+// when unbilled is set, as in "card TWD -1030 unbilled -11000".
+func (e *ledgerEnv) balancesOn(accountID *uuid.UUID, day time.Time, unbilled bool) []string {
+	e.t.Helper()
+	got, err := e.txns.Balances(context.Background(), repo.BalanceFilter{AccountID: accountID, Day: day})
 	if err != nil {
 		e.t.Fatalf("Balances: %v", err)
 	}
@@ -278,6 +300,9 @@ func (e *ledgerEnv) balances(accountID *uuid.UUID) []string {
 	lines := make([]string, len(got))
 	for i, b := range got {
 		lines[i] = fmt.Sprintf("%s %s %s", names[b.AccountID], names[b.InstrumentID], b.Quantity)
+		if unbilled || !b.UnbilledInstalment.IsZero() {
+			lines[i] += fmt.Sprintf(" unbilled %s", b.UnbilledInstalment)
+		}
 	}
 	return lines
 }
@@ -502,7 +527,7 @@ func TestABalanceIsPerAccountAndInstrument(t *testing.T) {
 	e.wantBalances(&e.cash.ID, "cash TWD 0")
 
 	unknown := uuid.Must(uuid.NewV7())
-	if got, err := e.txns.Balances(ctx, &unknown); err != nil || len(got) != 0 {
+	if got, err := e.txns.Balances(ctx, repo.BalanceFilter{AccountID: &unknown, Day: forever}); err != nil || len(got) != 0 {
 		t.Errorf("Balances of an account with nothing = %v, %v, want none", got, err)
 	}
 }
@@ -771,7 +796,7 @@ func TestTheTransactionTableChecksKindAndStatus(t *testing.T) {
 	valid := e.expense("check-kind-0001", "120")
 
 	badKind := valid
-	badKind.Kind = "trade"
+	badKind.Kind = "payment"
 	err := e.inTx(func(ctx context.Context) error {
 		_, err := e.txns.Insert(ctx, badKind)
 		return err

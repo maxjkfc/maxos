@@ -37,13 +37,21 @@ const (
 	// KindReconciliation makes up for the difference a reconciliation finds
 	// between what an account holds and what the ledger says.
 	KindReconciliation Kind = "reconciliation"
+	// KindInstalment is a change in how what an account owes is paid, which is
+	// part of an instalment plan: a period of the plan being charged to the
+	// account, or the origin of a bill instalment (帳單分期), which turns what the
+	// account already owes into a plan.
+	KindInstalment Kind = "instalment"
+	// KindTrade is buying or selling an instrument that is not a currency, for a
+	// currency.
+	KindTrade Kind = "trade"
 )
 
 // Valid reports whether k is one of the kinds above.
 func (k Kind) Valid() bool {
 	switch k {
 	case KindExpense, KindIncome, KindTransfer, KindExchange, KindOpening,
-		KindReward, KindDealing, KindReconciliation:
+		KindReward, KindDealing, KindReconciliation, KindInstalment, KindTrade:
 		return true
 	}
 	return false
@@ -95,16 +103,27 @@ const (
 	// BookAdjustment is the counterpart of the reconciliation of an instrument
 	// that is not a currency: the quantity that was missing or too much.
 	BookAdjustment Book = "adjustment"
+	// BookInstalment is the principal of an instalment plan that has not been
+	// charged to its account yet, the account that the plan charges. It is
+	// negative while the account owes it without having been charged: the origin of
+	// the plan makes the whole principal so, and each period that falls due takes
+	// its principal out of it with a positive posting.
+	BookInstalment Book = "instalment"
 )
 
 // Valid reports whether b is one of the books above.
 func (b Book) Valid() bool {
 	switch b {
 	case BookAccount, BookExpense, BookIncome, BookConversion, BookOpening,
-		BookDealing, BookReward, BookAdjustment:
+		BookDealing, BookReward, BookAdjustment, BookInstalment:
 		return true
 	}
 	return false
+}
+
+// carriesAccount reports whether a posting of the book names an account.
+func (b Book) carriesAccount() bool {
+	return b == BookAccount || b == BookInstalment
 }
 
 // carriesCategory reports whether a posting of the book names a category.
@@ -124,7 +143,8 @@ type Posting struct {
 	// Seq is the position of the posting in its transaction, from 1.
 	Seq  int
 	Book Book
-	// AccountID is the account of an account posting, and nil for every other book.
+	// AccountID is the account of an account posting or an instalment posting, and
+	// nil for every other book.
 	AccountID *uuid.UUID
 	// CategoryID is the category of an expense or an income posting, and nil for
 	// every other book.
@@ -137,7 +157,9 @@ type Posting struct {
 	// Quantity is how much of the instrument moves, and is never zero. The sign is
 	// that of the thing the posting is made to: positive when it grows (an account
 	// holds more, an expense happens, a party owes me more), negative when it
-	// shrinks (an income or a reward happens, a party owes me less).
+	// shrinks (an income or a reward happens, a party owes me less). An instalment
+	// posting is negative when principal becomes owed without being charged yet,
+	// and positive when a period charges it.
 	Quantity decimal.Decimal
 	// BaseAmount is Quantity in the base currency, at the rate of the day of the
 	// transaction and fixed from then on. It has the sign of Quantity. An expense,
@@ -167,7 +189,7 @@ func (p Posting) validate() error {
 		set      bool
 		required bool
 	}{
-		{"an account", p.AccountID != nil, p.Book == BookAccount},
+		{"an account", p.AccountID != nil, p.Book.carriesAccount()},
 		{"a category", p.CategoryID != nil, p.Book.carriesCategory()},
 		{"a party", p.PartyID != nil, p.Book == BookDealing},
 		{"a base amount", p.BaseAmount != nil, p.Book.carriesBase()},
@@ -227,6 +249,14 @@ type Transaction struct {
 	// TagIDs are ids of catalog tags, without repeats and ordered by id.
 	TagIDs   []uuid.UUID
 	Postings []Posting
+	// PlanID and PlanSeq say which instalment plan the transaction is part of and
+	// where in it. A plan is the transactions that share a PlanID: PlanSeq 0 is its
+	// origin (the purchase that is paid in instalments, or the conversion of what an
+	// account owes), whose id is the PlanID, and 1, 2, ... are its periods, in the
+	// order they fall due. A transaction that is in no plan has neither: both are
+	// nil, or both are set.
+	PlanID  *uuid.UUID
+	PlanSeq *int
 	// CreatedAt, ConfirmedAt and VoidedAt are assigned when the transaction is
 	// stored, confirmed and voided; they are zero (nil) before then.
 	CreatedAt   time.Time
@@ -242,23 +272,34 @@ type Transaction struct {
 //     quantity (ErrMalformedPosting), and equals it for the base currency
 //     (ErrBaseAmountMismatch);
 //   - only a reconciliation uses a system category (ErrSystemCategory);
+//   - the transaction is in a plan only where it can be: an instalment always is,
+//     as the origin of a bill instalment or as a period, and the expense that is
+//     paid in instalments is as the origin of its plan; the plan id and the
+//     position are both set or both left out, and the origin, which is the position
+//     0, is the transaction the plan id names (ErrMalformedPlan);
 //   - the postings are the ones the kind is made of (ErrWrongPostings,
 //     ErrSameAccount, ErrDuplicateParty): an expense is one account posting and
 //     one or more expense postings, and a dealing posting for each party it was
 //     paid for, or, when a party paid, one dealing posting in place of the account
-//     posting; an income is one account posting and one or more income postings;
-//     a transfer is two account postings of different accounts; an exchange two
-//     account and two conversion postings of two instruments; a dealing an
-//     account posting and a dealing posting; a reward an account posting and a
+//     posting, or, when it is paid in instalments, one instalment posting in place
+//     of it; an income is one account posting and one or more income postings; a
+//     transfer is two account postings of different accounts; an exchange and a
+//     trade two account and two conversion postings of two instruments; a dealing
+//     an account posting and a dealing posting; a reward an account posting and a
 //     reward posting; an opening balance an account posting and an opening
 //     posting; a reconciliation an account posting and the posting that makes up
 //     for it, an expense or an income of the system category of its direction, or
-//     an adjustment. An income, a transfer, an exchange, a dealing and a reward
-//     may also have fees, each an expense posting and the account posting that
-//     pays it;
+//     an adjustment; the origin of a bill instalment an account posting and an
+//     instalment posting of the same account; a period of a plan an instalment
+//     posting and an account posting of the same account, and an expense posting
+//     for its interest if it has any. An income, a transfer, an exchange, a trade,
+//     a dealing, a reward and the origin of a bill instalment may also have fees,
+//     each an expense posting and the account posting that pays it;
 //   - each posting moves money the way the kind says: an expense takes money out
-//     of its account, an income puts money into it, a transfer and an exchange do
-//     both (ErrWrongSign);
+//     of its account, an income puts money into it, a transfer, an exchange and a
+//     trade do both, a period charges its account and makes less principal
+//     unbilled, and the origin of a bill instalment is the other way round
+//     (ErrWrongSign);
 //   - in each instrument the postings add up to zero (ErrUnbalanced).
 //
 // The constructors of the kinds validate what they make, so a transaction built
@@ -281,16 +322,58 @@ func (t Transaction) Validate() error {
 			return fmt.Errorf("posting %d: %w: category %s is for reconciliations", p.Seq, ErrSystemCategory, *p.CategoryID)
 		}
 	}
+	if err := t.checkPlan(); err != nil {
+		return err
+	}
 	if err := t.checkKind(); err != nil {
 		return err
 	}
 	return t.checkBalanced()
 }
 
+// IsPlanOrigin reports whether the transaction is the origin of an instalment
+// plan: the one the plan is named after, which comes first.
+func (t Transaction) IsPlanOrigin() bool {
+	return t.PlanSeq != nil && *t.PlanSeq == 0
+}
+
+// IsPlanPeriod reports whether the transaction is a period of an instalment plan,
+// which falls due on its day and is not acted on without the rest of the plan.
+func (t Transaction) IsPlanPeriod() bool {
+	return t.PlanSeq != nil && *t.PlanSeq > 0
+}
+
+// checkPlan checks where the transaction stands in an instalment plan, which for
+// most transactions is nowhere.
+func (t Transaction) checkPlan() error {
+	if (t.PlanID == nil) != (t.PlanSeq == nil) {
+		return fmt.Errorf("%w: the plan id and the position in the plan are both set or both left out", ErrMalformedPlan)
+	}
+	if t.PlanID == nil {
+		if t.Kind == KindInstalment {
+			return fmt.Errorf("%w: an instalment is part of a plan", ErrMalformedPlan)
+		}
+		return nil
+	}
+	switch {
+	case *t.PlanSeq < 0:
+		return fmt.Errorf("%w: the position in the plan is %d, not 0 or more", ErrMalformedPlan, *t.PlanSeq)
+	case t.IsPlanOrigin() && *t.PlanID != t.ID:
+		return fmt.Errorf("%w: the origin of a plan is the transaction the plan id names", ErrMalformedPlan)
+	case t.IsPlanPeriod() && *t.PlanID == t.ID:
+		return fmt.Errorf("%w: a period of a plan is not the transaction the plan id names", ErrMalformedPlan)
+	case t.Kind == KindExpense && t.IsPlanPeriod():
+		return fmt.Errorf("%w: only the origin of a plan is an expense", ErrMalformedPlan)
+	case t.Kind != KindExpense && t.Kind != KindInstalment:
+		return fmt.Errorf("%w: a transaction of the kind %s is not part of a plan", ErrMalformedPlan, t.Kind)
+	}
+	return nil
+}
+
 // checkKind checks that the postings are the ones the kind is made of, and move
-// money the way it does. Besides the expense, the opening balance and the
-// reconciliation, a kind is checked on the postings that are left once its fees
-// are taken out.
+// money the way it does. Besides the expense, the opening balance, the
+// reconciliation and a period of an instalment plan, a kind is checked on the
+// postings that are left once its fees are taken out.
 func (t Transaction) checkKind() error {
 	switch t.Kind {
 	case KindExpense:
@@ -299,6 +382,10 @@ func (t Transaction) checkKind() error {
 		return t.checkOpening()
 	case KindReconciliation:
 		return t.checkReconciliation()
+	case KindInstalment:
+		if t.IsPlanPeriod() {
+			return t.checkInstalmentPeriod()
+		}
 	}
 
 	t.Postings = t.withoutFees()
@@ -308,11 +395,15 @@ func (t Transaction) checkKind() error {
 	case KindTransfer:
 		return t.checkTransfer()
 	case KindExchange:
-		return t.checkExchange()
+		return t.checkSwap("an exchange")
+	case KindTrade:
+		return t.checkSwap("a trade")
 	case KindDealing:
 		return t.checkDealing()
 	case KindReward:
 		return t.checkReward()
+	case KindInstalment:
+		return t.checkBillInstalment()
 	default:
 		return fmt.Errorf("%w %q", ErrInvalidKind, t.Kind)
 	}
@@ -360,15 +451,30 @@ func (t Transaction) withoutFees() []Posting {
 
 // checkExpense checks an expense: who paid and where the money went. The money
 // went to one or more expense postings. Either an account paid, with one account
-// posting that takes it out, or a party paid on my behalf, with one dealing
-// posting that takes it out of what the party owes me and no account posting. An
-// account that paid may have paid for others too: each one it paid for has a
-// dealing posting, who owes me that much, and a party has at most one.
+// posting that takes it out, or an account is paying in instalments, with one
+// instalment posting in place of it, which makes the expense the origin of its
+// instalment plan, or a party paid on my behalf, with one dealing posting that
+// takes it out of what the party owes me and no account posting. An account that
+// paid, in instalments or not, may have paid for others too: each one it paid for
+// has a dealing posting, who owes me that much, and a party has at most one.
 func (t Transaction) checkExpense() error {
 	books := t.booksOf()
-	accounts, expenses, dealings := books[BookAccount], books[BookExpense], books[BookDealing]
-	if len(accounts) > 1 || len(expenses) == 0 || len(accounts)+len(expenses)+len(dealings) != len(t.Postings) {
-		return fmt.Errorf("%w: an expense is one account posting, or one dealing posting when a party paid, and one or more expense postings",
+	accounts, instalments := books[BookAccount], books[BookInstalment]
+	expenses, dealings := books[BookExpense], books[BookDealing]
+	var payer *Posting
+	switch {
+	case len(accounts) == 1:
+		payer = &accounts[0]
+	case len(instalments) == 1:
+		payer = &instalments[0]
+	}
+	payers := len(accounts) + len(instalments)
+	if payers > 1 || len(expenses) == 0 || payers+len(expenses)+len(dealings) != len(t.Postings) {
+		return fmt.Errorf("%w: an expense is one account posting, or one instalment posting when it is paid in instalments, or one dealing posting when a party paid, and one or more expense postings",
+			ErrWrongPostings)
+	}
+	if (len(instalments) == 1) != t.IsPlanOrigin() {
+		return fmt.Errorf("%w: an expense is paid in instalments, with an instalment posting, if and only if it is the origin of an instalment plan",
 			ErrWrongPostings)
 	}
 	for _, p := range expenses {
@@ -376,9 +482,9 @@ func (t Transaction) checkExpense() error {
 			return fmt.Errorf("%w: the expense postings of an expense must be positive", ErrWrongSign)
 		}
 	}
-	if len(accounts) == 1 {
-		if !accounts[0].Quantity.IsNegative() {
-			return fmt.Errorf("%w: the account posting of an expense must be negative", ErrWrongSign)
+	if payer != nil {
+		if !payer.Quantity.IsNegative() {
+			return fmt.Errorf("%w: the %s posting of an expense must be negative", ErrWrongSign, payer.Book)
 		}
 		for _, p := range dealings {
 			if p.Quantity.IsNegative() {
@@ -439,20 +545,21 @@ func (t Transaction) checkTransfer() error {
 	return nil
 }
 
-// checkExchange checks an exchange: for each of two instruments an account
-// posting and a conversion posting, the account of one losing and the account of
-// the other gaining.
-func (t Transaction) checkExchange() error {
+// checkSwap checks what an exchange and a trade are made of, which is the same:
+// for each of two instruments an account posting and a conversion posting, the
+// account of one losing and the account of the other gaining. what says which of
+// the two it is, for the message.
+func (t Transaction) checkSwap(what string) error {
 	books := t.booksOf()
 	accounts, conversions := books[BookAccount], books[BookConversion]
 	if len(accounts) != 2 || len(conversions) != 2 || len(t.Postings) != 4 {
-		return fmt.Errorf("%w: an exchange is two account postings and two conversion postings", ErrWrongPostings)
+		return fmt.Errorf("%w: %s is two account postings and two conversion postings", ErrWrongPostings, what)
 	}
 	if accounts[0].InstrumentID == accounts[1].InstrumentID {
-		return fmt.Errorf("%w: an exchange is between two instruments", ErrWrongPostings)
+		return fmt.Errorf("%w: %s is between two instruments", ErrWrongPostings, what)
 	}
 	if conversions[0].InstrumentID == conversions[1].InstrumentID {
-		return fmt.Errorf("%w: each instrument of an exchange has one conversion posting", ErrWrongPostings)
+		return fmt.Errorf("%w: each instrument of %s has one conversion posting", ErrWrongPostings, what)
 	}
 	for _, c := range conversions {
 		if c.InstrumentID != accounts[0].InstrumentID && c.InstrumentID != accounts[1].InstrumentID {
@@ -460,7 +567,59 @@ func (t Transaction) checkExchange() error {
 		}
 	}
 	if accounts[0].Quantity.Sign() == accounts[1].Quantity.Sign() {
-		return fmt.Errorf("%w: an exchange takes one instrument out of an account and puts the other into one", ErrWrongSign)
+		return fmt.Errorf("%w: %s takes one instrument out of an account and puts the other into one", ErrWrongSign, what)
+	}
+	return nil
+}
+
+// checkBillInstalment checks the origin of a bill instalment (帳單分期): an
+// account posting that pays off what the account owes, and the instalment posting
+// of the same account that makes it owed again as principal that is not charged
+// yet, to be charged by the periods of the plan.
+func (t Transaction) checkBillInstalment() error {
+	books := t.booksOf()
+	accounts, instalments := books[BookAccount], books[BookInstalment]
+	if len(accounts) != 1 || len(instalments) != 1 || len(t.Postings) != 2 {
+		return fmt.Errorf("%w: the origin of a bill instalment is one account posting and one instalment posting", ErrWrongPostings)
+	}
+	account, instalment := accounts[0], instalments[0]
+	if *account.AccountID != *instalment.AccountID || account.InstrumentID != instalment.InstrumentID {
+		return fmt.Errorf("%w: the account posting and the instalment posting of a bill instalment are of the same account and instrument", ErrWrongPostings)
+	}
+	if !account.Quantity.IsPositive() {
+		return fmt.Errorf("%w: the account posting of a bill instalment must be positive: what the account owed is paid off", ErrWrongSign)
+	}
+	if !instalment.Quantity.IsNegative() {
+		return fmt.Errorf("%w: the instalment posting of a bill instalment must be negative: the principal is owed and not yet charged", ErrWrongSign)
+	}
+	return nil
+}
+
+// checkInstalmentPeriod checks a period of an instalment plan, as it falls due:
+// its principal stops being unbilled (an instalment posting) and is charged to
+// the account (an account posting), together with the interest of the period,
+// which is an expense of its own (an expense posting) when it has any. Both of
+// the first two are of the account the plan charges.
+func (t Transaction) checkInstalmentPeriod() error {
+	books := t.booksOf()
+	instalments, accounts, expenses := books[BookInstalment], books[BookAccount], books[BookExpense]
+	if len(instalments) != 1 || len(accounts) != 1 || len(expenses) > 1 ||
+		len(instalments)+len(accounts)+len(expenses) != len(t.Postings) {
+		return fmt.Errorf("%w: a period of an instalment plan is one instalment posting, one account posting, and one expense posting when it has interest",
+			ErrWrongPostings)
+	}
+	instalment, account := instalments[0], accounts[0]
+	if *instalment.AccountID != *account.AccountID || instalment.InstrumentID != account.InstrumentID {
+		return fmt.Errorf("%w: the instalment posting and the account posting of a period are of the same account and instrument", ErrWrongPostings)
+	}
+	if !instalment.Quantity.IsPositive() {
+		return fmt.Errorf("%w: the instalment posting of a period must be positive: its principal stops being unbilled", ErrWrongSign)
+	}
+	if !account.Quantity.IsNegative() {
+		return fmt.Errorf("%w: the account posting of a period must be negative: the principal and the interest are charged to it", ErrWrongSign)
+	}
+	if len(expenses) == 1 && !expenses[0].Quantity.IsPositive() {
+		return fmt.Errorf("%w: the expense posting for the interest of a period must be positive", ErrWrongSign)
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package ledger_test
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -8,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 
 	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
@@ -17,12 +17,28 @@ import (
 
 var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
+// taipei is the timezone of the application in the tests: ahead of UTC, so that
+// the first hours of a day there are still the day before in UTC.
+var taipei = time.FixedZone("UTC+8", 8*60*60)
+
+// fakeClock is a clock.Clock that tells the time a test sets.
+type fakeClock struct {
+	now time.Time
+}
+
+func (f *fakeClock) Now() time.Time { return f.now }
+
 // txKey marks a context that belongs to a database transaction.
 type txKey struct{}
 
 // errNotInTx is what the fake repos return for a write that was not made in a
 // database transaction: the use cases must make all their writes in one.
 var errNotInTx = errors.New("the write was made outside a database transaction")
+
+// errForeignKey is what the fake repo returns for what the foreign key of the
+// plan of a transaction would refuse: a period stored before its origin, and an
+// origin deleted while a period of its plan is still stored.
+var errForeignKey = errors.New("fin_transaction_plan_id_fkey")
 
 func inTx(ctx context.Context) bool {
 	_, ok := ctx.Value(txKey{}).(struct{})
@@ -72,25 +88,36 @@ type fakeTransactions struct {
 	// this one is being recorded: it is not there when the key is looked up, and
 	// Insert finds the key taken by it.
 	concurrent *model.Transaction
+	// beforeLock, when set, is called with the id GetForUpdate is asked for,
+	// before it looks for it: what another call does while this one waits for the
+	// lock.
+	beforeLock func(id uuid.UUID)
 
 	// listed is the filter List was last called with, and lists how often it was
 	// called; listResult is what it returns, cut to the limit of the filter.
 	listed     repo.TransactionFilter
 	lists      int
 	listResult []model.Transaction
-	// balancesFor is the account Balances was last asked for; balanceRows what it
-	// returns.
-	balancesFor *uuid.UUID
-	balanceRows []model.Balance
-	// dealingsFor is the party Dealings was last asked for; dealingRows what it
-	// returns, in the order the repo promises: by party id, then instrument code.
+	// balancesAsked lists the filters Balances was called with, in order.
+	balancesAsked []repo.BalanceFilter
+	// dealingsFor and dealingsDay are the party and the day Dealings was last asked
+	// for; dealingRows is what it returns, in the order the repo promises: by party
+	// id, then instrument code.
 	dealingsFor *uuid.UUID
+	dealingsDay time.Time
 	dealingRows []model.Dealing
-	// readErr, when set, is what BalanceAsOf, PendingDrafts and Dealings return.
+	// plansFor and plansDay are the account and the day InstalmentPlans was last
+	// asked for, and plansAsked how often it was asked; planRows is what it returns.
+	plansFor   *uuid.UUID
+	plansDay   time.Time
+	plansAsked int
+	planRows   []model.InstalmentPlanSummary
+	// readErr, when set, is what Balances, PendingDrafts, Dealings and
+	// InstalmentPlans return.
 	readErr error
 	// log, when set, is told of the calls whose order a test checks:
 	// "look up the key" for GetByIdempotencyKey, "count the drafts" for
-	// PendingDrafts and "read the balance" for BalanceAsOf.
+	// PendingDrafts and "read the balance" for Balances.
 	log *callLog
 }
 
@@ -102,6 +129,9 @@ func (f *fakeTransactions) stamp() time.Time {
 	return epoch.Add(time.Duration(len(f.byID)+1) * time.Second)
 }
 
+// Insert stores the transaction as the table would: a period of a plan refers to
+// the origin of its plan, which must be stored already, and takes the place in
+// the plan that no other transaction has.
 func (f *fakeTransactions) Insert(ctx context.Context, txn model.Transaction) (model.Transaction, error) {
 	if !inTx(ctx) {
 		return model.Transaction{}, errNotInTx
@@ -117,6 +147,16 @@ func (f *fakeTransactions) Insert(ctx context.Context, txn model.Transaction) (m
 	for _, stored := range f.byID {
 		if stored.IdempotencyKey == txn.IdempotencyKey {
 			return model.Transaction{}, repo.ErrDuplicateKey
+		}
+	}
+	if txn.PlanID != nil {
+		if _, found := f.byID[*txn.PlanID]; !found && *txn.PlanID != txn.ID {
+			return model.Transaction{}, errForeignKey
+		}
+		for _, stored := range f.byID {
+			if stored.PlanID != nil && *stored.PlanID == *txn.PlanID && *stored.PlanSeq == *txn.PlanSeq {
+				return model.Transaction{}, errors.New("fin_transaction_plan_id_plan_seq_key")
+			}
 		}
 	}
 	txn.CreatedAt = f.stamp()
@@ -138,6 +178,9 @@ func (f *fakeTransactions) GetForUpdate(ctx context.Context, id uuid.UUID) (mode
 		return model.Transaction{}, errNotInTx
 	}
 	f.locked = append(f.locked, id)
+	if f.beforeLock != nil {
+		f.beforeLock(id)
+	}
 	return f.Get(ctx, id)
 }
 
@@ -149,6 +192,22 @@ func (f *fakeTransactions) GetByIdempotencyKey(_ context.Context, key string) (m
 		}
 	}
 	return model.Transaction{}, model.ErrNotFound
+}
+
+// GetPlan returns the origin of the plan and then its periods in order, as the
+// repo does, and takes no lock.
+func (f *fakeTransactions) GetPlan(_ context.Context, planID uuid.UUID) (model.InstalmentPlan, error) {
+	var members []model.Transaction
+	for _, txn := range f.byID {
+		if txn.PlanID != nil && *txn.PlanID == planID {
+			members = append(members, txn)
+		}
+	}
+	if len(members) == 0 {
+		return model.InstalmentPlan{}, model.ErrNotFound
+	}
+	slices.SortFunc(members, func(a, b model.Transaction) int { return cmp.Compare(*a.PlanSeq, *b.PlanSeq) })
+	return model.InstalmentPlan{Origin: members[0], Periods: members[1:]}, nil
 }
 
 func (f *fakeTransactions) SetStatus(ctx context.Context, id uuid.UUID, status model.Status) (model.Transaction, error) {
@@ -172,12 +231,19 @@ func (f *fakeTransactions) SetStatus(ctx context.Context, id uuid.UUID, status m
 	return txn, nil
 }
 
+// Delete deletes the transaction, which the table does not let be the origin of a
+// plan while a period of the plan is stored.
 func (f *fakeTransactions) Delete(ctx context.Context, id uuid.UUID) error {
 	if !inTx(ctx) {
 		return errNotInTx
 	}
 	if _, ok := f.byID[id]; !ok {
 		return model.ErrNotFound
+	}
+	for _, other := range f.byID {
+		if other.ID != id && other.PlanID != nil && *other.PlanID == id {
+			return errForeignKey
+		}
 	}
 	delete(f.byID, id)
 	f.deleted = append(f.deleted, id)
@@ -194,30 +260,54 @@ func (f *fakeTransactions) List(_ context.Context, filter repo.TransactionFilter
 	return out, nil
 }
 
-func (f *fakeTransactions) Balances(_ context.Context, accountID *uuid.UUID) ([]model.Balance, error) {
-	f.balancesFor = accountID
-	return f.balanceRows, nil
-}
-
-// BalanceAsOf adds up the account postings of the confirmed transactions that
-// happened on or before the day, as the repo does.
-func (f *fakeTransactions) BalanceAsOf(_ context.Context, accountID, instrumentID uuid.UUID, day time.Time) (decimal.Decimal, error) {
+// Balances adds up, as the repo does, the account postings of the confirmed
+// transactions that happened on or before the day for each account and
+// instrument, and beside them the instalment postings. It orders the balances by
+// account id and then instrument id, which is as much of the order of the repo as
+// the fake has the names for.
+func (f *fakeTransactions) Balances(_ context.Context, filter repo.BalanceFilter) ([]model.Balance, error) {
 	f.log.note("read the balance")
+	f.balancesAsked = append(f.balancesAsked, filter)
 	if f.readErr != nil {
-		return decimal.Zero, f.readErr
+		return nil, f.readErr
 	}
-	sum := decimal.Zero
+	type key struct{ account, instrument uuid.UUID }
+	sums := map[key]*model.Balance{}
 	for _, txn := range f.byID {
-		if txn.Status != model.StatusConfirmed || txn.OccurredOn.After(day) {
+		if txn.Status != model.StatusConfirmed || txn.OccurredOn.After(filter.Day) {
 			continue
 		}
 		for _, p := range txn.Postings {
-			if p.Book == model.BookAccount && *p.AccountID == accountID && p.InstrumentID == instrumentID {
-				sum = sum.Add(p.Quantity)
+			if p.Book != model.BookAccount && p.Book != model.BookInstalment {
+				continue
+			}
+			if filter.AccountID != nil && *p.AccountID != *filter.AccountID {
+				continue
+			}
+			if filter.InstrumentID != nil && p.InstrumentID != *filter.InstrumentID {
+				continue
+			}
+			k := key{*p.AccountID, p.InstrumentID}
+			balance, found := sums[k]
+			if !found {
+				balance = &model.Balance{AccountID: k.account, InstrumentID: k.instrument}
+				sums[k] = balance
+			}
+			if p.Book == model.BookAccount {
+				balance.Quantity = balance.Quantity.Add(p.Quantity)
+			} else {
+				balance.UnbilledInstalment = balance.UnbilledInstalment.Add(p.Quantity)
 			}
 		}
 	}
-	return sum, nil
+	out := make([]model.Balance, 0, len(sums))
+	for _, balance := range sums {
+		out = append(out, *balance)
+	}
+	slices.SortFunc(out, func(a, b model.Balance) int {
+		return cmp.Or(bytes.Compare(a.AccountID[:], b.AccountID[:]), bytes.Compare(a.InstrumentID[:], b.InstrumentID[:]))
+	})
+	return out, nil
 }
 
 // PendingDrafts counts the drafts that happened on or before the day and have a
@@ -242,12 +332,21 @@ func (f *fakeTransactions) PendingDrafts(_ context.Context, accountID, instrumen
 	return pending, nil
 }
 
-func (f *fakeTransactions) Dealings(_ context.Context, partyID *uuid.UUID) ([]model.Dealing, error) {
-	f.dealingsFor = partyID
+func (f *fakeTransactions) Dealings(_ context.Context, partyID *uuid.UUID, day time.Time) ([]model.Dealing, error) {
+	f.dealingsFor, f.dealingsDay = partyID, day
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
 	return f.dealingRows, nil
+}
+
+func (f *fakeTransactions) InstalmentPlans(_ context.Context, accountID *uuid.UUID, day time.Time) ([]model.InstalmentPlanSummary, error) {
+	f.plansFor, f.plansDay = accountID, day
+	f.plansAsked++
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	return f.planRows, nil
 }
 
 // fakeAccounts is an in-memory repo.AccountRepo of which only Get and Lock are

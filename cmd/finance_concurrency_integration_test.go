@@ -123,7 +123,7 @@ func reconcileTogether(t *testing.T, keys ...string) overlapped {
 		t.Fatalf("open a pool with a tracer: %v", err)
 	}
 	t.Cleanup(traced.Close)
-	l := newLedgerAppOn(t, traced)
+	l := newLedgerAppOn(t, traced, newTestClock(day))
 
 	account, err := l.CreateAccount.CreateAccount(ctx, usecase.CreateAccountInput{Name: "cash", Kind: "cash"})
 	if err != nil {
