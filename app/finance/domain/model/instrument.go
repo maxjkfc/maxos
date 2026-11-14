@@ -28,25 +28,27 @@ const (
 type InstrumentKind string
 
 // The kinds of instrument. A kind is not the same as being a currency: USDT is
-// crypto and still a currency (see Instrument.IsCurrency).
+// crypto and still a currency (see Instrument.IsCurrency). The kind of TWD, USD
+// and JPY is fiat, named for what they are so that it is not taken for the
+// currency of CONTEXT.md, which includes USDT.
 const (
-	InstrumentKindCurrency InstrumentKind = "currency"
-	InstrumentKindCrypto   InstrumentKind = "crypto"
-	InstrumentKindStock    InstrumentKind = "stock"
-	InstrumentKindFund     InstrumentKind = "fund"
+	InstrumentKindFiat   InstrumentKind = "fiat"
+	InstrumentKindCrypto InstrumentKind = "crypto"
+	InstrumentKindStock  InstrumentKind = "stock"
+	InstrumentKindFund   InstrumentKind = "fund"
 )
 
 // Valid reports whether k is one of the kinds above.
 func (k InstrumentKind) Valid() bool {
 	switch k {
-	case InstrumentKindCurrency, InstrumentKindCrypto, InstrumentKindStock, InstrumentKindFund:
+	case InstrumentKindFiat, InstrumentKindCrypto, InstrumentKindStock, InstrumentKindFund:
 		return true
 	}
 	return false
 }
 
 // Instrument is anything that can be held in a quantity and has a price:
-// a currency, a cryptocurrency, a stock, a fund.
+// fiat money, a cryptocurrency, a stock, a fund.
 type Instrument struct {
 	ID uuid.UUID
 	// Code identifies the instrument to people: "TWD", "USDT", "BTC", "2330.TW".
@@ -94,7 +96,7 @@ func NewInstrument(p NewInstrumentParams) (Instrument, error) {
 		return Instrument{}, err
 	}
 	if !p.Kind.Valid() {
-		return Instrument{}, fmt.Errorf("%w %q: want one of currency, crypto, stock, fund", ErrInvalidInstrumentKind, p.Kind)
+		return Instrument{}, fmt.Errorf("%w %q: want one of fiat, crypto, stock, fund", ErrInvalidInstrumentKind, p.Kind)
 	}
 	if p.Decimals < MinDecimals || p.Decimals > MaxDecimals {
 		return Instrument{}, fmt.Errorf("%w: %d, want %d to %d", ErrDecimalsOutOfRange, p.Decimals, MinDecimals, MaxDecimals)

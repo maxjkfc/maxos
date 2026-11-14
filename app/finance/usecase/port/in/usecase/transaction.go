@@ -27,8 +27,6 @@ type Transaction struct {
 	// them.
 	ProjectID *uuid.UUID
 	AreaID    *uuid.UUID
-	// InboxItemID is the inbox entry it was made from, when there is one.
-	InboxItemID *uuid.UUID
 	// IdempotencyKey is the key of the request that made it.
 	IdempotencyKey string
 	TagIDs         []uuid.UUID
@@ -66,7 +64,9 @@ type Posting struct {
 }
 
 // RecordDetails are the facts every kind of transaction carries besides what
-// makes the kind: which accounts, how much, which categories.
+// makes the kind: which accounts, how much, which categories. What a use case
+// records from them is always a draft: it counts toward nothing until
+// ConfirmTransactions confirms it.
 type RecordDetails struct {
 	// IdempotencyKey makes the call safe to repeat: a key that was used before
 	// returns the transaction stored under it and writes nothing. It is trimmed of
@@ -91,13 +91,6 @@ type RecordDetails struct {
 	AreaID *uuid.UUID
 	// TagIDs must be tags that exist and are not archived.
 	TagIDs []uuid.UUID
-	// InboxItemID is the inbox entry the transaction was made from. It is stored
-	// as it is: the inbox offers no way to check it.
-	InboxItemID *uuid.UUID
-	// Confirm makes the transaction confirmed at once, so that it counts toward
-	// balances: for an import whose source is trusted. Otherwise it is a draft,
-	// which counts for nothing until it is confirmed.
-	Confirm bool
 }
 
 // RecordOutput is the result of the use cases that record a transaction.

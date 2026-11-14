@@ -21,7 +21,6 @@ func toTransaction(t model.Transaction) usecase.Transaction {
 		Merchant:       t.Merchant,
 		ProjectID:      clone(t.ProjectID),
 		AreaID:         clone(t.AreaID),
-		InboxItemID:    clone(t.InboxItemID),
 		IdempotencyKey: t.IdempotencyKey,
 		TagIDs:         slices.Clone(t.TagIDs),
 		Postings:       make([]usecase.Posting, len(t.Postings)),

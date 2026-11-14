@@ -15,8 +15,9 @@ func New(projects repo.ProjectRepo, areas repo.AreaRepo) *Service {
 
 // Module provides the use cases to the Fx graph as usecase.CreateProject,
 // RenameProject, ArchiveProject, ListProjects, GetProject, SetProjectPeriod,
-// SetProjectActivePeriod, SetProjectDefaultArea and ResolveProjectDefaults, all
-// backed by one Service. It needs a repo.ProjectRepo and a repo.AreaRepo.
+// SetProjectActivePeriod, SetProjectDefaultArea, ResolveProjectDefaults and
+// ResolveProjectArea, all backed by one Service. It needs a repo.ProjectRepo and
+// a repo.AreaRepo.
 func Module() fx.Option {
 	return fx.Provide(fx.Annotate(New,
 		fx.As(new(usecase.CreateProject)),
@@ -28,5 +29,6 @@ func Module() fx.Option {
 		fx.As(new(usecase.SetProjectActivePeriod)),
 		fx.As(new(usecase.SetProjectDefaultArea)),
 		fx.As(new(usecase.ResolveProjectDefaults)),
+		fx.As(new(usecase.ResolveProjectArea)),
 	))
 }

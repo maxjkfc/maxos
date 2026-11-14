@@ -54,7 +54,7 @@ func newCurrency(t *testing.T, code string, decimals int) model.Instrument {
 		ID:         uuid.Must(uuid.NewV7()),
 		Code:       code,
 		Name:       code,
-		Kind:       model.InstrumentKindCurrency,
+		Kind:       model.InstrumentKindFiat,
 		IsCurrency: true,
 		Decimals:   decimals,
 	})
@@ -460,14 +460,14 @@ func TestConstructorsKeepTheHeaderTidy(t *testing.T) {
 	if bytes.Compare(first[:], second[:]) > 0 {
 		first, second = second, first
 	}
-	project, area, inbox := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	project, area := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	at := time.Date(2026, 11, 14, 0, 31, 7, 0, taipei)
 
 	h := header("  " + testKey + "  ")
 	h.Description = "  午餐  "
 	h.Merchant = " 便當店\n"
 	h.OccurredAt = &at
-	h.ProjectID, h.AreaID, h.InboxItemID = &project, &area, &inbox
+	h.ProjectID, h.AreaID = &project, &area
 	h.TagIDs = []uuid.UUID{second, first, second}
 	txn, err := model.NewExpense(model.CategorizedParams{
 		Header:     h,
@@ -489,8 +489,8 @@ func TestConstructorsKeepTheHeaderTidy(t *testing.T) {
 	if txn.OccurredAt == nil || !txn.OccurredAt.Equal(at) {
 		t.Errorf("OccurredAt = %v, want %v", txn.OccurredAt, at)
 	}
-	if txn.ProjectID == nil || *txn.ProjectID != project || txn.AreaID == nil || *txn.AreaID != area || txn.InboxItemID == nil || *txn.InboxItemID != inbox {
-		t.Errorf("project %v, area %v, inbox item %v, want %s, %s, %s", txn.ProjectID, txn.AreaID, txn.InboxItemID, project, area, inbox)
+	if txn.ProjectID == nil || *txn.ProjectID != project || txn.AreaID == nil || *txn.AreaID != area {
+		t.Errorf("project %v, area %v, want %s, %s", txn.ProjectID, txn.AreaID, project, area)
 	}
 	if fmt.Sprint(txn.TagIDs) != fmt.Sprint([]uuid.UUID{first, second}) {
 		t.Errorf("tags = %v, want %v, once each and in order", txn.TagIDs, []uuid.UUID{first, second})

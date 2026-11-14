@@ -61,13 +61,13 @@ func newEnv(t *testing.T) *env {
 	}
 	e.cash = e.accounts.add("cash")
 	e.bank = e.accounts.add("bank")
-	e.twd = e.instruments.add(model.Instrument{ID: model.BaseCurrencyID, Code: "TWD", Name: "TWD", Kind: model.InstrumentKindCurrency, IsCurrency: true, Decimals: 2})
-	e.usd = e.instruments.add(model.Instrument{ID: uuid.Must(uuid.NewV7()), Code: "USD", Name: "USD", Kind: model.InstrumentKindCurrency, IsCurrency: true, Decimals: 2})
+	e.twd = e.instruments.add(model.Instrument{ID: model.BaseCurrencyID, Code: "TWD", Name: "TWD", Kind: model.InstrumentKindFiat, IsCurrency: true, Decimals: 2})
+	e.usd = e.instruments.add(model.Instrument{ID: uuid.Must(uuid.NewV7()), Code: "USD", Name: "USD", Kind: model.InstrumentKindFiat, IsCurrency: true, Decimals: 2})
 	e.btc = e.instruments.add(model.Instrument{ID: uuid.Must(uuid.NewV7()), Code: "BTC", Name: "BTC", Kind: model.InstrumentKindCrypto, Decimals: 8})
 	e.food = e.categories.add(model.DirectionExpense, "food")
 	e.household = e.categories.add(model.DirectionExpense, "household")
 	e.salary = e.categories.add(model.DirectionIncome, "salary")
-	e.svc = ledger.New(e.tx, e.txns, e.accounts, e.instruments, e.categories, e.refs, e.projects, e.refs, e.refs)
+	e.svc = ledger.New(e.tx, e.txns, e.accounts, e.instruments, e.categories, e.refs, e.projects, e.refs)
 	return e
 }
 
@@ -127,17 +127,27 @@ func (e *env) lunch(key string) usecase.RecordExpenseInput {
 	}
 }
 
-// recordLunch records a lunch, a draft or a confirmed transaction, and fails the
-// test when that is refused.
-func (e *env) recordLunch(key string, confirm bool) usecase.Transaction {
+// recordLunch records a lunch, which is a draft, and fails the test when that is
+// refused.
+func (e *env) recordLunch(key string) usecase.Transaction {
 	e.t.Helper()
-	in := e.lunch(key)
-	in.Confirm = confirm
-	out, err := e.svc.RecordExpense(context.Background(), in)
+	out, err := e.svc.RecordExpense(context.Background(), e.lunch(key))
 	if err != nil {
 		e.t.Fatalf("RecordExpense(%q): %v", key, err)
 	}
 	return out.Transaction
+}
+
+// confirmedLunch records a lunch and confirms it, the one way there is for a
+// transaction to become confirmed, and fails the test when either is refused.
+func (e *env) confirmedLunch(key string) usecase.Transaction {
+	e.t.Helper()
+	draft := e.recordLunch(key)
+	out, err := e.svc.ConfirmTransactions(context.Background(), usecase.ConfirmTransactionsInput{IDs: []uuid.UUID{draft.ID}})
+	if err != nil {
+		e.t.Fatalf("ConfirmTransactions(%q): %v", key, err)
+	}
+	return out.Transactions[0]
 }
 
 func TestRecordExpenseRecordsADraftInOneDatabaseTransaction(t *testing.T) {
@@ -163,24 +173,6 @@ func TestRecordExpenseRecordsADraftInOneDatabaseTransaction(t *testing.T) {
 	}
 	if stored := e.txns.byID[got.ID]; stored.Status != model.StatusDraft || len(stored.Postings) != 2 {
 		t.Errorf("stored = %+v, want the draft with its postings", stored)
-	}
-}
-
-func TestRecordWithConfirmConfirmsAtOnce(t *testing.T) {
-	e := newEnv(t)
-	in := e.lunch("lunch-20261114")
-	in.Confirm = true
-
-	out, err := e.svc.RecordExpense(context.Background(), in)
-	if err != nil {
-		t.Fatalf("RecordExpense: %v", err)
-	}
-
-	if out.Transaction.Status != "confirmed" || out.Transaction.ConfirmedAt == nil {
-		t.Fatalf("transaction = %+v, want it confirmed, with its confirmed time", out.Transaction)
-	}
-	if e.txns.inserts != 1 || len(e.txns.statusSet) != 0 {
-		t.Errorf("%d inserts and %d status changes, want it stored confirmed in one insert", e.txns.inserts, len(e.txns.statusSet))
 	}
 }
 
@@ -380,7 +372,7 @@ func TestRecordRefusesABadKeyBeforeItTouchesAnything(t *testing.T) {
 
 func TestRecordWithAKeyUsedBeforeReturnsTheTransactionRecordedThen(t *testing.T) {
 	e := newEnv(t)
-	first := e.recordLunch("lunch-20261114", false)
+	first := e.recordLunch("lunch-20261114")
 
 	// Whatever the second request says, it is the first one that stands. It is not
 	// even checked: the account is archived by now, and that does not matter to a
@@ -388,7 +380,6 @@ func TestRecordWithAKeyUsedBeforeReturnsTheTransactionRecordedThen(t *testing.T)
 	e.accounts.archive(e.cash.ID)
 	again := e.lunch("lunch-20261114")
 	again.Lines[0].Amount = dec("999")
-	again.Confirm = true
 	out, err := e.svc.RecordExpense(context.Background(), again)
 	if err != nil {
 		t.Fatalf("RecordExpense with the key again: %v", err)
@@ -405,7 +396,7 @@ func TestRecordWithAKeyUsedBeforeReturnsTheTransactionRecordedThen(t *testing.T)
 
 func TestRecordTreatsTheKeyAsOneKeyForEveryKind(t *testing.T) {
 	e := newEnv(t)
-	expense := e.recordLunch("shared-key-0001", false)
+	expense := e.recordLunch("shared-key-0001")
 
 	out, err := e.svc.SetOpeningBalance(context.Background(), usecase.SetOpeningBalanceInput{
 		RecordDetails: e.details("shared-key-0001"), AccountID: e.cash.ID, InstrumentID: e.twd.ID, Amount: dec("1000"),
@@ -649,7 +640,7 @@ func TestRecordLeavesTheAreaOpenWhenTheDefaultAreaOfTheNamedProjectIsArchived(t 
 func TestRecordFailsWhenTheCatalogCannotGiveTheDefaultAreaOfTheNamedProject(t *testing.T) {
 	e := newEnv(t)
 	boom := errors.New("catalog is down")
-	e.refs.getErr = boom
+	e.refs.resolveAreaErr = boom
 	named := e.refs.addProject(false)
 	in := e.lunch("lunch-20261114")
 	in.ProjectID = &named
@@ -729,13 +720,11 @@ func TestRecordStoresTheTagsOnceAndInOrder(t *testing.T) {
 
 func TestRecordPassesWhatTheCallerKnowsAboutTheTransactionOn(t *testing.T) {
 	e := newEnv(t)
-	inbox := uuid.Must(uuid.NewV7())
 	at := time.Date(2026, 11, 14, 12, 30, 0, 0, time.UTC)
 	in := e.lunch("lunch-20261114")
 	in.Description = " 午餐 "
 	in.Merchant = " 便當店 "
 	in.OccurredAt = &at
-	in.InboxItemID = &inbox
 
 	out, err := e.svc.RecordExpense(context.Background(), in)
 	if err != nil {
@@ -743,9 +732,8 @@ func TestRecordPassesWhatTheCallerKnowsAboutTheTransactionOn(t *testing.T) {
 	}
 
 	got := out.Transaction
-	if got.Description != "午餐" || got.Merchant != "便當店" || got.OccurredAt == nil || !got.OccurredAt.Equal(at) ||
-		got.InboxItemID == nil || *got.InboxItemID != inbox {
-		t.Fatalf("transaction = %+v, want the trimmed texts, the moment and the inbox entry", got)
+	if got.Description != "午餐" || got.Merchant != "便當店" || got.OccurredAt == nil || !got.OccurredAt.Equal(at) {
+		t.Fatalf("transaction = %+v, want the trimmed texts and the moment", got)
 	}
 }
 

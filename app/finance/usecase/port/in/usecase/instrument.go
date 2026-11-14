@@ -25,7 +25,7 @@ type Instrument struct {
 	// Code is upper case, e.g. "TWD", "USDT", "2330.TW".
 	Code string
 	Name string
-	// Kind is "currency", "crypto", "stock" or "fund".
+	// Kind is "fiat", "crypto", "stock" or "fund".
 	Kind string
 	// IsCurrency is whether the instrument is used to price and to pay; it does
 	// not follow from Kind.
@@ -50,7 +50,7 @@ type CreateInstrumentInput struct {
 	Code string
 	// Name is trimmed of the whitespace around it and must not be empty.
 	Name string
-	// Kind is "currency", "crypto", "stock" or "fund".
+	// Kind is "fiat", "crypto", "stock" or "fund".
 	Kind string
 	// IsCurrency is independent of Kind: USDT is crypto and a currency.
 	IsCurrency bool

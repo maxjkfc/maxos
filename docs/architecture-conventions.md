@@ -57,7 +57,7 @@ docs/
 | `domain/model` | 資料結構、不變條件、狀態轉換 | 不能 import 標準函式庫、`uuid`、decimal 以外的套件 |
 | `domain/service` | 需要多個 entity 才能判斷的規則 | 同上 |
 | `usecase/<name>` | 流程編排、交易邊界、呼叫 port | 不能 import adapter、`pgx`、MCP SDK |
-| `usecase/port` | 介面與輸入輸出型別 | 不能有實作 |
+| `usecase/port` | 介面、輸入輸出型別與錯誤型別（錯誤型別可以帶自己的 `Error()` 方法） | 不能有其他實作 |
 | `adapter/in` | 把外部請求轉成 use case 的 Input | 不能含業務規則；只做格式轉換與錯誤對應 |
 | `adapter/out` | port 的實作 | 產生的 DB 型別不能傳出 adapter |
 | `pkg` | 技術元件 | 不能 import `app/` |
@@ -113,9 +113,9 @@ adapter  →  usecase  →  domain
   - 版本固定，透過 `make sqlc` 執行。
   - `make check` 會重新產生並要求無差異。
 - **手寫 SQL 的例外**：有可選篩選條件的動態查詢，可以在同一個 adapter 裡手寫，集中在 `queries.go`。
-- **交易邊界**由 use case 決定，repo 不自行開交易。
+- **交易邊界**由 use case 決定，repo 不自行開交易。唯一的例外是需要用同一份快照讀好幾條語句的唯讀 repo 方法，它可以用 `DB.WithinSnapshot` 開唯讀的 `REPEATABLE READ` 交易（目前只有 finance 的 `TransactionRepo.List`）；寫入一律由 use case 決定。
   - `pkg/postgres` 的 `DB` 是 repo 執行 SQL 的入口（`dbgen.New(postgres.NewDB(pool))`）：語句會自動加入 context 帶著的交易，沒有交易就直接走連線池，所以 repo 不需要知道交易的存在。
-  - `DB.WithinTx(ctx, fn)` 開啟交易，並把交易放進傳給 `fn` 的 context；`fn` 回傳 `nil` 才提交，回傳錯誤或 panic 就回滾；`fn` 內再呼叫 `WithinTx` 會用 savepoint。
+  - `DB.WithinTx(ctx, fn)` 開啟交易，並把交易放進傳給 `fn` 的 context；`fn` 回傳 `nil` 才提交，回傳錯誤或 panic 就回滾；`fn` 內再呼叫 `WithinTx` 會用 savepoint，內層回傳錯誤時（含 context 在提交前已結束，以及 `fn` 忽略失敗的語句後回傳 `nil`），內層的寫入一律還原，外層交易仍可繼續使用。
   - use case 不能 import `pkg/`：需要交易的 use case 在自己 context 的 `usecase/port/out/` 宣告只有 `WithinTx(ctx context.Context, fn func(ctx context.Context) error) error` 的介面（finance 的是 `usecase/port/out/tx` 的 `Transactor`），由 `cmd/` 把 `*postgres.DB` 注入。
   - 一筆資料分多條語句寫入、且資料庫有延遲到提交才檢查的約束時（例如 finance 的分錄平衡檢查），該 repo 方法必須在資料庫交易內呼叫；repo 的 port 要寫明這點。
 

@@ -37,19 +37,21 @@ type TransactionFilter struct {
 // TransactionRepo stores transactions with their postings and tags, and works out
 // balances from them.
 //
-// A repo does not open a database transaction, so the use case decides what is
-// written together. Two things need one: Insert, which writes a transaction in
-// several statements and relies on the database to check, when its transaction
-// commits, that the postings add up to zero; and GetForUpdate, whose lock lasts
-// until its transaction ends.
+// A repo does not open a database transaction to write in, so the use case
+// decides what is written together. Two things need one: Insert, which writes a
+// transaction in several statements and relies on the database to check, when
+// its transaction commits, that the postings add up to zero; and GetForUpdate,
+// whose lock lasts until its transaction ends. The only transaction a repo opens
+// is the read-only snapshot of List.
 type TransactionRepo interface {
-	// Insert stores the transaction with its postings and tags, and returns it as
-	// stored, including the fields the store assigns (CreatedAt, and ConfirmedAt for
-	// a transaction that is confirmed from the start). It writes nothing and
-	// returns ErrDuplicateKey when the idempotency key is already stored. When a
-	// concurrent call has stored the key but not yet committed, Insert waits for it
-	// to finish, so ErrDuplicateKey means that call committed: GetByIdempotencyKey,
-	// called in the same database transaction, returns its transaction.
+	// Insert stores the transaction, a draft, with its postings and tags, and
+	// returns it as stored, including the fields the store assigns (CreatedAt). A
+	// transaction of another status is refused: it is confirmed with SetStatus
+	// once stored. Insert writes nothing and returns ErrDuplicateKey when the
+	// idempotency key is already stored. When a concurrent call has stored the key
+	// but not yet committed, Insert waits for it to finish, so ErrDuplicateKey
+	// means that call committed: GetByIdempotencyKey, called in the same database
+	// transaction, returns its transaction.
 	Insert(ctx context.Context, txn model.Transaction) (model.Transaction, error)
 	// Get returns the transaction, whatever its status, or model.ErrNotFound.
 	Get(ctx context.Context, id uuid.UUID) (model.Transaction, error)
@@ -70,7 +72,12 @@ type TransactionRepo interface {
 	Delete(ctx context.Context, id uuid.UUID) error
 	// List returns the transactions that match the filter, newest first (by the
 	// day they happened on, then the latest made first), with their postings and
-	// tags.
+	// tags: at most Limit of them, from Offset. It reads all of it in one
+	// snapshot, so that what it returns is what the filter matched at one moment,
+	// each transaction as it was then: one that is deleted or changed while List
+	// runs does not make the page short, and is not in it with a status the
+	// filter does not allow. Inside a database transaction, the isolation of that
+	// transaction decides what List sees.
 	List(ctx context.Context, filter TransactionFilter) ([]model.Transaction, error)
 	// Balances returns what each account holds of each instrument, from the
 	// postings of the confirmed transactions only, by account name and then

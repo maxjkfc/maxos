@@ -72,9 +72,7 @@ type FinTransaction struct {
 	Merchant       string
 	ProjectID      uuid.NullUUID
 	AreaID         uuid.NullUUID
-	InboxItemID    uuid.NullUUID
 	IdempotencyKey string
-	IsTrial        bool
 	CreatedAt      time.Time
 	ConfirmedAt    *time.Time
 	VoidedAt       *time.Time

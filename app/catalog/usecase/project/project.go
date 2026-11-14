@@ -1,6 +1,6 @@
 // Package project implements the project use cases: create, rename, archive,
 // list and get, setting the periods and the default area, and finding the
-// project of a day.
+// project of a day and the area of a project.
 package project
 
 import (
@@ -18,7 +18,7 @@ import (
 
 // Service implements usecase.CreateProject, RenameProject, ArchiveProject,
 // ListProjects, GetProject, SetProjectPeriod, SetProjectActivePeriod,
-// SetProjectDefaultArea and ResolveProjectDefaults.
+// SetProjectDefaultArea, ResolveProjectDefaults and ResolveProjectArea.
 type Service struct {
 	projects repo.ProjectRepo
 	areas    repo.AreaRepo
@@ -34,6 +34,7 @@ var (
 	_ usecase.SetProjectActivePeriod = (*Service)(nil)
 	_ usecase.SetProjectDefaultArea  = (*Service)(nil)
 	_ usecase.ResolveProjectDefaults = (*Service)(nil)
+	_ usecase.ResolveProjectArea     = (*Service)(nil)
 )
 
 // CreateProject validates everything the project is given and stores it. The
@@ -181,9 +182,9 @@ func (s *Service) SetProjectDefaultArea(ctx context.Context, in usecase.SetProje
 
 // ResolveProjectDefaults finds the one project in use whose active period
 // includes the day. The default area comes along only when it can still be
-// used: an area archived after it was made the default is left out, so that a
-// caller that takes the answer as it is does not stumble on an archived area it
-// never chose.
+// used (see ResolveProjectArea): an area archived after it was made the default
+// is left out, so that a caller that takes the answer as it is does not stumble
+// on an archived area it never chose.
 func (s *Service) ResolveProjectDefaults(ctx context.Context, in usecase.ResolveProjectDefaultsInput) (usecase.ResolveProjectDefaultsOutput, error) {
 	day := model.DateOf(in.Date)
 	projects, err := s.projects.ListActiveOn(ctx, day)
@@ -201,20 +202,59 @@ func (s *Service) ResolveProjectDefaults(ctx context.Context, in usecase.Resolve
 		return usecase.ResolveProjectDefaultsOutput{}, ambiguous
 	}
 
+	area, err := s.usableDefaultArea(ctx, projects[0])
+	if err != nil {
+		return usecase.ResolveProjectDefaultsOutput{}, err
+	}
 	project := toProject(projects[0])
-	out := usecase.ResolveProjectDefaultsOutput{Project: &project}
+	return usecase.ResolveProjectDefaultsOutput{Project: &project, DefaultArea: area}, nil
+}
+
+// ResolveProjectArea returns the default area of a project that is in use, nil
+// when it has none or the area can no longer be used. A project that does not
+// exist or is archived is a *ReferenceError, the way VerifyReferences reports
+// it.
+func (s *Service) ResolveProjectArea(ctx context.Context, projectID uuid.UUID) (*usecase.Area, error) {
+	project, err := s.projects.Get(ctx, projectID)
+	switch {
+	case errors.Is(err, model.ErrNotFound):
+		return nil, projectReferenceError(projectID, false)
+	case err != nil:
+		return nil, fmt.Errorf("get project %s: %w", projectID, err)
+	case project.IsArchived():
+		return nil, projectReferenceError(projectID, true)
+	}
+	return s.usableDefaultArea(ctx, project)
+}
+
+// usableDefaultArea is the one rule of which default area a project brings to
+// its transactions: the area it has, unless it has none or the area has been
+// archived since, since a transaction cannot go to an archived area. It returns
+// nil in those cases, and for an area that is gone, which the foreign key keeps
+// from happening.
+func (s *Service) usableDefaultArea(ctx context.Context, project model.Project) (*usecase.Area, error) {
 	if project.DefaultAreaID == nil {
-		return out, nil
+		return nil, nil
 	}
 	area, err := s.areas.Get(ctx, *project.DefaultAreaID)
 	switch {
-	case err != nil && !errors.Is(err, model.ErrNotFound):
-		return usecase.ResolveProjectDefaultsOutput{}, fmt.Errorf("get default area %s of project %s: %w", *project.DefaultAreaID, project.ID, err)
-	case err == nil && !area.IsArchived():
-		a := toArea(area)
-		out.DefaultArea = &a
+	case errors.Is(err, model.ErrNotFound):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("get default area %s of project %s: %w", *project.DefaultAreaID, project.ID, err)
+	case area.IsArchived():
+		return nil, nil
 	}
-	return out, nil
+	usable := toArea(area)
+	return &usable, nil
+}
+
+// projectReferenceError is the error VerifyReferences would return for the one
+// project: archived, or not found.
+func projectReferenceError(id uuid.UUID, archived bool) error {
+	return &usecase.ReferenceError{Problems: []usecase.ReferenceProblem{
+		{Kind: usecase.ReferenceProject, ID: id, Archived: archived},
+	}}
 }
 
 // requireUsableArea returns an error unless the area exists and is not
@@ -230,7 +270,9 @@ func (s *Service) requireUsableArea(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// toPeriod validates a period from outside; nil stays nil.
+// toPeriod validates a period from outside; nil stays nil. A period with an end
+// missing is the domain's to refuse, so that an empty date never reaches the
+// store as the first day of the year 1.
 func toPeriod(p *usecase.Period) (*model.Period, error) {
 	if p == nil {
 		return nil, nil

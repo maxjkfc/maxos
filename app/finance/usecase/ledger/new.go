@@ -21,8 +21,7 @@ func New(
 	categories repo.CategoryRepo,
 	references catalogusecase.VerifyReferences,
 	defaults catalogusecase.ResolveProjectDefaults,
-	projects catalogusecase.GetProject,
-	areas catalogusecase.GetArea,
+	projectAreas catalogusecase.ResolveProjectArea,
 ) *Service {
 	return &Service{
 		tx:           transactor,
@@ -32,8 +31,7 @@ func New(
 		categories:   categories,
 		references:   references,
 		defaults:     defaults,
-		projects:     projects,
-		areas:        areas,
+		projectAreas: projectAreas,
 	}
 }
 
@@ -43,8 +41,8 @@ func New(
 // ListTransactions and GetBalances, all backed by one Service. It needs a
 // tx.Transactor, a repo.TransactionRepo, a repo.AccountRepo, a
 // repo.InstrumentRepo, a repo.CategoryRepo, and the catalog's
-// usecase.VerifyReferences, usecase.ResolveProjectDefaults, usecase.GetProject
-// and usecase.GetArea.
+// usecase.VerifyReferences, usecase.ResolveProjectDefaults and
+// usecase.ResolveProjectArea.
 func Module() fx.Option {
 	return fx.Provide(fx.Annotate(New,
 		fx.As(new(usecase.RecordExpense)),

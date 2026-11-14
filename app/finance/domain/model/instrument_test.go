@@ -74,13 +74,15 @@ func TestNewInstrumentRejectsABlankName(t *testing.T) {
 
 func TestNewInstrumentOnlyTakesTheFixedKinds(t *testing.T) {
 	for _, kind := range []model.InstrumentKind{
-		model.InstrumentKindCurrency, model.InstrumentKindCrypto, model.InstrumentKindStock, model.InstrumentKindFund,
+		model.InstrumentKindFiat, model.InstrumentKindCrypto, model.InstrumentKindStock, model.InstrumentKindFund,
 	} {
 		if _, err := newInstrument(kind, false, 2); err != nil {
 			t.Errorf("kind %q rejected: %v", kind, err)
 		}
 	}
-	for _, kind := range []model.InstrumentKind{"", "bond", "Currency", "crypto "} {
+	// "currency" was the name of the fiat kind. It is no kind now: being a
+	// currency is what an instrument is used for (IsCurrency), whatever its kind.
+	for _, kind := range []model.InstrumentKind{"", "bond", "Fiat", "crypto ", "currency"} {
 		if _, err := newInstrument(kind, false, 2); !errors.Is(err, model.ErrInvalidInstrumentKind) {
 			t.Errorf("kind %q: err = %v, want ErrInvalidInstrumentKind", kind, err)
 		}
@@ -102,7 +104,7 @@ func TestNewInstrumentDecimalsAreFromZeroToEighteen(t *testing.T) {
 
 func TestBeingACurrencyIsIndependentOfTheKind(t *testing.T) {
 	for _, kind := range []model.InstrumentKind{
-		model.InstrumentKindCurrency, model.InstrumentKindCrypto, model.InstrumentKindStock, model.InstrumentKindFund,
+		model.InstrumentKindFiat, model.InstrumentKindCrypto, model.InstrumentKindStock, model.InstrumentKindFund,
 	} {
 		for _, isCurrency := range []bool{true, false} {
 			got, err := newInstrument(kind, isCurrency, 2)

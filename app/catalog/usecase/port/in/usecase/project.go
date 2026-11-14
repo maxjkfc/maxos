@@ -9,7 +9,9 @@ import (
 
 // Period is a run of calendar days, both ends included. Only the day each time
 // falls on counts, as that time's own location reads it; the time of day is
-// ignored.
+// ignored. Both ends are required: a Period with a zero From or To is refused
+// (ErrPeriodIncomplete), not read as the first day of the year 1. A period that
+// is not set is a nil *Period.
 type Period struct {
 	From, To time.Time
 }
@@ -136,7 +138,8 @@ type SetProjectDefaultAreaInput struct {
 
 // ResolveProjectDefaults finds the project a transaction dated on a given day
 // belongs to when it names none, and the area that goes with it: the project
-// whose active period covers the day, and its default area.
+// whose active period covers the day, and its default area, as
+// ResolveProjectArea finds it.
 //
 // Archived projects do not count. When more than one project is active on the
 // day it returns an *AmbiguousProjectsError and the caller decides, usually by
@@ -158,6 +161,19 @@ type ResolveProjectDefaultsOutput struct {
 	Project *Project
 	// DefaultArea is the default area of Project. It is nil when there is no
 	// Project, when the project has no default area, and when the area has been
-	// archived since: a transaction cannot go to an archived area.
+	// archived since: a transaction cannot go to an archived area (see
+	// ResolveProjectArea).
 	DefaultArea *Area
+}
+
+// ResolveProjectArea finds the area the transactions of a project go to unless
+// they say otherwise: the default area of the project, as long as it can still
+// be used.
+//
+// It returns a nil area, and no error, when the project has no default area and
+// when the area has been archived since: a transaction cannot go to an archived
+// area, and the caller can still name another. It returns a *ReferenceError for
+// a project that does not exist or is archived, as VerifyReferences does.
+type ResolveProjectArea interface {
+	ResolveProjectArea(ctx context.Context, projectID uuid.UUID) (*Area, error)
 }

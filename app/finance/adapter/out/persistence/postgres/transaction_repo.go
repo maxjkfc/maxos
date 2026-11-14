@@ -42,6 +42,10 @@ func NewTransactionRepo(pool *pgxpool.Pool) *TransactionRepo {
 // balance; it fails the commit of a transaction whose postings do not add up to
 // zero in each instrument.
 //
+// A new transaction is a draft: it has no confirmed time to store, and the
+// table refuses a row with any other status (fin_transaction_status_times_check).
+// Confirming goes through SetStatus.
+//
 // The insert of the row is INSERT ... ON CONFLICT DO NOTHING: it returns no row
 // (pgx.ErrNoRows) when the idempotency key is stored, and then nothing else is
 // written. When a concurrent database transaction holds the key without having
@@ -58,7 +62,6 @@ func (r *TransactionRepo) Insert(ctx context.Context, txn model.Transaction) (mo
 		Merchant:       txn.Merchant,
 		ProjectID:      nullUUID(txn.ProjectID),
 		AreaID:         nullUUID(txn.AreaID),
-		InboxItemID:    nullUUID(txn.InboxItemID),
 		IdempotencyKey: txn.IdempotencyKey,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -156,49 +159,56 @@ func (r *TransactionRepo) Delete(ctx context.Context, id uuid.UUID) error {
 // List returns the transactions that match the filter, newest first. The order
 // and the paging are decided by the statement of listIDs; the rows themselves,
 // and their postings and tags, are then read by the generated queries.
+//
+// It reads all of it in one snapshot (see WithinSnapshot in pkg/postgres), so
+// the rows are those of the ids, as the filter matched them: a transaction
+// deleted or changed meanwhile is neither missing from the page nor in it with a
+// status the filter does not allow. There are as many rows as ids, which is what
+// lets the use case tell from the number it gets whether another page follows.
 func (r *TransactionRepo) List(ctx context.Context, filter repo.TransactionFilter) ([]model.Transaction, error) {
-	ids, err := r.listIDs(ctx, filter)
-	if err != nil {
-		return nil, fmt.Errorf("list transaction ids: %w", err)
-	}
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	rows, err := r.q.GetTransactionsByIDs(ctx, ids)
-	if err != nil {
-		return nil, fmt.Errorf("get transactions: %w", err)
-	}
-
-	byID := make(map[uuid.UUID]dbgen.FinTransaction, len(rows))
-	for _, row := range rows {
-		byID[row.ID] = row
-	}
-	// A transaction deleted between the two statements is no longer there to list.
-	ordered := make([]dbgen.FinTransaction, 0, len(ids))
-	for _, id := range ids {
-		if row, ok := byID[id]; ok {
-			ordered = append(ordered, row)
+	var txns []model.Transaction
+	err := r.db.WithinSnapshot(ctx, func(ctx context.Context) error {
+		ids, err := r.listIDs(ctx, filter)
+		if err != nil {
+			return fmt.Errorf("list transaction ids: %w", err)
 		}
+		if len(ids) == 0 {
+			return nil
+		}
+		rows, err := r.q.GetTransactionsByIDs(ctx, ids)
+		if err != nil {
+			return fmt.Errorf("get transactions: %w", err)
+		}
+
+		byID := make(map[uuid.UUID]dbgen.FinTransaction, len(rows))
+		for _, row := range rows {
+			byID[row.ID] = row
+		}
+		ordered := make([]dbgen.FinTransaction, len(ids))
+		for i, id := range ids {
+			row, ok := byID[id]
+			if !ok {
+				// Impossible in one snapshot. It is what a list read outside one,
+				// in a transaction that is not REPEATABLE READ, can come to, and
+				// a page that quietly lacks a transaction is wrong.
+				return fmt.Errorf("transaction %s was listed and is gone: the list was not read in one snapshot", id)
+			}
+			ordered[i] = row
+		}
+		txns, err = r.load(ctx, ordered)
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	return r.load(ctx, ordered)
+	return txns, nil
 }
 
 // Balances adds up the quantities of the postings to accounts, of the confirmed
-// transactions only, for each account and instrument.
+// transactions only, for each account and instrument; for one account when
+// accountID is set.
 func (r *TransactionRepo) Balances(ctx context.Context, accountID *uuid.UUID) ([]model.Balance, error) {
-	if accountID == nil {
-		rows, err := r.q.ListBalances(ctx)
-		if err != nil {
-			return nil, err
-		}
-		balances := make([]model.Balance, len(rows))
-		for i, row := range rows {
-			balances[i] = model.Balance{AccountID: row.AccountID, InstrumentID: row.InstrumentID, Quantity: row.Quantity}
-		}
-		return balances, nil
-	}
-
-	rows, err := r.q.ListAccountBalances(ctx, nullUUID(accountID))
+	rows, err := r.q.ListBalances(ctx, nullUUID(accountID))
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +265,7 @@ func (r *TransactionRepo) load(ctx context.Context, rows []dbgen.FinTransaction)
 }
 
 // toTransaction maps a row to the transaction it holds, without its postings and
-// tags. The column is_trial is not read: nothing in the model uses it.
+// tags.
 func toTransaction(row dbgen.FinTransaction) model.Transaction {
 	return model.Transaction{
 		ID:             row.ID,
@@ -267,7 +277,6 @@ func toTransaction(row dbgen.FinTransaction) model.Transaction {
 		Merchant:       row.Merchant,
 		ProjectID:      optionalUUID(row.ProjectID),
 		AreaID:         optionalUUID(row.AreaID),
-		InboxItemID:    optionalUUID(row.InboxItemID),
 		IdempotencyKey: row.IdempotencyKey,
 		CreatedAt:      row.CreatedAt,
 		ConfirmedAt:    row.ConfirmedAt,

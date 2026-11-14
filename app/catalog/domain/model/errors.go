@@ -7,6 +7,10 @@ var (
 	// around it is trimmed.
 	ErrNameEmpty = errors.New("name is empty")
 
+	// ErrPeriodIncomplete is returned when a period lacks its start or its end:
+	// a period has both, and one that is not set is no period at all.
+	ErrPeriodIncomplete = errors.New("period needs both a start and an end")
+
 	// ErrPeriodReversed is returned when a period ends before it starts.
 	ErrPeriodReversed = errors.New("period ends before it starts")
 

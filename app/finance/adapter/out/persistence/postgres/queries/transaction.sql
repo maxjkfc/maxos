@@ -1,17 +1,17 @@
 -- name: InsertTransaction :one
 -- Returns no row (pgx.ErrNoRows) when the idempotency key is already stored: the
 -- statement waits for a concurrent transaction that holds the key to finish, and
--- when that one commits it does nothing. confirmed_at is the time of the insert for
--- a transaction that is confirmed from the start. The postings follow in the same
--- database transaction: the deferred balance trigger checks them at its commit.
+-- when that one commits it does nothing. A transaction is inserted as a draft,
+-- which has no confirmed time; the table's CHECK constraints refuse any other
+-- status. The postings follow in the same database transaction: the deferred
+-- balance trigger checks them at its commit.
 INSERT INTO fin_transaction (
     id, kind, status, occurred_on, occurred_at, description, merchant,
-    project_id, area_id, inbox_item_id, idempotency_key, confirmed_at
+    project_id, area_id, idempotency_key
 )
 VALUES (
     @id, @kind, @status, @occurred_on, @occurred_at, @description, @merchant,
-    @project_id, @area_id, @inbox_item_id, @idempotency_key,
-    CASE WHEN @status::text = 'confirmed' THEN now() END
+    @project_id, @area_id, @idempotency_key
 )
 ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING *;
@@ -64,23 +64,14 @@ DELETE FROM fin_transaction WHERE id = $1;
 
 -- name: ListBalances :many
 -- What each account holds of each instrument: the quantities of its postings
--- added up, counting only the confirmed transactions. Nothing is stored.
+-- added up, counting only the confirmed transactions. Nothing is stored. With an
+-- account_id it is the balances of that account only.
 SELECT a.id AS account_id, i.id AS instrument_id, sum(p.quantity)::numeric AS quantity
 FROM fin_posting p
 JOIN fin_transaction t ON t.id = p.transaction_id
 JOIN fin_account a ON a.id = p.account_id
 JOIN fin_instrument i ON i.id = p.instrument_id
 WHERE t.status = 'confirmed' AND p.book = 'account'
+  AND (sqlc.narg('account_id')::uuid IS NULL OR p.account_id = sqlc.narg('account_id'))
 GROUP BY a.id, a.name, i.id, i.code
 ORDER BY a.name, a.id, i.code, i.id;
-
--- name: ListAccountBalances :many
--- ListBalances for one account.
-SELECT a.id AS account_id, i.id AS instrument_id, sum(p.quantity)::numeric AS quantity
-FROM fin_posting p
-JOIN fin_transaction t ON t.id = p.transaction_id
-JOIN fin_account a ON a.id = p.account_id
-JOIN fin_instrument i ON i.id = p.instrument_id
-WHERE t.status = 'confirmed' AND p.book = 'account' AND p.account_id = @account_id
-GROUP BY a.id, i.id, i.code
-ORDER BY i.code, i.id;

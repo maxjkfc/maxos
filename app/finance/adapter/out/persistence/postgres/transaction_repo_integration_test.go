@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
@@ -58,7 +60,7 @@ func newLedgerEnv(t *testing.T) *ledgerEnv {
 		t.Fatalf("Get the base currency: %v", err)
 	}
 	usd, err := model.NewInstrument(model.NewInstrumentParams{
-		ID: uuid.Must(uuid.NewV7()), Code: "USD", Name: "US dollar", Kind: model.InstrumentKindCurrency, IsCurrency: true, Decimals: 2,
+		ID: uuid.Must(uuid.NewV7()), Code: "USD", Name: "US dollar", Kind: model.InstrumentKindFiat, IsCurrency: true, Decimals: 2,
 	})
 	if err != nil {
 		t.Fatalf("NewInstrument: %v", err)
@@ -93,21 +95,9 @@ func (e *ledgerEnv) header(key string, day time.Time) model.Header {
 	return model.Header{ID: uuid.Must(uuid.NewV7()), IdempotencyKey: key, OccurredOn: day}
 }
 
-// confirmedIf confirms the transaction when confirmed is set.
-func (e *ledgerEnv) confirmedIf(txn model.Transaction, confirmed bool) model.Transaction {
-	e.t.Helper()
-	if !confirmed {
-		return txn
-	}
-	txn, err := txn.Confirm()
-	if err != nil {
-		e.t.Fatalf("Confirm: %v", err)
-	}
-	return txn
-}
-
-// expenseOf makes an expense of the amount of TWD, paid from cash on the day.
-func (e *ledgerEnv) expenseOf(h model.Header, amount string, confirmed bool) model.Transaction {
+// expenseOf makes the draft of an expense of the amount of TWD, paid from cash,
+// with the header.
+func (e *ledgerEnv) expenseOf(h model.Header, amount string) model.Transaction {
 	e.t.Helper()
 	txn, err := model.NewExpense(model.CategorizedParams{
 		Header:       h,
@@ -119,16 +109,16 @@ func (e *ledgerEnv) expenseOf(h model.Header, amount string, confirmed bool) mod
 	if err != nil {
 		e.t.Fatalf("NewExpense: %v", err)
 	}
-	return e.confirmedIf(txn, confirmed)
+	return txn
 }
 
-func (e *ledgerEnv) expense(key, amount string, confirmed bool) model.Transaction {
+func (e *ledgerEnv) expense(key, amount string) model.Transaction {
 	e.t.Helper()
-	return e.expenseOf(e.header(key, ledgerDay), amount, confirmed)
+	return e.expenseOf(e.header(key, ledgerDay), amount)
 }
 
-// opening makes the opening balance of an account in TWD.
-func (e *ledgerEnv) opening(key string, account model.Account, amount string, confirmed bool) model.Transaction {
+// opening makes the draft of the opening balance of an account in TWD.
+func (e *ledgerEnv) opening(key string, account model.Account, amount string) model.Transaction {
 	e.t.Helper()
 	txn, err := model.NewOpeningBalance(model.OpeningBalanceParams{
 		Header: e.header(key, ledgerDay), Account: account, Instrument: e.twd, Amount: dec(amount),
@@ -136,7 +126,15 @@ func (e *ledgerEnv) opening(key string, account model.Account, amount string, co
 	if err != nil {
 		e.t.Fatalf("NewOpeningBalance: %v", err)
 	}
-	return e.confirmedIf(txn, confirmed)
+	return txn
+}
+
+// storeConfirmed stores the draft and confirms it with SetStatus, which is how a
+// transaction gets confirmed: Insert stores drafts only. It returns it confirmed.
+func (e *ledgerEnv) storeConfirmed(txn model.Transaction) model.Transaction {
+	e.t.Helper()
+	stored := e.store(txn)
+	return e.setStatus(stored.ID, model.StatusConfirmed)
 }
 
 // inTx runs fn in a database transaction, the way a use case does.
@@ -234,7 +232,7 @@ func (e *ledgerEnv) wantSame(name string, got, want model.Transaction) {
 	if got.ID != want.ID || got.Kind != want.Kind || got.Status != want.Status ||
 		!got.OccurredOn.Equal(want.OccurredOn) || !sameTime(got.OccurredAt, want.OccurredAt) ||
 		got.Description != want.Description || got.Merchant != want.Merchant || got.IdempotencyKey != want.IdempotencyKey ||
-		!samePtr(got.ProjectID, want.ProjectID) || !samePtr(got.AreaID, want.AreaID) || !samePtr(got.InboxItemID, want.InboxItemID) ||
+		!samePtr(got.ProjectID, want.ProjectID) || !samePtr(got.AreaID, want.AreaID) ||
 		!slices.Equal(got.TagIDs, want.TagIDs) {
 		e.t.Errorf("%s = %+v, want %+v", name, got, want)
 	}
@@ -269,7 +267,7 @@ func (e *ledgerEnv) wantBalances(accountID *uuid.UUID, want ...string) {
 func TestInsertRoundTripsATransactionWithItsPostingsAndTags(t *testing.T) {
 	e := newLedgerEnv(t)
 	ctx := context.Background()
-	project, area, inbox := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	project, area := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	tagA, tagB := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	at := time.Date(2026, 11, 14, 12, 30, 15, 0, time.UTC)
 
@@ -277,7 +275,7 @@ func TestInsertRoundTripsATransactionWithItsPostingsAndTags(t *testing.T) {
 	h.OccurredAt = &at
 	h.Description = "晚餐"
 	h.Merchant = "Shake Shack"
-	h.ProjectID, h.AreaID, h.InboxItemID = &project, &area, &inbox
+	h.ProjectID, h.AreaID = &project, &area
 	h.TagIDs = []uuid.UUID{tagB, tagA}
 	txn, err := model.NewExpense(model.CategorizedParams{
 		Header:       h,
@@ -315,26 +313,13 @@ func TestInsertRoundTripsATransactionWithItsPostingsAndTags(t *testing.T) {
 	}
 }
 
-func TestInsertStoresAConfirmedTransactionWithItsConfirmedTime(t *testing.T) {
-	e := newLedgerEnv(t)
-
-	stored := e.store(e.expense("confirmed-0001", "120", true))
-
-	if stored.Status != model.StatusConfirmed || stored.ConfirmedAt == nil || stored.VoidedAt != nil {
-		t.Fatalf("stored = %+v, want confirmed, with the time the database assigned", stored)
-	}
-	if got := e.get(stored.ID); got.ConfirmedAt == nil || got.Status != model.StatusConfirmed {
-		t.Fatalf("Get = %+v, want it confirmed", got)
-	}
-}
-
 func TestInsertReturnsErrDuplicateKeyAndWritesNothingForAKnownKey(t *testing.T) {
 	e := newLedgerEnv(t)
-	first := e.store(e.expense("same-key-0001", "120", false))
+	first := e.store(e.expense("same-key-0001", "120"))
 	postings := e.count("SELECT count(*) FROM fin_posting")
 
 	err := e.inTx(func(ctx context.Context) error {
-		_, err := e.txns.Insert(ctx, e.expense("same-key-0001", "999", false))
+		_, err := e.txns.Insert(ctx, e.expense("same-key-0001", "999"))
 		return err
 	})
 	if !errors.Is(err, repo.ErrDuplicateKey) {
@@ -361,7 +346,7 @@ func TestConcurrentInsertsOfOneKeyStoreOneTransaction(t *testing.T) {
 	// ledger use cases do: insert, and on a duplicate read what the winner stored.
 	txns := make([]model.Transaction, callers)
 	for i := range txns {
-		txns[i] = e.expense(key, "120", false)
+		txns[i] = e.expense(key, "120")
 	}
 	type result struct {
 		id       uuid.UUID
@@ -431,9 +416,9 @@ func TestConcurrentInsertsOfOneKeyStoreOneTransaction(t *testing.T) {
 
 func TestABalanceCountsConfirmedTransactionsOnly(t *testing.T) {
 	e := newLedgerEnv(t)
-	e.store(e.opening("opening-cash-1", e.cash, "1000", true))
+	e.storeConfirmed(e.opening("opening-cash-1", e.cash, "1000"))
 
-	spend := e.store(e.expense("lunch-0000001", "120", false))
+	spend := e.store(e.expense("lunch-0000001", "120"))
 	e.wantBalances(nil, "cash TWD 1000")
 
 	confirmed := e.setStatus(spend.ID, model.StatusConfirmed)
@@ -455,8 +440,8 @@ func TestABalanceCountsConfirmedTransactionsOnly(t *testing.T) {
 func TestABalanceIsPerAccountAndInstrument(t *testing.T) {
 	e := newLedgerEnv(t)
 	ctx := context.Background()
-	e.store(e.opening("opening-cash-1", e.cash, "1000", true))
-	e.store(e.opening("opening-bank-1", e.bank, "5000", true))
+	e.storeConfirmed(e.opening("opening-cash-1", e.cash, "1000"))
+	e.storeConfirmed(e.opening("opening-bank-1", e.bank, "5000"))
 
 	transfer, err := model.NewTransfer(model.TransferParams{
 		Header: e.header("transfer-00001", ledgerDay), From: e.bank, To: e.cash, Instrument: e.twd, Amount: dec("300"),
@@ -464,7 +449,7 @@ func TestABalanceIsPerAccountAndInstrument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTransfer: %v", err)
 	}
-	e.store(e.confirmedIf(transfer, true))
+	e.storeConfirmed(transfer)
 
 	exchange, err := model.NewExchange(model.ExchangeParams{
 		Header:         e.header("exchange-00001", ledgerDay),
@@ -478,17 +463,17 @@ func TestABalanceIsPerAccountAndInstrument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewExchange: %v", err)
 	}
-	e.store(e.confirmedIf(exchange, true))
+	e.storeConfirmed(exchange)
 
 	// A draft is in none of it.
-	e.store(e.expense("draft-00000001", "50", false))
+	e.store(e.expense("draft-00000001", "50"))
 
 	e.wantBalances(nil, "bank TWD 1500", "bank USD 100", "cash TWD 1300")
 	e.wantBalances(&e.cash.ID, "cash TWD 1300")
 	e.wantBalances(&e.bank.ID, "bank TWD 1500", "bank USD 100")
 
 	// Postings that cancel out leave a balance of zero, which is still listed.
-	e.store(e.expense("spend-all-0001", "1300", true))
+	e.storeConfirmed(e.expense("spend-all-0001", "1300"))
 	e.wantBalances(&e.cash.ID, "cash TWD 0")
 
 	unknown := uuid.Must(uuid.NewV7())
@@ -502,8 +487,8 @@ func TestDeletingADraftTakesItsPostingsAndTagsWithIt(t *testing.T) {
 	tag := uuid.Must(uuid.NewV7())
 	h := e.header("discard-000001", ledgerDay)
 	h.TagIDs = []uuid.UUID{tag}
-	draft := e.store(e.expenseOf(h, "120", false))
-	other := e.store(e.expense("keep-00000001", "30", false))
+	draft := e.store(e.expenseOf(h, "120"))
+	other := e.store(e.expense("keep-00000001", "30"))
 	if got := e.count("SELECT count(*) FROM fin_posting WHERE transaction_id = $1", draft.ID); got != 2 {
 		t.Fatalf("%d postings stored for the draft, want 2", got)
 	}
@@ -533,9 +518,9 @@ func TestDeletingADraftTakesItsPostingsAndTagsWithIt(t *testing.T) {
 
 func TestChangesInOneDatabaseTransactionAreAllOrNothing(t *testing.T) {
 	e := newLedgerEnv(t)
-	first := e.store(e.expense("confirm-all-001", "10", false))
-	second := e.store(e.expense("confirm-all-002", "20", false))
-	voided := e.store(e.expense("confirm-all-003", "30", true))
+	first := e.store(e.expense("confirm-all-001", "10"))
+	second := e.store(e.expense("confirm-all-002", "20"))
+	voided := e.storeConfirmed(e.expense("confirm-all-003", "30"))
 	e.setStatus(voided.ID, model.StatusVoid)
 
 	// Confirming a void transaction is refused by the table, which stops the whole
@@ -600,7 +585,7 @@ func TestUnknownTransactionsAreNotFound(t *testing.T) {
 
 func TestGetForUpdateHoldsTheRowUntilTheDatabaseTransactionEnds(t *testing.T) {
 	e := newLedgerEnv(t)
-	draft := e.store(e.expense("lock-00000001", "120", false))
+	draft := e.store(e.expense("lock-00000001", "120"))
 
 	locked := make(chan struct{})
 	holder := make(chan error, 1)
@@ -758,7 +743,7 @@ func TestThePostingTableChecksWhatEachBookNeeds(t *testing.T) {
 
 func TestTheTransactionTableChecksKindAndStatus(t *testing.T) {
 	e := newLedgerEnv(t)
-	valid := e.expense("check-kind-0001", "120", false)
+	valid := e.expense("check-kind-0001", "120")
 
 	badKind := valid
 	badKind.Kind = "trade"
@@ -775,6 +760,16 @@ func TestTheTransactionTableChecksKindAndStatus(t *testing.T) {
 		return err
 	})
 	wantConstraint(t, err, checkViolation, "fin_transaction_status_check")
+
+	// A transaction is stored as a draft: one that says it is confirmed has no
+	// confirmed time to show, and the table refuses it. Confirming is SetStatus.
+	confirmed := valid
+	confirmed.Status = model.StatusConfirmed
+	err = e.inTx(func(ctx context.Context) error {
+		_, err := e.txns.Insert(ctx, confirmed)
+		return err
+	})
+	wantConstraint(t, err, checkViolation, "fin_transaction_status_times_check")
 
 	stored := e.store(valid)
 	_, err = e.txns.SetStatus(context.Background(), stored.ID, "pending")
@@ -799,7 +794,10 @@ func TestListFiltersAndPagesNewestFirst(t *testing.T) {
 	expense := func(key string, d int, project, area *uuid.UUID, confirmed bool) model.Transaction {
 		h := e.header(key, day(d))
 		h.ProjectID, h.AreaID = project, area
-		return e.store(e.expenseOf(h, "10", confirmed))
+		if confirmed {
+			return e.storeConfirmed(e.expenseOf(h, "10"))
+		}
+		return e.store(e.expenseOf(h, "10"))
 	}
 	t1 := expense("list-00000001", 10, &project1, &area1, false)
 	t2 := expense("list-00000002", 12, &project1, nil, true)
@@ -811,7 +809,7 @@ func TestListFiltersAndPagesNewestFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTransfer: %v", err)
 	}
-	t4 := e.store(e.confirmedIf(transfer, true))
+	t4 := e.storeConfirmed(transfer)
 
 	h := e.header("list-00000005", day(15))
 	h.TagIDs = []uuid.UUID{tag}
@@ -889,4 +887,115 @@ func TestListFiltersAndPagesNewestFirst(t *testing.T) {
 		t.Fatalf("List = %v, %v, want the income", got, err)
 	}
 	e.wantSame("List", got[0], income)
+}
+
+// afterStatement is a pgx tracer that runs hook as the first statement that
+// begins with prefix has been read to its end, and before the next statement of
+// the call is sent. It puts a change made on another connection exactly between
+// two statements of one call, with no sleep to hope that it lands there.
+type afterStatement struct {
+	prefix string
+	hook   func()
+	once   sync.Once
+	ran    bool
+}
+
+type statementKey struct{}
+
+func (a *afterStatement) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	return context.WithValue(ctx, statementKey{}, data.SQL)
+}
+
+func (a *afterStatement) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	if sql, _ := ctx.Value(statementKey{}).(string); strings.HasPrefix(sql, a.prefix) {
+		a.once.Do(func() {
+			a.ran = true
+			a.hook()
+		})
+	}
+}
+
+// listInterruptedBy returns what List returns for the filter when change is made
+// by another connection after the statement that lists the ids and before the
+// next one.
+func (e *ledgerEnv) listInterruptedBy(filter repo.TransactionFilter, change func()) []model.Transaction {
+	e.t.Helper()
+	tracer := &afterStatement{prefix: "SELECT t.id FROM fin_transaction", hook: change}
+	cfg := e.pool.Config()
+	cfg.ConnConfig.Tracer = tracer
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		e.t.Fatalf("open a pool with a tracer: %v", err)
+	}
+	defer pool.Close()
+
+	got, err := postgres.NewTransactionRepo(pool).List(context.Background(), filter)
+	if err != nil {
+		e.t.Fatalf("List: %v", err)
+	}
+	if !tracer.ran {
+		e.t.Fatal("the change was never made: no statement listed the ids")
+	}
+	return got
+}
+
+// A transaction deleted after its id was listed is still in the list: the page is
+// read in one snapshot. Were the rows read after the delete, the page would lack
+// it, and the use case, which asks for one transaction more than a page holds to
+// know that another page follows, would take the extra one for part of the page
+// and tell the caller there are no more pages while there are.
+func TestListKeepsATransactionDeletedWhileItIsRead(t *testing.T) {
+	e := newLedgerEnv(t)
+	var txns [4]model.Transaction // the 1st to the 4th, listed newest first
+	for i := range txns {
+		h := e.header(fmt.Sprintf("snapshot-del-%02d", i), time.Date(2026, 11, i+1, 0, 0, 0, 0, time.UTC))
+		txns[i] = e.store(e.expenseOf(h, "10"))
+	}
+
+	// A page of two, and the one more that says another page follows.
+	got := e.listInterruptedBy(repo.TransactionFilter{Limit: 3}, func() {
+		_, err := e.pool.Exec(context.Background(), "DELETE FROM fin_transaction WHERE id = $1", txns[2].ID)
+		if err != nil {
+			t.Errorf("delete a transaction on another connection: %v", err)
+		}
+	})
+
+	var gotIDs []uuid.UUID
+	for _, txn := range got {
+		gotIDs = append(gotIDs, txn.ID)
+	}
+	if want := []uuid.UUID{txns[3].ID, txns[2].ID, txns[1].ID}; !slices.Equal(gotIDs, want) {
+		t.Fatalf("List = %v, want the three that were listed, %v, the deleted one among them", gotIDs, want)
+	}
+	if _, err := e.txns.Get(context.Background(), txns[2].ID); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("Get of the deleted transaction: err = %v, want it deleted by now", err)
+	}
+}
+
+// A transaction whose status was changed after its id was listed has the status
+// the filter matched in the list: it is not shown as something the filter does
+// not allow.
+func TestListShowsTheStatusTheFilterMatched(t *testing.T) {
+	e := newLedgerEnv(t)
+	var drafts [3]model.Transaction
+	for i := range drafts {
+		h := e.header(fmt.Sprintf("snapshot-status-%02d", i), time.Date(2026, 11, i+1, 0, 0, 0, 0, time.UTC))
+		drafts[i] = e.store(e.expenseOf(h, "10"))
+	}
+
+	got := e.listInterruptedBy(repo.TransactionFilter{Status: model.StatusDraft, Limit: 10}, func() {
+		e.setStatus(drafts[1].ID, model.StatusConfirmed)
+	})
+
+	if len(got) != len(drafts) {
+		t.Fatalf("List returned %d transactions, want the 3 drafts that were listed", len(got))
+	}
+	for _, txn := range got {
+		if txn.Status != model.StatusDraft {
+			t.Errorf("transaction %s is %s in a list of drafts", txn.ID, txn.Status)
+		}
+	}
+	if got := e.get(drafts[1].ID); got.Status != model.StatusConfirmed {
+		t.Errorf("the transaction is %s now, want it confirmed by the other connection", got.Status)
+	}
 }

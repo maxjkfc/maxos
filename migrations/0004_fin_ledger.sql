@@ -2,8 +2,8 @@
 
 -- One money event. Its postings, the actual movements, are in fin_posting.
 --
--- project_id, area_id and inbox_item_id are ids of other contexts' entries: plain
--- uuid columns with no foreign key. The use case checks them before it writes.
+-- project_id and area_id are ids of catalog entries: plain uuid columns with no
+-- foreign key. The use case checks them before it writes.
 CREATE TABLE fin_transaction (
     id              uuid PRIMARY KEY,
     kind            text NOT NULL,
@@ -14,9 +14,7 @@ CREATE TABLE fin_transaction (
     merchant        text NOT NULL DEFAULT '',
     project_id      uuid,
     area_id         uuid,
-    inbox_item_id   uuid,
     idempotency_key text NOT NULL,
-    is_trial        boolean NOT NULL DEFAULT false,
     created_at      timestamptz NOT NULL DEFAULT now(),
     confirmed_at    timestamptz,
     voided_at       timestamptz,

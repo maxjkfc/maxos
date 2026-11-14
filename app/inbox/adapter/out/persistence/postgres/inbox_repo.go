@@ -12,6 +12,7 @@ import (
 	"github.com/maxjkfc/maxos/app/inbox/adapter/out/persistence/postgres/dbgen"
 	"github.com/maxjkfc/maxos/app/inbox/domain/model"
 	"github.com/maxjkfc/maxos/app/inbox/usecase/port/out/repo"
+	pkgpostgres "github.com/maxjkfc/maxos/pkg/postgres"
 )
 
 // InboxRepo implements repo.InboxRepo on the inbox_item table.
@@ -21,9 +22,10 @@ type InboxRepo struct {
 
 var _ repo.InboxRepo = (*InboxRepo)(nil)
 
-// NewInboxRepo returns a repo that reads and writes through pool.
+// NewInboxRepo returns a repo that reads and writes through pool. Its statements
+// join the transaction a context carries (see pkg/postgres).
 func NewInboxRepo(pool *pgxpool.Pool) *InboxRepo {
-	return &InboxRepo{q: dbgen.New(pool)}
+	return &InboxRepo{q: dbgen.New(pkgpostgres.NewDB(pool))}
 }
 
 // Insert stores item. The INSERT ... ON CONFLICT DO NOTHING returns no row when

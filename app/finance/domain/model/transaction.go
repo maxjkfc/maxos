@@ -179,9 +179,6 @@ type Transaction struct {
 	// in use is for the use case to check.
 	ProjectID *uuid.UUID
 	AreaID    *uuid.UUID
-	// InboxItemID is the inbox entry the transaction was made from, when there is
-	// one.
-	InboxItemID *uuid.UUID
 	// IdempotencyKey identifies the request that made the transaction: asking
 	// again with the same key returns the transaction made the first time.
 	IdempotencyKey string

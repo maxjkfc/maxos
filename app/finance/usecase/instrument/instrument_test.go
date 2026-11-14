@@ -122,7 +122,7 @@ func (f *fakeRepo) seedBaseCurrency() {
 		ID:         model.BaseCurrencyID,
 		Code:       model.BaseCurrencyCode,
 		Name:       "新台幣",
-		Kind:       model.InstrumentKindCurrency,
+		Kind:       model.InstrumentKindFiat,
 		IsCurrency: true,
 		Decimals:   2,
 	}

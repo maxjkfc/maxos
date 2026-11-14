@@ -1,6 +1,6 @@
 // Package ledger implements the ledger use cases: recording expenses, incomes,
-// transfers, exchanges and opening balances as drafts or confirmed transactions;
-// confirming, discarding and voiding them; and reading transactions and balances.
+// transfers, exchanges and opening balances as drafts; confirming, discarding
+// and voiding them; and reading transactions and balances.
 package ledger
 
 import (
@@ -32,8 +32,7 @@ type Service struct {
 	categories   repo.CategoryRepo
 	references   catalogusecase.VerifyReferences
 	defaults     catalogusecase.ResolveProjectDefaults
-	projects     catalogusecase.GetProject
-	areas        catalogusecase.GetArea
+	projectAreas catalogusecase.ResolveProjectArea
 }
 
 var (
@@ -93,11 +92,6 @@ func (s *Service) record(
 		if err != nil {
 			return err
 		}
-		if d.Confirm {
-			if txn, err = txn.Confirm(); err != nil {
-				return err
-			}
-		}
 
 		stored, err := s.transactions.Insert(ctx, txn)
 		if errors.Is(err, repo.ErrDuplicateKey) {
@@ -143,7 +137,6 @@ func (s *Service) header(ctx context.Context, id uuid.UUID, key string, d usecas
 		Merchant:       d.Merchant,
 		ProjectID:      d.ProjectID,
 		AreaID:         d.AreaID,
-		InboxItemID:    d.InboxItemID,
 		TagIDs:         d.TagIDs,
 	}
 
@@ -171,11 +164,14 @@ func (s *Service) header(ctx context.Context, id uuid.UUID, key string, d usecas
 			h.AreaID = areaID
 		}
 	case h.AreaID == nil:
-		areaID, err := s.defaultAreaOf(ctx, *d.ProjectID)
+		area, err := s.projectAreas.ResolveProjectArea(ctx, *d.ProjectID)
 		if err != nil {
-			return model.Header{}, err
+			return model.Header{}, fmt.Errorf("get the default area of project %s: %w", *d.ProjectID, err)
 		}
-		h.AreaID = areaID
+		if area != nil {
+			id := area.ID
+			h.AreaID = &id
+		}
 	}
 	return h, nil
 }
@@ -202,29 +198,6 @@ func (s *Service) projectOf(ctx context.Context, day time.Time) (projectID, area
 		areaID = &area
 	}
 	return projectID, areaID, nil
-}
-
-// defaultAreaOf returns the default area of a project the caller named, or nil
-// when the project has none or its area has been archived since: a transaction
-// cannot go to an archived area, and the caller can still name another one. The
-// project itself has been checked by the catalog by now.
-func (s *Service) defaultAreaOf(ctx context.Context, projectID uuid.UUID) (*uuid.UUID, error) {
-	project, err := s.projects.GetProject(ctx, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("get project %s: %w", projectID, err)
-	}
-	if project.DefaultAreaID == nil {
-		return nil, nil
-	}
-	area, err := s.areas.GetArea(ctx, *project.DefaultAreaID)
-	if err != nil {
-		return nil, fmt.Errorf("get the default area of project %s: %w", projectID, err)
-	}
-	if area.ArchivedAt != nil {
-		return nil, nil
-	}
-	id := area.ID
-	return &id, nil
 }
 
 // account loads an account, archived or not; the model refuses an archived one.

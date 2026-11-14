@@ -70,8 +70,8 @@ func TestSeededBaseCurrencyMatchesTheModelConstant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(BaseCurrencyID): %v", err)
 	}
-	if got.Code != model.BaseCurrencyCode || got.Kind != model.InstrumentKindCurrency || !got.IsCurrency || got.ArchivedAt != nil {
-		t.Fatalf("base currency = %+v, want the TWD currency in use", got)
+	if got.Code != model.BaseCurrencyCode || got.Kind != model.InstrumentKindFiat || !got.IsCurrency || got.ArchivedAt != nil {
+		t.Fatalf("base currency = %+v, want the TWD fiat currency in use", got)
 	}
 }
 
@@ -149,6 +149,7 @@ func TestInstrumentKindAndDecimalsAreCheckedByTheDatabase(t *testing.T) {
 	for _, ok := range []model.Instrument{
 		literal("MIN", model.InstrumentKindFund, 0),
 		literal("MAX", model.InstrumentKindFund, 18),
+		literal("YEN", model.InstrumentKindFiat, 0),
 	} {
 		if _, err := r.Insert(ctx, ok); err != nil {
 			t.Errorf("Insert %s with %d decimals: %v, want it stored", ok.Code, ok.Decimals, err)
@@ -162,6 +163,8 @@ func TestInstrumentKindAndDecimalsAreCheckedByTheDatabase(t *testing.T) {
 	}{
 		{"unknown kind", literal("BOND", "bond", 2), "fin_instrument_kind_check"},
 		{"empty kind", literal("NOKIND", "", 2), "fin_instrument_kind_check"},
+		// What fiat was called: a currency is what an instrument is used for, not a kind.
+		{"the old name of fiat", literal("OLDKIND", "currency", 2), "fin_instrument_kind_check"},
 		{"19 decimals", literal("OVER", model.InstrumentKindCrypto, 19), "fin_instrument_decimals_check"},
 		{"-1 decimals", literal("UNDER", model.InstrumentKindCrypto, -1), "fin_instrument_decimals_check"},
 	}

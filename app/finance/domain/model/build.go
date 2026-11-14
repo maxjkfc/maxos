@@ -24,13 +24,12 @@ type Header struct {
 	// Description and Merchant are trimmed of the whitespace around them.
 	Description string
 	Merchant    string
-	// ProjectID, AreaID and TagIDs are ids of catalog entries; InboxItemID is the
-	// id of an inbox entry. Whether they exist and are in use is for the use case
-	// to check. Repeats among TagIDs are dropped.
-	ProjectID   *uuid.UUID
-	AreaID      *uuid.UUID
-	InboxItemID *uuid.UUID
-	TagIDs      []uuid.UUID
+	// ProjectID, AreaID and TagIDs are ids of catalog entries. Whether they exist
+	// and are in use is for the use case to check. Repeats among TagIDs are
+	// dropped.
+	ProjectID *uuid.UUID
+	AreaID    *uuid.UUID
+	TagIDs    []uuid.UUID
 }
 
 // normalizeHeader checks the header and returns it as a transaction keeps it: the
@@ -51,7 +50,6 @@ func normalizeHeader(h Header) (Header, error) {
 	h.Merchant = strings.TrimSpace(h.Merchant)
 	h.ProjectID = clonePtr(h.ProjectID)
 	h.AreaID = clonePtr(h.AreaID)
-	h.InboxItemID = clonePtr(h.InboxItemID)
 	h.TagIDs = normalizeTags(h.TagIDs)
 	return h, nil
 }
@@ -73,7 +71,6 @@ func newTransaction(kind Kind, h Header, postings []Posting) (Transaction, error
 		Merchant:       h.Merchant,
 		ProjectID:      h.ProjectID,
 		AreaID:         h.AreaID,
-		InboxItemID:    h.InboxItemID,
 		IdempotencyKey: h.IdempotencyKey,
 		TagIDs:         h.TagIDs,
 		Postings:       postings,

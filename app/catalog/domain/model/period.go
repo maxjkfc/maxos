@@ -14,15 +14,24 @@ func DateOf(t time.Time) time.Time {
 }
 
 // Period is a run of calendar days, both ends included: a one-day period has
-// the same From and To.
+// the same From and To. Both ends are always set; a period that is not set is
+// no Period at all (a Project holds a *Period, nil while it has none).
 type Period struct {
 	// From and To are dates as DateOf returns them, and From is not after To.
 	From, To time.Time
 }
 
-// NewPeriod returns the period from the day of from to the day of to. It
-// returns ErrPeriodReversed when to is on an earlier day than from.
+// NewPeriod returns the period from the day of from to the day of to. Both are
+// required: it returns ErrPeriodIncomplete when either is the zero time, which
+// DateOf would otherwise make the first day of the year 1. It returns
+// ErrPeriodReversed when to is on an earlier day than from.
 func NewPeriod(from, to time.Time) (Period, error) {
+	switch {
+	case from.IsZero():
+		return Period{}, fmt.Errorf("%w: the start is missing", ErrPeriodIncomplete)
+	case to.IsZero():
+		return Period{}, fmt.Errorf("%w: the end is missing", ErrPeriodIncomplete)
+	}
 	p := Period{From: DateOf(from), To: DateOf(to)}
 	if p.To.Before(p.From) {
 		return Period{}, fmt.Errorf("%w: %s", ErrPeriodReversed, p)

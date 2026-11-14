@@ -25,8 +25,8 @@ func ids(txns ...usecase.Transaction) []uuid.UUID {
 
 func TestConfirmTransactionsConfirmsTheDraftsInOneDatabaseTransaction(t *testing.T) {
 	e := newEnv(t)
-	a := e.recordLunch("lunch-0000001a", false)
-	b := e.recordLunch("lunch-0000001b", false)
+	a := e.recordLunch("lunch-0000001a")
+	b := e.recordLunch("lunch-0000001b")
 	opened := e.tx.calls
 
 	out, err := e.svc.ConfirmTransactions(context.Background(), usecase.ConfirmTransactionsInput{
@@ -54,9 +54,10 @@ func TestConfirmTransactionsConfirmsTheDraftsInOneDatabaseTransaction(t *testing
 
 func TestConfirmTransactionsIsAllOrNothing(t *testing.T) {
 	e := newEnv(t)
-	draft := e.recordLunch("lunch-0000001a", false)
-	confirmed := e.recordLunch("lunch-0000001b", true)
+	draft := e.recordLunch("lunch-0000001a")
+	confirmed := e.confirmedLunch("lunch-0000001b")
 	unknown := uuid.Must(uuid.NewV7())
+	changes := len(e.txns.statusSet)
 
 	_, err := e.svc.ConfirmTransactions(context.Background(), usecase.ConfirmTransactionsInput{
 		IDs: []uuid.UUID{draft.ID, confirmed.ID, unknown},
@@ -70,8 +71,8 @@ func TestConfirmTransactionsIsAllOrNothing(t *testing.T) {
 	if !strings.Contains(err.Error(), confirmed.ID.String()) || !strings.Contains(err.Error(), unknown.String()) {
 		t.Errorf("err = %q, want it to name %s and %s", err, confirmed.ID, unknown)
 	}
-	if got := e.txns.byID[draft.ID]; got.Status != model.StatusDraft || len(e.txns.statusSet) != 0 {
-		t.Errorf("the draft is %s, %d changes written, want it left a draft and nothing written", got.Status, len(e.txns.statusSet))
+	if got := e.txns.byID[draft.ID]; got.Status != model.StatusDraft || len(e.txns.statusSet) != changes {
+		t.Errorf("the draft is %s, %d changes written, want it left a draft and nothing written", got.Status, len(e.txns.statusSet)-changes)
 	}
 }
 
@@ -79,7 +80,7 @@ func TestConfirmTransactionsLocksInTheOrderOfTheIds(t *testing.T) {
 	e := newEnv(t)
 	var recorded []usecase.Transaction
 	for _, key := range []string{"lunch-0000001a", "lunch-0000001b", "lunch-0000001c"} {
-		recorded = append(recorded, e.recordLunch(key, false))
+		recorded = append(recorded, e.recordLunch(key))
 	}
 	byBytes := func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) }
 	ascending := ids(recorded...)
@@ -115,7 +116,7 @@ func TestConfirmTransactionsNeedsAtLeastOneId(t *testing.T) {
 
 func TestConfirmTransactionsDoesNotConfirmWhatIsVoid(t *testing.T) {
 	e := newEnv(t)
-	voided := e.recordLunch("lunch-0000001a", true)
+	voided := e.confirmedLunch("lunch-0000001a")
 	if _, err := e.svc.VoidTransaction(context.Background(), voided.ID); err != nil {
 		t.Fatalf("VoidTransaction: %v", err)
 	}
@@ -132,8 +133,8 @@ func TestConfirmTransactionsDoesNotConfirmWhatIsVoid(t *testing.T) {
 
 func TestDiscardDraftDeletesTheDraftInOneDatabaseTransaction(t *testing.T) {
 	e := newEnv(t)
-	draft := e.recordLunch("lunch-0000001a", false)
-	kept := e.recordLunch("lunch-0000001b", false)
+	draft := e.recordLunch("lunch-0000001a")
+	kept := e.recordLunch("lunch-0000001b")
 	opened := e.tx.calls
 
 	if err := e.svc.DiscardDraft(context.Background(), draft.ID); err != nil {
@@ -153,8 +154,8 @@ func TestDiscardDraftDeletesTheDraftInOneDatabaseTransaction(t *testing.T) {
 
 func TestDiscardDraftRefusesWhatIsNotADraft(t *testing.T) {
 	e := newEnv(t)
-	confirmed := e.recordLunch("lunch-0000001a", true)
-	voided := e.recordLunch("lunch-0000001b", true)
+	confirmed := e.confirmedLunch("lunch-0000001a")
+	voided := e.confirmedLunch("lunch-0000001b")
 	if _, err := e.svc.VoidTransaction(context.Background(), voided.ID); err != nil {
 		t.Fatalf("VoidTransaction: %v", err)
 	}
@@ -186,7 +187,7 @@ func TestDiscardDraftReportsAnUnknownTransaction(t *testing.T) {
 
 func TestVoidTransactionVoidsAConfirmedTransactionInOneDatabaseTransaction(t *testing.T) {
 	e := newEnv(t)
-	confirmed := e.recordLunch("lunch-0000001a", true)
+	confirmed := e.confirmedLunch("lunch-0000001a")
 	opened := e.tx.calls
 
 	got, err := e.svc.VoidTransaction(context.Background(), confirmed.ID)
@@ -207,8 +208,8 @@ func TestVoidTransactionVoidsAConfirmedTransactionInOneDatabaseTransaction(t *te
 
 func TestVoidTransactionRefusesWhatIsNotConfirmed(t *testing.T) {
 	e := newEnv(t)
-	draft := e.recordLunch("lunch-0000001a", false)
-	voided := e.recordLunch("lunch-0000001b", true)
+	draft := e.recordLunch("lunch-0000001a")
+	voided := e.confirmedLunch("lunch-0000001b")
 	if _, err := e.svc.VoidTransaction(context.Background(), voided.ID); err != nil {
 		t.Fatalf("VoidTransaction: %v", err)
 	}
@@ -230,7 +231,7 @@ func TestVoidTransactionRefusesWhatIsNotConfirmed(t *testing.T) {
 
 func TestGetTransaction(t *testing.T) {
 	e := newEnv(t)
-	recorded := e.recordLunch("lunch-0000001a", false)
+	recorded := e.recordLunch("lunch-0000001a")
 
 	got, err := e.svc.GetTransaction(context.Background(), recorded.ID)
 	if err != nil || got.ID != recorded.ID || got.Status != "draft" || len(got.Postings) != 2 {
@@ -349,7 +350,7 @@ func TestListTransactionsRefusesWhatCannotBeRight(t *testing.T) {
 
 func TestListTransactionsReturnsWholeTransactions(t *testing.T) {
 	e := newEnv(t)
-	recorded := e.recordLunch("lunch-0000001a", false)
+	recorded := e.recordLunch("lunch-0000001a")
 	e.txns.listResult = []model.Transaction{e.txns.byID[recorded.ID]}
 
 	out, err := e.svc.ListTransactions(context.Background(), usecase.ListTransactionsInput{})

@@ -27,7 +27,7 @@ func (q *Queries) DeleteTransaction(ctx context.Context, id uuid.UUID) (int64, e
 }
 
 const getTransaction = `-- name: GetTransaction :one
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, inbox_item_id, idempotency_key, is_trial, created_at, confirmed_at, voided_at FROM fin_transaction WHERE id = $1
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at FROM fin_transaction WHERE id = $1
 `
 
 func (q *Queries) GetTransaction(ctx context.Context, id uuid.UUID) (FinTransaction, error) {
@@ -43,9 +43,7 @@ func (q *Queries) GetTransaction(ctx context.Context, id uuid.UUID) (FinTransact
 		&i.Merchant,
 		&i.ProjectID,
 		&i.AreaID,
-		&i.InboxItemID,
 		&i.IdempotencyKey,
-		&i.IsTrial,
 		&i.CreatedAt,
 		&i.ConfirmedAt,
 		&i.VoidedAt,
@@ -54,7 +52,7 @@ func (q *Queries) GetTransaction(ctx context.Context, id uuid.UUID) (FinTransact
 }
 
 const getTransactionByIdempotencyKey = `-- name: GetTransactionByIdempotencyKey :one
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, inbox_item_id, idempotency_key, is_trial, created_at, confirmed_at, voided_at FROM fin_transaction WHERE idempotency_key = $1
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at FROM fin_transaction WHERE idempotency_key = $1
 `
 
 func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, idempotencyKey string) (FinTransaction, error) {
@@ -70,9 +68,7 @@ func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, idempotenc
 		&i.Merchant,
 		&i.ProjectID,
 		&i.AreaID,
-		&i.InboxItemID,
 		&i.IdempotencyKey,
-		&i.IsTrial,
 		&i.CreatedAt,
 		&i.ConfirmedAt,
 		&i.VoidedAt,
@@ -81,7 +77,7 @@ func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, idempotenc
 }
 
 const getTransactionForUpdate = `-- name: GetTransactionForUpdate :one
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, inbox_item_id, idempotency_key, is_trial, created_at, confirmed_at, voided_at FROM fin_transaction WHERE id = $1 FOR UPDATE
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at FROM fin_transaction WHERE id = $1 FOR UPDATE
 `
 
 // Locks the row until the database transaction ends: whoever changes or deletes
@@ -99,9 +95,7 @@ func (q *Queries) GetTransactionForUpdate(ctx context.Context, id uuid.UUID) (Fi
 		&i.Merchant,
 		&i.ProjectID,
 		&i.AreaID,
-		&i.InboxItemID,
 		&i.IdempotencyKey,
-		&i.IsTrial,
 		&i.CreatedAt,
 		&i.ConfirmedAt,
 		&i.VoidedAt,
@@ -110,7 +104,7 @@ func (q *Queries) GetTransactionForUpdate(ctx context.Context, id uuid.UUID) (Fi
 }
 
 const getTransactionsByIDs = `-- name: GetTransactionsByIDs :many
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, inbox_item_id, idempotency_key, is_trial, created_at, confirmed_at, voided_at FROM fin_transaction WHERE id = ANY($1::uuid[])
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at FROM fin_transaction WHERE id = ANY($1::uuid[])
 `
 
 // In no particular order.
@@ -133,9 +127,7 @@ func (q *Queries) GetTransactionsByIDs(ctx context.Context, ids []uuid.UUID) ([]
 			&i.Merchant,
 			&i.ProjectID,
 			&i.AreaID,
-			&i.InboxItemID,
 			&i.IdempotencyKey,
-			&i.IsTrial,
 			&i.CreatedAt,
 			&i.ConfirmedAt,
 			&i.VoidedAt,
@@ -187,15 +179,14 @@ func (q *Queries) InsertPosting(ctx context.Context, arg InsertPostingParams) er
 const insertTransaction = `-- name: InsertTransaction :one
 INSERT INTO fin_transaction (
     id, kind, status, occurred_on, occurred_at, description, merchant,
-    project_id, area_id, inbox_item_id, idempotency_key, confirmed_at
+    project_id, area_id, idempotency_key
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7,
-    $8, $9, $10, $11,
-    CASE WHEN $3::text = 'confirmed' THEN now() END
+    $8, $9, $10
 )
 ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, inbox_item_id, idempotency_key, is_trial, created_at, confirmed_at, voided_at
+RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at
 `
 
 type InsertTransactionParams struct {
@@ -208,15 +199,15 @@ type InsertTransactionParams struct {
 	Merchant       string
 	ProjectID      uuid.NullUUID
 	AreaID         uuid.NullUUID
-	InboxItemID    uuid.NullUUID
 	IdempotencyKey string
 }
 
 // Returns no row (pgx.ErrNoRows) when the idempotency key is already stored: the
 // statement waits for a concurrent transaction that holds the key to finish, and
-// when that one commits it does nothing. confirmed_at is the time of the insert for
-// a transaction that is confirmed from the start. The postings follow in the same
-// database transaction: the deferred balance trigger checks them at its commit.
+// when that one commits it does nothing. A transaction is inserted as a draft,
+// which has no confirmed time; the table's CHECK constraints refuse any other
+// status. The postings follow in the same database transaction: the deferred
+// balance trigger checks them at its commit.
 func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionParams) (FinTransaction, error) {
 	row := q.db.QueryRow(ctx, insertTransaction,
 		arg.ID,
@@ -228,7 +219,6 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 		arg.Merchant,
 		arg.ProjectID,
 		arg.AreaID,
-		arg.InboxItemID,
 		arg.IdempotencyKey,
 	)
 	var i FinTransaction
@@ -242,9 +232,7 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 		&i.Merchant,
 		&i.ProjectID,
 		&i.AreaID,
-		&i.InboxItemID,
 		&i.IdempotencyKey,
-		&i.IsTrial,
 		&i.CreatedAt,
 		&i.ConfirmedAt,
 		&i.VoidedAt,
@@ -266,44 +254,6 @@ func (q *Queries) InsertTransactionTag(ctx context.Context, arg InsertTransactio
 	return err
 }
 
-const listAccountBalances = `-- name: ListAccountBalances :many
-SELECT a.id AS account_id, i.id AS instrument_id, sum(p.quantity)::numeric AS quantity
-FROM fin_posting p
-JOIN fin_transaction t ON t.id = p.transaction_id
-JOIN fin_account a ON a.id = p.account_id
-JOIN fin_instrument i ON i.id = p.instrument_id
-WHERE t.status = 'confirmed' AND p.book = 'account' AND p.account_id = $1
-GROUP BY a.id, i.id, i.code
-ORDER BY i.code, i.id
-`
-
-type ListAccountBalancesRow struct {
-	AccountID    uuid.UUID
-	InstrumentID uuid.UUID
-	Quantity     decimal.Decimal
-}
-
-// ListBalances for one account.
-func (q *Queries) ListAccountBalances(ctx context.Context, accountID uuid.NullUUID) ([]ListAccountBalancesRow, error) {
-	rows, err := q.db.Query(ctx, listAccountBalances, accountID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListAccountBalancesRow
-	for rows.Next() {
-		var i ListAccountBalancesRow
-		if err := rows.Scan(&i.AccountID, &i.InstrumentID, &i.Quantity); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listBalances = `-- name: ListBalances :many
 SELECT a.id AS account_id, i.id AS instrument_id, sum(p.quantity)::numeric AS quantity
 FROM fin_posting p
@@ -311,6 +261,7 @@ JOIN fin_transaction t ON t.id = p.transaction_id
 JOIN fin_account a ON a.id = p.account_id
 JOIN fin_instrument i ON i.id = p.instrument_id
 WHERE t.status = 'confirmed' AND p.book = 'account'
+  AND ($1::uuid IS NULL OR p.account_id = $1)
 GROUP BY a.id, a.name, i.id, i.code
 ORDER BY a.name, a.id, i.code, i.id
 `
@@ -322,9 +273,10 @@ type ListBalancesRow struct {
 }
 
 // What each account holds of each instrument: the quantities of its postings
-// added up, counting only the confirmed transactions. Nothing is stored.
-func (q *Queries) ListBalances(ctx context.Context) ([]ListBalancesRow, error) {
-	rows, err := q.db.Query(ctx, listBalances)
+// added up, counting only the confirmed transactions. Nothing is stored. With an
+// account_id it is the balances of that account only.
+func (q *Queries) ListBalances(ctx context.Context, accountID uuid.NullUUID) ([]ListBalancesRow, error) {
+	rows, err := q.db.Query(ctx, listBalances, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +364,7 @@ SET status = $1::text,
     confirmed_at = CASE WHEN $1::text = 'confirmed' THEN now() ELSE confirmed_at END,
     voided_at = CASE WHEN $1::text = 'void' THEN now() ELSE voided_at END
 WHERE id = $2
-RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, inbox_item_id, idempotency_key, is_trial, created_at, confirmed_at, voided_at
+RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at
 `
 
 type SetTransactionStatusParams struct {
@@ -435,9 +387,7 @@ func (q *Queries) SetTransactionStatus(ctx context.Context, arg SetTransactionSt
 		&i.Merchant,
 		&i.ProjectID,
 		&i.AreaID,
-		&i.InboxItemID,
 		&i.IdempotencyKey,
-		&i.IsTrial,
 		&i.CreatedAt,
 		&i.ConfirmedAt,
 		&i.VoidedAt,

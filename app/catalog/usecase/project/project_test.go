@@ -3,6 +3,7 @@ package project_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -261,6 +262,35 @@ func TestCreateProjectRejectsWhatIsInvalidWithoutStoring(t *testing.T) {
 			want: model.ErrPeriodReversed,
 		},
 		{
+			// Not the first day of the year 1, which is what a zero date would make.
+			name: "period without a start",
+			input: func(*fakeAreas) usecase.CreateProjectInput {
+				return usecase.CreateProjectInput{Name: "x", Period: &usecase.Period{To: day(8)}}
+			},
+			want: model.ErrPeriodIncomplete,
+		},
+		{
+			name: "period without an end",
+			input: func(*fakeAreas) usecase.CreateProjectInput {
+				return usecase.CreateProjectInput{Name: "x", Period: &usecase.Period{From: day(1)}}
+			},
+			want: model.ErrPeriodIncomplete,
+		},
+		{
+			name: "active period without a start",
+			input: func(*fakeAreas) usecase.CreateProjectInput {
+				return usecase.CreateProjectInput{Name: "x", ActivePeriod: &usecase.Period{To: day(7)}}
+			},
+			want: model.ErrPeriodIncomplete,
+		},
+		{
+			name: "active period without an end",
+			input: func(*fakeAreas) usecase.CreateProjectInput {
+				return usecase.CreateProjectInput{Name: "x", ActivePeriod: &usecase.Period{From: day(2)}}
+			},
+			want: model.ErrPeriodIncomplete,
+		},
+		{
 			name: "active period outside the period",
 			input: func(*fakeAreas) usecase.CreateProjectInput {
 				return usecase.CreateProjectInput{Name: "x", Period: period(2, 8), ActivePeriod: period(1, 3)}
@@ -369,6 +399,29 @@ func TestSetProjectPeriod(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects a period that lacks its start or its end, and keeps the old one", func(t *testing.T) {
+		for name, missing := range map[string]*usecase.Period{
+			"no start":        {To: day(8)},
+			"no end":          {From: day(1)},
+			"no start or end": {},
+		} {
+			projects := newFakeProjects()
+			p := projects.seed(t, "日本旅行")
+			svc := project.New(projects, newFakeAreas())
+			if _, err := svc.SetProjectPeriod(ctx, usecase.SetProjectPeriodInput{ID: p.ID, Period: period(2, 7)}); err != nil {
+				t.Fatalf("SetProjectPeriod: %v", err)
+			}
+
+			_, err := svc.SetProjectPeriod(ctx, usecase.SetProjectPeriodInput{ID: p.ID, Period: missing})
+			if !errors.Is(err, model.ErrPeriodIncomplete) {
+				t.Errorf("%s: err = %v, want ErrPeriodIncomplete", name, err)
+			}
+			if got := projects.projects[p.ID].Period; got == nil || !got.From.Equal(day(2)) || !got.To.Equal(day(7)) {
+				t.Errorf("%s: Period = %v, want the old period kept", name, got)
+			}
+		}
+	})
+
 	t.Run("refuses a period that leaves the active period outside, and keeps the old one", func(t *testing.T) {
 		projects := newFakeProjects()
 		p := projects.seed(t, "日本旅行")
@@ -436,6 +489,29 @@ func TestSetProjectActivePeriod(t *testing.T) {
 		_, err := project.New(projects, newFakeAreas()).SetProjectActivePeriod(ctx, usecase.SetProjectActivePeriodInput{ID: p.ID, ActivePeriod: period(7, 2)})
 		if !errors.Is(err, model.ErrPeriodReversed) {
 			t.Fatalf("err = %v, want ErrPeriodReversed", err)
+		}
+	})
+
+	t.Run("rejects an active period that lacks its start or its end, and keeps the old one", func(t *testing.T) {
+		for name, missing := range map[string]*usecase.Period{
+			"no start":        {To: day(7)},
+			"no end":          {From: day(2)},
+			"no start or end": {},
+		} {
+			projects := newFakeProjects()
+			p := projects.seed(t, "日本旅行")
+			svc := project.New(projects, newFakeAreas())
+			if _, err := svc.SetProjectActivePeriod(ctx, usecase.SetProjectActivePeriodInput{ID: p.ID, ActivePeriod: period(3, 6)}); err != nil {
+				t.Fatalf("SetProjectActivePeriod: %v", err)
+			}
+
+			_, err := svc.SetProjectActivePeriod(ctx, usecase.SetProjectActivePeriodInput{ID: p.ID, ActivePeriod: missing})
+			if !errors.Is(err, model.ErrPeriodIncomplete) {
+				t.Errorf("%s: err = %v, want ErrPeriodIncomplete", name, err)
+			}
+			if got := projects.projects[p.ID].ActivePeriod; got == nil || !got.From.Equal(day(3)) || !got.To.Equal(day(6)) {
+				t.Errorf("%s: ActivePeriod = %v, want the old active period kept", name, got)
+			}
 		}
 	})
 
@@ -589,6 +665,149 @@ func TestResolveProjectDefaults(t *testing.T) {
 	})
 }
 
+// seedActive stores a project that is active on the 5th, with the area as its
+// default area, and returns it as the store holds it.
+func seedActive(t *testing.T, projects *fakeProjects, areaID *uuid.UUID) model.Project {
+	t.Helper()
+	p := projects.seed(t, "日本旅行")
+	p.ActivePeriod = &model.Period{From: day(2), To: day(7)}
+	p.DefaultAreaID = areaID
+	projects.projects[p.ID] = p
+	return p
+}
+
+func TestResolveProjectArea(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("the default area of the project", func(t *testing.T) {
+		projects, areas := newFakeProjects(), newFakeAreas()
+		area := areas.seed(t, "玩樂", false)
+		p := seedActive(t, projects, &area.ID)
+
+		got, err := project.New(projects, areas).ResolveProjectArea(ctx, p.ID)
+		if err != nil || got == nil || got.ID != area.ID || got.Name != "玩樂" {
+			t.Fatalf("ResolveProjectArea = %+v, %v, want 玩樂", got, err)
+		}
+	})
+
+	t.Run("a project without a default area has none, and that is no error", func(t *testing.T) {
+		projects := newFakeProjects()
+		p := seedActive(t, projects, nil)
+
+		got, err := project.New(projects, newFakeAreas()).ResolveProjectArea(ctx, p.ID)
+		if err != nil || got != nil {
+			t.Fatalf("ResolveProjectArea = %+v, %v, want no area and no error", got, err)
+		}
+	})
+
+	t.Run("a default area archived since is left out, and that is no error", func(t *testing.T) {
+		projects, areas := newFakeProjects(), newFakeAreas()
+		area := areas.seed(t, "舊的", true)
+		p := seedActive(t, projects, &area.ID)
+
+		got, err := project.New(projects, areas).ResolveProjectArea(ctx, p.ID)
+		if err != nil || got != nil {
+			t.Fatalf("ResolveProjectArea = %+v, %v, want no area and no error: a transaction cannot go to an archived area", got, err)
+		}
+	})
+
+	t.Run("a project that does not exist is reported as VerifyReferences reports it", func(t *testing.T) {
+		unknown := uuid.Must(uuid.NewV7())
+
+		got, err := project.New(newFakeProjects(), newFakeAreas()).ResolveProjectArea(ctx, unknown)
+
+		var refErr *usecase.ReferenceError
+		if !errors.As(err, &refErr) || got != nil {
+			t.Fatalf("ResolveProjectArea = %+v, %v, want a *ReferenceError and no area", got, err)
+		}
+		want := []usecase.ReferenceProblem{{Kind: usecase.ReferenceProject, ID: unknown}}
+		if !slices.Equal(refErr.Problems, want) {
+			t.Errorf("problems = %+v, want %+v", refErr.Problems, want)
+		}
+	})
+
+	t.Run("an archived project is reported as archived, though its default area could be used", func(t *testing.T) {
+		projects, areas := newFakeProjects(), newFakeAreas()
+		area := areas.seed(t, "玩樂", false)
+		p := seedActive(t, projects, &area.ID)
+		if _, err := projects.Archive(ctx, p.ID); err != nil {
+			t.Fatalf("Archive: %v", err)
+		}
+
+		got, err := project.New(projects, areas).ResolveProjectArea(ctx, p.ID)
+
+		var refErr *usecase.ReferenceError
+		if !errors.As(err, &refErr) || got != nil {
+			t.Fatalf("ResolveProjectArea = %+v, %v, want a *ReferenceError and no area", got, err)
+		}
+		want := []usecase.ReferenceProblem{{Kind: usecase.ReferenceProject, ID: p.ID, Archived: true}}
+		if !slices.Equal(refErr.Problems, want) {
+			t.Errorf("problems = %+v, want %+v", refErr.Problems, want)
+		}
+	})
+}
+
+// The default area a day brings to a transaction and the one its project brings
+// are one rule, which is what keeps them from disagreeing: for each state a
+// default area can be in, both ways to ask give the same answer.
+func TestADayAndAProjectBringTheSameDefaultArea(t *testing.T) {
+	ctx := context.Background()
+	gone := uuid.Must(uuid.NewV7())
+	tests := []struct {
+		name string
+		area func(areas *fakeAreas) *uuid.UUID
+		want string // the name of the area it brings; empty for none
+	}{
+		{"no default area", func(*fakeAreas) *uuid.UUID { return nil }, ""},
+		{"an area in use", func(areas *fakeAreas) *uuid.UUID { id := areas.seed(t, "玩樂", false).ID; return &id }, "玩樂"},
+		{"an archived area", func(areas *fakeAreas) *uuid.UUID { id := areas.seed(t, "舊的", true).ID; return &id }, ""},
+		{"an area that is gone", func(*fakeAreas) *uuid.UUID { return &gone }, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projects, areas := newFakeProjects(), newFakeAreas()
+			p := seedActive(t, projects, tt.area(areas))
+			projects.activeOn = []model.Project{p}
+			svc := project.New(projects, areas)
+
+			byDay, err := svc.ResolveProjectDefaults(ctx, usecase.ResolveProjectDefaultsInput{Date: day(5)})
+			if err != nil {
+				t.Fatalf("ResolveProjectDefaults: %v", err)
+			}
+			byProject, err := svc.ResolveProjectArea(ctx, p.ID)
+			if err != nil {
+				t.Fatalf("ResolveProjectArea: %v", err)
+			}
+
+			for how, area := range map[string]*usecase.Area{"by the day": byDay.DefaultArea, "by the project": byProject} {
+				switch {
+				case tt.want == "" && area != nil:
+					t.Errorf("%s: area = %+v, want none", how, area)
+				case tt.want != "" && (area == nil || area.Name != tt.want):
+					t.Errorf("%s: area = %+v, want %s", how, area, tt.want)
+				}
+			}
+		})
+	}
+
+	t.Run("a failing area store is an error either way, not a missing area", func(t *testing.T) {
+		boom := errors.New("connection reset")
+		projects, areas := newFakeProjects(), newFakeAreas()
+		area := areas.seed(t, "玩樂", false)
+		p := seedActive(t, projects, &area.ID)
+		projects.activeOn = []model.Project{p}
+		areas.err = boom
+		svc := project.New(projects, areas)
+
+		if _, err := svc.ResolveProjectDefaults(ctx, usecase.ResolveProjectDefaultsInput{Date: day(5)}); !errors.Is(err, boom) {
+			t.Errorf("by the day: err = %v, want the store failure", err)
+		}
+		if _, err := svc.ResolveProjectArea(ctx, p.ID); !errors.Is(err, boom) {
+			t.Errorf("by the project: err = %v, want the store failure", err)
+		}
+	})
+}
+
 func TestProjectUseCasesReportStoreFailures(t *testing.T) {
 	ctx := context.Background()
 	boom := errors.New("connection reset")
@@ -620,6 +839,7 @@ func TestProjectUseCasesReportStoreFailures(t *testing.T) {
 			_, err := svc.ResolveProjectDefaults(ctx, usecase.ResolveProjectDefaultsInput{Date: day(5)})
 			return err
 		},
+		"ResolveProjectArea": func() error { _, err := svc.ResolveProjectArea(ctx, p.ID); return err },
 	}
 	for name, call := range calls {
 		if err := call(); !errors.Is(err, boom) {

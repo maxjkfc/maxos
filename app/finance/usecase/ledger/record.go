@@ -11,8 +11,7 @@ import (
 )
 
 // RecordExpense loads the account, the instrument and the categories the request
-// names, and records the expense the domain makes of them: a draft, or a
-// confirmed transaction when asked.
+// names, and records the expense the domain makes of them as a draft.
 func (s *Service) RecordExpense(ctx context.Context, in usecase.RecordExpenseInput) (usecase.RecordOutput, error) {
 	return s.recordCategorized(ctx, in.RecordDetails, in.AccountID, in.InstrumentID, in.Lines, model.NewExpense)
 }

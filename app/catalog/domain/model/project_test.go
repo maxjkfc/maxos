@@ -59,6 +59,36 @@ func TestNewPeriodRejectsAnEndBeforeTheStart(t *testing.T) {
 	}
 }
 
+// A date that is not given is the zero time, which DateOf would turn into the
+// first day of the year 1: a period from the beginning of time (no start), or one
+// that ends before it starts (no end), and not what was meant.
+func TestNewPeriodRequiresBothEnds(t *testing.T) {
+	tests := []struct {
+		name     string
+		from, to time.Time
+	}{
+		{name: "no start", from: time.Time{}, to: day(8)},
+		{name: "no end", from: day(1), to: time.Time{}},
+		{name: "neither", from: time.Time{}, to: time.Time{}},
+		{name: "no start, the zero time in another location", from: time.Time{}.In(time.FixedZone("UTC+8", 8*60*60)), to: day(8)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := model.NewPeriod(tt.from, tt.to)
+
+			if !errors.Is(err, model.ErrPeriodIncomplete) {
+				t.Fatalf("err = %v, want ErrPeriodIncomplete", err)
+			}
+			if errors.Is(err, model.ErrPeriodReversed) {
+				t.Errorf("err = %v, want a missing end to be told from an end before the start", err)
+			}
+			if !got.From.IsZero() || !got.To.IsZero() {
+				t.Errorf("period = %v, want none with the error", got)
+			}
+		})
+	}
+}
+
 func TestPeriodCoversIncludesBothEnds(t *testing.T) {
 	outer := period(t, 1, 8)
 	tests := []struct {

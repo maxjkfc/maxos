@@ -2,7 +2,10 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -69,20 +72,30 @@ func (db *DB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 // panics, it rolls back, and the error (or panic) goes on to the caller.
 //
 // fn must make its database calls with the context it is given: a call with the
-// original context runs outside the transaction. It may call WithinTx again,
-// which then runs fn in a savepoint of the open transaction: when the inner fn
-// fails only its own writes are undone, and the outer fn decides what to do
-// with the error.
+// original context runs outside the transaction.
+//
+// fn may call WithinTx again, which then runs the inner fn in a savepoint of the
+// open transaction, and the outer fn decides what to do with what the inner call
+// returns. When the inner call returns an error, whatever the reason, its writes
+// are undone and the outer transaction is as usable as before it:
+//
+//   - the inner fn returns an error, or panics;
+//   - the context of the inner call is done by the time its fn returns, so that
+//     it cannot be committed;
+//   - the inner fn ignores a statement that failed and returns nil: the
+//     transaction is then in a failed state, which nothing but a rollback to the
+//     savepoint leaves, and the savepoint cannot be released from it.
+//
+// Only an inner call that returns nil leaves its writes to the outer
+// transaction, which keeps them or undoes them with the rest. (A context that
+// is done while a statement is running is another matter: pgx closes the
+// connection then, which ends the whole transaction.)
 func (db *DB) WithinTx(ctx context.Context, fn func(ctx context.Context) error) error {
-	var (
-		tx  pgx.Tx
-		err error
-	)
 	if outer, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
-		tx, err = outer.Begin(ctx) // a savepoint
-	} else {
-		tx, err = db.pool.Begin(ctx)
+		return withinSavepoint(ctx, outer, fn)
 	}
+
+	tx, err := db.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
@@ -96,6 +109,66 @@ func (db *DB) WithinTx(ctx context.Context, fn func(ctx context.Context) error) 
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit transaction: %w", err)
+	}
+	return nil
+}
+
+// savepointSeq numbers the savepoints taken by withinSavepoint, so that no two of
+// them that are open at once share a name.
+var savepointSeq atomic.Uint64
+
+// withinSavepoint runs fn between SAVEPOINT and RELEASE SAVEPOINT on tx, and
+// undoes what fn wrote, with ROLLBACK TO SAVEPOINT, unless the release is made.
+//
+// It does not use pgx's own nested transaction (tx.Begin): that one is closed
+// as soon as Commit is called, whether or not the release worked, and the
+// Rollback that should follow a failed release is then a no-op. The savepoint
+// would stay open with the writes of an inner call that returned an error, in a
+// transaction that may well be in a failed state.
+func withinSavepoint(ctx context.Context, tx pgx.Tx, fn func(ctx context.Context) error) (err error) {
+	name := "maxos_sp_" + strconv.FormatUint(savepointSeq.Add(1), 10)
+	if _, err := tx.Exec(ctx, "SAVEPOINT "+name); err != nil {
+		return fmt.Errorf("begin nested transaction: %w", err)
+	}
+
+	released := false
+	defer func() {
+		if released {
+			return
+		}
+		// fn failed or panicked, or the release did. Undo what it wrote, even
+		// though ctx may be done and even though the transaction may be in a failed
+		// state: this is the statement that leaves that state. A caller that gave
+		// up must not leave its writes behind in the transaction that goes on.
+		if rollbackErr := rollbackToSavepoint(context.WithoutCancel(ctx), tx, name); rollbackErr != nil {
+			err = errors.Join(err, rollbackErr)
+		}
+	}()
+
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	// A done context cannot send the release (pgx refuses a statement whose
+	// context is done, before it is sent), and a nested call that cannot commit is
+	// one that failed.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("commit nested transaction: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+name); err != nil {
+		return fmt.Errorf("commit nested transaction: %w", err)
+	}
+	released = true
+	return nil
+}
+
+// rollbackToSavepoint undoes everything since the savepoint and then releases
+// it: rolling back to a savepoint keeps it, and an open savepoint is only noise.
+func rollbackToSavepoint(ctx context.Context, tx pgx.Tx, name string) error {
+	if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+name); err != nil {
+		return fmt.Errorf("roll back nested transaction: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+name); err != nil {
+		return fmt.Errorf("release the savepoint of a nested transaction that was rolled back: %w", err)
 	}
 	return nil
 }

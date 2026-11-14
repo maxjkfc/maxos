@@ -97,10 +97,6 @@ func (f *fakeTransactions) Insert(ctx context.Context, txn model.Transaction) (m
 		}
 	}
 	txn.CreatedAt = f.stamp()
-	if txn.Status == model.StatusConfirmed {
-		at := txn.CreatedAt
-		txn.ConfirmedAt = &at
-	}
 	f.byID[txn.ID] = txn
 	f.inserts++
 	return txn, nil
@@ -274,15 +270,12 @@ func (f *fakeCategories) Get(_ context.Context, id uuid.UUID) (model.Category, e
 	return c, nil
 }
 
-// errCatalogNotFound is what the fake catalog returns for an id it does not know
-// when it is asked to get one.
-var errCatalogNotFound = errors.New("the catalog has no such entry")
-
 // fakeReferences is the catalog as the ledger sees it, with some projects, areas
 // and tags. As a catalogusecase.VerifyReferences, an id it does not know is not
-// found and one it knows as archived is archived. As a catalogusecase.GetProject
-// and a catalogusecase.GetArea, it returns the project or the area, archived or
-// not, with the default area it was given.
+// found and one it knows as archived is archived. As a
+// catalogusecase.ResolveProjectArea, it follows the rule of the port: the default
+// area it was given, unless that is archived, and a *ReferenceError for a project
+// that is not found or archived.
 type fakeReferences struct {
 	// projects, areas and tags map each id the catalog has to whether it is
 	// archived.
@@ -290,8 +283,8 @@ type fakeReferences struct {
 	// defaultAreas maps the projects that have a default area to it.
 	defaultAreas map[uuid.UUID]uuid.UUID
 	calls        []catalogusecase.VerifyReferencesInput
-	// getErr, when set, is what GetProject and GetArea return.
-	getErr error
+	// resolveAreaErr, when set, is what ResolveProjectArea returns.
+	resolveAreaErr error
 }
 
 func newFakeReferences() *fakeReferences {
@@ -347,37 +340,21 @@ func (f *fakeReferences) VerifyReferences(_ context.Context, in catalogusecase.V
 	return nil
 }
 
-func (f *fakeReferences) GetProject(_ context.Context, id uuid.UUID) (catalogusecase.Project, error) {
-	if f.getErr != nil {
-		return catalogusecase.Project{}, f.getErr
+func (f *fakeReferences) ResolveProjectArea(_ context.Context, projectID uuid.UUID) (*catalogusecase.Area, error) {
+	if f.resolveAreaErr != nil {
+		return nil, f.resolveAreaErr
 	}
-	archived, exists := f.projects[id]
-	if !exists {
-		return catalogusecase.Project{}, errCatalogNotFound
+	archived, exists := f.projects[projectID]
+	if !exists || archived {
+		return nil, &catalogusecase.ReferenceError{Problems: []catalogusecase.ReferenceProblem{
+			{Kind: catalogusecase.ReferenceProject, ID: projectID, Archived: exists},
+		}}
 	}
-	project := catalogusecase.Project{ID: id}
-	if archived {
-		project.ArchivedAt = &epoch
+	areaID, hasDefault := f.defaultAreas[projectID]
+	if !hasDefault || f.areas[areaID] {
+		return nil, nil
 	}
-	if area, ok := f.defaultAreas[id]; ok {
-		project.DefaultAreaID = &area
-	}
-	return project, nil
-}
-
-func (f *fakeReferences) GetArea(_ context.Context, id uuid.UUID) (catalogusecase.Area, error) {
-	if f.getErr != nil {
-		return catalogusecase.Area{}, f.getErr
-	}
-	archived, exists := f.areas[id]
-	if !exists {
-		return catalogusecase.Area{}, errCatalogNotFound
-	}
-	area := catalogusecase.Area{ID: id}
-	if archived {
-		area.ArchivedAt = &epoch
-	}
-	return area, nil
+	return &catalogusecase.Area{ID: areaID}, nil
 }
 
 // fakeProjects is a catalogusecase.ResolveProjectDefaults that returns what it is
