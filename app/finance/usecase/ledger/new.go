@@ -5,6 +5,7 @@ import (
 
 	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
+	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/clock"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/tx"
 )
@@ -12,8 +13,9 @@ import (
 // New returns the ledger use cases. They need the repos of what a transaction
 // refers to, the catalog to check the projects, areas, parties and tags it
 // names, to find the project of a day, to find the default area of a project and
-// to list the parties (their names put the dealings in order), and a transactor
-// to keep what they write together.
+// to list the parties (their names put the dealings in order), a transactor to
+// keep what they write together, and a clock, which is the only way they tell
+// what today is.
 func New(
 	transactor tx.Transactor,
 	transactions repo.TransactionRepo,
@@ -24,6 +26,7 @@ func New(
 	defaults catalogusecase.ResolveProjectDefaults,
 	projectAreas catalogusecase.ResolveProjectArea,
 	listParties catalogusecase.ListParties,
+	clk clock.Clock,
 ) *Service {
 	return &Service{
 		tx:           transactor,
@@ -35,16 +38,18 @@ func New(
 		defaults:     defaults,
 		projectAreas: projectAreas,
 		listParties:  listParties,
+		clock:        clk,
 	}
 }
 
 // Module provides the use cases to the Fx graph as usecase.RecordExpense,
-// RecordIncome, RecordTransfer, RecordExchange, RecordDealing, RecordReward,
-// SetOpeningBalance, Reconcile, ConfirmTransactions, DiscardDraft,
-// VoidTransaction, GetTransaction, ListTransactions, GetBalances and
+// RecordIncome, RecordTransfer, RecordExchange, RecordTrade, RecordDealing,
+// RecordReward, RecordBillInstalment, SetOpeningBalance, Reconcile,
+// ConfirmTransactions, DiscardDraft, VoidTransaction, GetTransaction,
+// ListTransactions, GetInstalmentPlan, ListInstalmentPlans, GetBalances and
 // GetDealings, all backed by one Service. It needs a tx.Transactor, a
 // repo.TransactionRepo, a repo.AccountRepo, a repo.InstrumentRepo, a
-// repo.CategoryRepo, and the catalog's usecase.VerifyReferences,
+// repo.CategoryRepo, a clock.Clock, and the catalog's usecase.VerifyReferences,
 // usecase.ResolveProjectDefaults, usecase.ResolveProjectArea and
 // usecase.ListParties.
 func Module() fx.Option {
@@ -53,15 +58,20 @@ func Module() fx.Option {
 		fx.As(new(usecase.RecordIncome)),
 		fx.As(new(usecase.RecordTransfer)),
 		fx.As(new(usecase.RecordExchange)),
+		fx.As(new(usecase.RecordTrade)),
 		fx.As(new(usecase.RecordDealing)),
 		fx.As(new(usecase.RecordReward)),
+		fx.As(new(usecase.RecordBillInstalment)),
 		fx.As(new(usecase.SetOpeningBalance)),
 		fx.As(new(usecase.Reconcile)),
 		fx.As(new(usecase.ConfirmTransactions)),
 		fx.As(new(usecase.DiscardDraft)),
 		fx.As(new(usecase.VoidTransaction)),
+		fx.As(new(usecase.RescheduleInstalment)),
 		fx.As(new(usecase.GetTransaction)),
 		fx.As(new(usecase.ListTransactions)),
+		fx.As(new(usecase.GetInstalmentPlan)),
+		fx.As(new(usecase.ListInstalmentPlans)),
 		fx.As(new(usecase.GetBalances)),
 		fx.As(new(usecase.GetDealings)),
 	))

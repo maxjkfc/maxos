@@ -30,9 +30,11 @@ func decPtr(s string) *decimal.Decimal {
 }
 
 // env is a ledger on fakes, with what the transactions it records refer to: two
-// accounts, three instruments, three expense categories, an income category and
+// accounts, three instruments, four expense categories, an income category and
 // the two system categories that migration 0005 seeds. Parties are added to the
-// catalog by the tests that need them (refs.addParty).
+// catalog by the tests that need them (refs.addParty). Its clock tells the
+// afternoon of the day of the tests in the timezone of the application, which is
+// ahead of UTC.
 type env struct {
 	t           *testing.T
 	tx          *fakeTx
@@ -42,11 +44,12 @@ type env struct {
 	categories  *fakeCategories
 	refs        *fakeReferences
 	projects    *fakeProjects
+	clock       *fakeClock
 	svc         *ledger.Service
 
-	cash, bank                    model.Account
-	twd, usd, btc                 model.Instrument
-	food, household, fees, salary model.Category
+	cash, bank                              model.Account
+	twd, usd, btc                           model.Instrument
+	food, household, fees, interest, salary model.Category
 }
 
 func newEnv(t *testing.T) *env {
@@ -60,6 +63,7 @@ func newEnv(t *testing.T) *env {
 		categories:  newFakeCategories(),
 		refs:        newFakeReferences(),
 		projects:    &fakeProjects{},
+		clock:       &fakeClock{now: time.Date(2026, 11, 14, 15, 30, 0, 0, taipei)},
 	}
 	e.cash = e.accounts.add("cash")
 	e.bank = e.accounts.add("bank")
@@ -69,6 +73,7 @@ func newEnv(t *testing.T) *env {
 	e.food = e.categories.add(model.DirectionExpense, "food")
 	e.household = e.categories.add(model.DirectionExpense, "household")
 	e.fees = e.categories.add(model.DirectionExpense, "fees")
+	e.interest = e.categories.add(model.DirectionExpense, "interest")
 	e.salary = e.categories.add(model.DirectionIncome, "salary")
 	for _, id := range []uuid.UUID{model.UnrecordedExpenseCategoryID, model.UnrecordedIncomeCategoryID} {
 		direction := model.DirectionExpense
@@ -77,7 +82,7 @@ func newEnv(t *testing.T) *env {
 		}
 		e.categories.categories[id] = model.Category{ID: id, Direction: direction, Name: "未記錄"}
 	}
-	e.svc = ledger.New(e.tx, e.txns, e.accounts, e.instruments, e.categories, e.refs, e.projects, e.refs, e.refs)
+	e.svc = ledger.New(e.tx, e.txns, e.accounts, e.instruments, e.categories, e.refs, e.projects, e.refs, e.refs, e.clock)
 	return e
 }
 
@@ -85,7 +90,7 @@ func newEnv(t *testing.T) *env {
 func (e *env) names() map[uuid.UUID]string {
 	names := map[uuid.UUID]string{
 		e.cash.ID: "cash", e.bank.ID: "bank", e.twd.ID: "TWD", e.usd.ID: "USD", e.btc.ID: "BTC",
-		e.food.ID: "food", e.household.ID: "household", e.fees.ID: "fees", e.salary.ID: "salary",
+		e.food.ID: "food", e.household.ID: "household", e.fees.ID: "fees", e.interest.ID: "interest", e.salary.ID: "salary",
 		model.UnrecordedExpenseCategoryID: "未記錄", model.UnrecordedIncomeCategoryID: "未記錄",
 	}
 	for id, name := range e.refs.partyNames {
@@ -248,6 +253,36 @@ func TestEveryKindIsRecordedThroughItsConstructorInTheDomain(t *testing.T) {
 			},
 			kind:     "opening",
 			postings: []string{"account(cash) +1000 TWD", "opening -1000 TWD"},
+		},
+		{
+			name: "a trade that buys",
+			record: func(e *env) (usecase.RecordOutput, error) {
+				return e.svc.RecordTrade(context.Background(), usecase.RecordTradeInput{
+					RecordDetails: e.details("trade-buy-0001"), Direction: "buy",
+					AccountID: e.cash.ID, InstrumentID: e.btc.ID, Quantity: dec("0.1"),
+					CashAccountID: e.bank.ID, CurrencyID: e.twd.ID, Amount: dec("300000"),
+				})
+			},
+			kind: "trade",
+			postings: []string{
+				"account(bank) -300000 TWD", "conversion +300000 TWD", "conversion -0.1 BTC", "account(cash) +0.1 BTC",
+			},
+		},
+		{
+			name: "a trade that sells",
+			record: func(e *env) (usecase.RecordOutput, error) {
+				return e.svc.RecordTrade(context.Background(), usecase.RecordTradeInput{
+					RecordDetails: e.details("trade-sell-001"), Direction: "sell",
+					AccountID: e.cash.ID, InstrumentID: e.btc.ID, Quantity: dec("0.1"),
+					CashAccountID: e.bank.ID, CurrencyID: e.twd.ID, Amount: dec("320000"),
+					Fees: []usecase.Fee{{AccountID: e.bank.ID, InstrumentID: e.twd.ID, CategoryID: e.fees.ID, Amount: dec("15")}},
+				})
+			},
+			kind: "trade",
+			postings: []string{
+				"account(cash) -0.1 BTC", "conversion +0.1 BTC", "conversion -320000 TWD", "account(bank) +320000 TWD",
+				"account(bank) -15 TWD", "expense(fees) +15 TWD, base +15",
+			},
 		},
 	}
 	for _, tt := range tests {

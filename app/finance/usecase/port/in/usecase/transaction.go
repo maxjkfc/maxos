@@ -13,10 +13,11 @@ import (
 type Transaction struct {
 	ID uuid.UUID
 	// Kind is "expense", "income", "transfer", "exchange", "opening", "reward",
-	// "dealing" or "reconciliation".
+	// "dealing", "reconciliation", "instalment" or "trade".
 	Kind string
 	// Status is "draft", "confirmed" or "void". Only a confirmed transaction counts
-	// toward balances.
+	// toward balances, and from the day it happened on: one that is dated after
+	// today counts from its day.
 	Status string
 	// OccurredOn is the day it happened, at midnight UTC.
 	OccurredOn time.Time
@@ -33,7 +34,16 @@ type Transaction struct {
 	TagIDs         []uuid.UUID
 	// Postings are its movements, in order; they add up to zero in each
 	// instrument.
-	Postings  []Posting
+	Postings []Posting
+	// PlanID and PlanSeq say which instalment plan it is part of, and where in it;
+	// both are nil for a transaction that is in none. A plan is the transactions that
+	// share a PlanID. PlanSeq 0 is its origin, the expense that is paid in
+	// instalments or the instalment that converts what an account owes, and PlanID is
+	// its own ID; 1, 2, ... are its periods, in the order they fall due, each an
+	// instalment on the day it is charged to the account. A plan is confirmed,
+	// discarded and voided through its origin, as a whole.
+	PlanID    *uuid.UUID
+	PlanSeq   *int
 	CreatedAt time.Time
 	// ConfirmedAt and VoidedAt are nil until the transaction is confirmed and
 	// voided.
@@ -46,11 +56,11 @@ type Posting struct {
 	// Seq is its position in the transaction, from 1.
 	Seq int
 	// Book is what it is made to: "account", "expense", "income", "conversion",
-	// "opening", "dealing", "reward" or "adjustment".
+	// "opening", "dealing", "reward", "adjustment" or "instalment".
 	Book string
-	// AccountID is set for the book "account" and only there; CategoryID for
-	// "expense" and "income" and only there; PartyID, the party of a dealing, for
-	// "dealing" and only there.
+	// AccountID is set for the books "account" and "instalment" and only there;
+	// CategoryID for "expense" and "income" and only there; PartyID, the party of a
+	// dealing, for "dealing" and only there.
 	AccountID  *uuid.UUID
 	CategoryID *uuid.UUID
 	PartyID    *uuid.UUID
@@ -58,7 +68,10 @@ type Posting struct {
 	InstrumentID uuid.UUID
 	// Quantity is how much moves. It is positive when the book grows (an account
 	// holds more, an expense happens, a party owes me more) and negative when it
-	// shrinks (an income or a reward happens, a party owes me less).
+	// shrinks (an income or a reward happens, a party owes me less). An instalment
+	// posting is the principal of a plan that is not yet charged to the account: it
+	// is negative when that is made owed (the origin of the plan), and positive when
+	// a period charges it.
 	Quantity decimal.Decimal
 	// BaseAmount is Quantity in the base currency, with its sign. Expense, income
 	// and reward postings have one, the others do not.
@@ -176,6 +189,15 @@ type Fee struct {
 // account or by a party on my behalf. What I pay for others from an account is
 // not my expense: it goes to what they owe me (Shares). Accounts, parties,
 // instrument and categories must exist and not be archived.
+//
+// With Instalments the account does not pay it at once but over a schedule that is
+// set now, as an instalment plan (消費分期): the whole of it is an expense on the
+// day it is recorded for, and the account is charged the principal of each period
+// on the day it falls due. What is recorded is the expense, which is the origin of
+// the plan, and a transaction for each period, all of them drafts in one go. The
+// output is the expense; the periods are read with GetInstalmentPlan, and the
+// idempotency key is the expense's, the keys of the periods being made from the
+// plan and not given.
 type RecordExpense interface {
 	RecordExpense(ctx context.Context, in RecordExpenseInput) (RecordOutput, error)
 }
@@ -192,7 +214,7 @@ type RecordExpenseInput struct {
 	PaidByPartyID *uuid.UUID
 	// InstrumentID is what was paid in. It must be a currency when a party paid or
 	// there are Shares (ErrNotCurrency): what a party owes is counted in a
-	// currency.
+	// currency. It must be a currency with Instalments too.
 	InstrumentID uuid.UUID
 	// Lines are my own share of the payment, at least one: a payment made only for
 	// others is not an expense, and is recorded with RecordDealing. When an account
@@ -201,6 +223,12 @@ type RecordExpenseInput struct {
 	// Shares are the parts of the payment that I made for others, in the
 	// instrument of the expense. Each party that is in them owes me their amount.
 	Shares []Share
+	// Instalments, when set, splits the payment into periods: the account is
+	// charged the amount of the lines and of the shares, which is what it would have
+	// paid, over the schedule instead of at once. It needs AccountID, and is refused
+	// with PaidByPartyID (ErrInstalmentsWithPaidBy): a party paying on my behalf has
+	// no account to charge.
+	Instalments *InstalmentSchedule
 }
 
 // RecordIncome records money earned: into an account, from one or more
@@ -352,9 +380,21 @@ type SetOpeningBalanceInput struct {
 	Amount decimal.Decimal
 }
 
-// ConfirmTransactions confirms drafts, which makes them count toward balances.
-// It is all or nothing: when any of them cannot be confirmed (it does not exist,
-// or is not a draft) none is, and the error names every one that cannot.
+// ConfirmTransactions confirms drafts, which makes them count toward balances,
+// each from the day it happened on. It is all or nothing: when any of them cannot
+// be confirmed (it does not exist, is not a draft, or is a period of a plan whose
+// origin is not among the ids) none is, and the error names every one that cannot.
+//
+// The origin of an instalment plan stands for the whole plan: it confirms the
+// origin and each period with it, in one go, and is one transaction of the call.
+// The periods are transactions of their own, which ListTransactions lists, so a
+// caller that confirms every draft it lists gives the id of a period beside that
+// of its origin: the period is covered by the origin, and confirmed once, with it.
+// The id of a period whose origin is not among the ids is ErrPartOfPlan: a period
+// is never confirmed alone. The output has what the ids name, each once and in the
+// order given: a period that was given is there, confirmed, in its place, and one
+// that was not given is not (the periods of a plan given by its origin alone are
+// read with GetInstalmentPlan).
 type ConfirmTransactions interface {
 	ConfirmTransactions(ctx context.Context, in ConfirmTransactionsInput) (ConfirmTransactionsOutput, error)
 }
@@ -366,14 +406,17 @@ type ConfirmTransactionsInput struct {
 	IDs []uuid.UUID
 }
 
-// ConfirmTransactionsOutput holds the transactions confirmed, in the order the
-// ids were given.
+// ConfirmTransactionsOutput holds one transaction for each id that was given, as
+// it is once confirmed, in the order the ids were given; an id given twice is
+// there once.
 type ConfirmTransactionsOutput struct {
 	Transactions []Transaction
 }
 
 // DiscardDraft deletes a draft, with its postings. A transaction that is
-// confirmed has counted and cannot be deleted: void it instead.
+// confirmed has counted and cannot be deleted: void it instead. The origin of an
+// instalment plan is discarded with all its periods, or not at all; a period
+// cannot be discarded by its own id (ErrPartOfPlan).
 type DiscardDraft interface {
 	DiscardDraft(ctx context.Context, id uuid.UUID) error
 }
@@ -381,6 +424,11 @@ type DiscardDraft interface {
 // VoidTransaction voids a confirmed transaction: it stops counting toward
 // balances, and stays as a record. Only a confirmed transaction can be voided.
 // To correct one, void it and record it again.
+//
+// The origin of an instalment plan voids the whole plan, the periods that have
+// already fallen due too, and the output is the origin. A plan is corrected, or
+// paid off early, by voiding it and recording it again: nothing reschedules a
+// plan. A period cannot be voided by its own id (ErrPartOfPlan).
 type VoidTransaction interface {
 	VoidTransaction(ctx context.Context, id uuid.UUID) (Transaction, error)
 }
@@ -420,6 +468,10 @@ type ListTransactionsInput struct {
 	// paid out to them or received from them, a share of an expense that they
 	// owe me, or an expense that they paid.
 	PartyID *uuid.UUID
+	// PlanID lists the transactions of that instalment plan: its origin, which has
+	// the id of the plan, and its periods. They are ordinary transactions to the
+	// list, each on its own day.
+	PlanID *uuid.UUID
 	// ProjectID and AreaID list the transactions of that project and of that area.
 	ProjectID *uuid.UUID
 	AreaID    *uuid.UUID
@@ -439,44 +491,61 @@ type ListTransactionsOutput struct {
 	HasMore bool
 }
 
-// GetBalances returns what accounts hold, counting only confirmed transactions.
-// A balance is the quantities of the confirmed postings to an account, added up
-// per instrument; nothing is stored.
+// GetBalances returns what accounts hold on a day, counting only the confirmed
+// transactions that happened on or before it: a confirmed transaction dated
+// later counts from its day on. A balance is the quantities of the confirmed
+// account postings to an account, added up per instrument; nothing is stored. The
+// principal of instalment plans that has not fallen due is not in it: it is
+// listed next to it, as the unbilled instalment of the account (未到期分期).
 type GetBalances interface {
 	GetBalances(ctx context.Context, in GetBalancesInput) (GetBalancesOutput, error)
 }
 
-// GetBalancesInput says whose balances to return.
+// GetBalancesInput says whose balances to return, and on which day.
 type GetBalancesInput struct {
 	// AccountID limits the balances to that account; nil returns every account's.
 	AccountID *uuid.UUID
+	// AsOf is the day the balances are counted up to, that day and each day before
+	// it. Only the day it falls on counts, as its own location reads it. nil is
+	// today, which the clock of the application says, in its timezone.
+	AsOf *time.Time
 }
 
-// Balance is how much of an instrument an account holds. A negative quantity is
-// what the account owes.
+// Balance is how much of an instrument an account holds on a day. A negative
+// quantity is what the account owes.
 type Balance struct {
 	AccountID    uuid.UUID
 	InstrumentID uuid.UUID
 	Quantity     decimal.Decimal
+	// UnbilledInstalment is the principal of the instalment plans of the account
+	// that has not fallen due by the day (未到期分期). It is zero or less, with the
+	// sign of what an account owes: -11000 is 11,000 still to be charged to the
+	// account in the periods to come. It is not in Quantity: a period reaches
+	// Quantity on the day it falls due, and until then it is listed here.
+	// InstalmentPlanSummary.Remaining is the same amount of one plan, as a size
+	// that is zero or more.
+	UnbilledInstalment decimal.Decimal
 }
 
 // GetBalancesOutput holds one balance for each account and instrument that has
-// confirmed postings, by account name and then instrument code. A balance can be
-// zero, when the postings cancel out; an account with no confirmed postings at
-// all has none.
+// confirmed postings by the day, by account name and then instrument code. A
+// balance can be zero, when the postings cancel out; an account with no confirmed
+// postings by the day has none. An account and instrument that only has
+// unbilled instalment has one, with a quantity of zero.
 type GetBalancesOutput struct {
 	Balances []Balance
 }
 
-// GetDealings returns what parties owe me, counting only confirmed transactions.
-// A dealing is the quantities of the confirmed dealing postings made to a party,
-// added up per instrument, so what a party owes me is one amount per currency,
-// not a list of what is open; nothing is stored.
+// GetDealings returns what parties owe me on a day, counting only the confirmed
+// transactions that happened on or before it. A dealing is the quantities of the
+// confirmed dealing postings made to a party, added up per instrument, so what a
+// party owes me is one amount per currency, not a list of what is open; nothing
+// is stored.
 type GetDealings interface {
 	GetDealings(ctx context.Context, in GetDealingsInput) (GetDealingsOutput, error)
 }
 
-// GetDealingsInput says whose dealings to return.
+// GetDealingsInput says whose dealings to return, and on which day.
 type GetDealingsInput struct {
 	// PartyID limits the dealings to that party; nil returns every party's. A party
 	// with no confirmed dealing postings has none. The party must be one the
@@ -484,6 +553,10 @@ type GetDealingsInput struct {
 	// party), not an empty result. An archived party is one the catalog has: what it
 	// owes still counts.
 	PartyID *uuid.UUID
+	// AsOf is the day the dealings are counted up to, that day and each day before
+	// it. Only the day it falls on counts, as its own location reads it. nil is
+	// today, which the clock of the application says, in its timezone.
+	AsOf *time.Time
 }
 
 // Dealing is what a party owes me in an instrument: positive when they owe me,

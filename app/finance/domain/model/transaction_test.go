@@ -227,7 +227,7 @@ func TestValidateRefuses(t *testing.T) {
 			categoryPosting(model.BookExpense, twd, "120", "121")), model.ErrBaseAmountMismatch},
 
 		{"no postings", raw(model.KindExpense), model.ErrNoPostings},
-		{"a kind that is not one of the fixed ones", raw(model.Kind("trade"),
+		{"a kind that is not one of the fixed ones", raw(model.Kind("payment"),
 			accountPosting(acctA, twd, "-1"),
 			accountPosting(acctB, twd, "1")), model.ErrInvalidKind},
 	}

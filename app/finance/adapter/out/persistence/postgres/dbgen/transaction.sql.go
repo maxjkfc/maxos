@@ -50,33 +50,8 @@ func (q *Queries) DeleteTransaction(ctx context.Context, id uuid.UUID) (int64, e
 	return result.RowsAffected(), nil
 }
 
-const getBalanceAsOf = `-- name: GetBalanceAsOf :one
-SELECT COALESCE(sum(p.quantity), 0)::numeric AS quantity
-FROM fin_posting p
-JOIN fin_transaction t ON t.id = p.transaction_id
-WHERE t.status = 'confirmed' AND p.book = 'account'
-  AND p.account_id = $1 AND p.instrument_id = $2
-  AND t.occurred_on <= $3
-`
-
-type GetBalanceAsOfParams struct {
-	AccountID    uuid.NullUUID
-	InstrumentID uuid.UUID
-	Day          time.Time
-}
-
-// What an account holds of an instrument on a day: the quantities of its account
-// postings in the confirmed transactions that happened on or before the day (the
-// day itself is in), added up. Zero when there are none.
-func (q *Queries) GetBalanceAsOf(ctx context.Context, arg GetBalanceAsOfParams) (decimal.Decimal, error) {
-	row := q.db.QueryRow(ctx, getBalanceAsOf, arg.AccountID, arg.InstrumentID, arg.Day)
-	var quantity decimal.Decimal
-	err := row.Scan(&quantity)
-	return quantity, err
-}
-
 const getTransaction = `-- name: GetTransaction :one
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at FROM fin_transaction WHERE id = $1
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq FROM fin_transaction WHERE id = $1
 `
 
 func (q *Queries) GetTransaction(ctx context.Context, id uuid.UUID) (FinTransaction, error) {
@@ -96,12 +71,14 @@ func (q *Queries) GetTransaction(ctx context.Context, id uuid.UUID) (FinTransact
 		&i.CreatedAt,
 		&i.ConfirmedAt,
 		&i.VoidedAt,
+		&i.PlanID,
+		&i.PlanSeq,
 	)
 	return i, err
 }
 
 const getTransactionByIdempotencyKey = `-- name: GetTransactionByIdempotencyKey :one
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at FROM fin_transaction WHERE idempotency_key = $1
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq FROM fin_transaction WHERE idempotency_key = $1
 `
 
 func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, idempotencyKey string) (FinTransaction, error) {
@@ -121,12 +98,14 @@ func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, idempotenc
 		&i.CreatedAt,
 		&i.ConfirmedAt,
 		&i.VoidedAt,
+		&i.PlanID,
+		&i.PlanSeq,
 	)
 	return i, err
 }
 
 const getTransactionForUpdate = `-- name: GetTransactionForUpdate :one
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at FROM fin_transaction WHERE id = $1 FOR UPDATE
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq FROM fin_transaction WHERE id = $1 FOR UPDATE
 `
 
 // Locks the row until the database transaction ends: whoever changes or deletes
@@ -148,12 +127,14 @@ func (q *Queries) GetTransactionForUpdate(ctx context.Context, id uuid.UUID) (Fi
 		&i.CreatedAt,
 		&i.ConfirmedAt,
 		&i.VoidedAt,
+		&i.PlanID,
+		&i.PlanSeq,
 	)
 	return i, err
 }
 
 const getTransactionsByIDs = `-- name: GetTransactionsByIDs :many
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at FROM fin_transaction WHERE id = ANY($1::uuid[])
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq FROM fin_transaction WHERE id = ANY($1::uuid[])
 `
 
 // In no particular order.
@@ -180,6 +161,8 @@ func (q *Queries) GetTransactionsByIDs(ctx context.Context, ids []uuid.UUID) ([]
 			&i.CreatedAt,
 			&i.ConfirmedAt,
 			&i.VoidedAt,
+			&i.PlanID,
+			&i.PlanSeq,
 		); err != nil {
 			return nil, err
 		}
@@ -232,14 +215,14 @@ func (q *Queries) InsertPosting(ctx context.Context, arg InsertPostingParams) er
 const insertTransaction = `-- name: InsertTransaction :one
 INSERT INTO fin_transaction (
     id, kind, status, occurred_on, occurred_at, description, merchant,
-    project_id, area_id, idempotency_key
+    project_id, area_id, idempotency_key, plan_id, plan_seq
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7,
-    $8, $9, $10
+    $8, $9, $10, $11, $12
 )
 ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at
+RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq
 `
 
 type InsertTransactionParams struct {
@@ -253,6 +236,8 @@ type InsertTransactionParams struct {
 	ProjectID      uuid.NullUUID
 	AreaID         uuid.NullUUID
 	IdempotencyKey string
+	PlanID         uuid.NullUUID
+	PlanSeq        *int32
 }
 
 // Returns no row (pgx.ErrNoRows) when the idempotency key is already stored: the
@@ -260,7 +245,9 @@ type InsertTransactionParams struct {
 // when that one commits it does nothing. A transaction is inserted as a draft,
 // which has no confirmed time; the table's CHECK constraints refuse any other
 // status. The postings follow in the same database transaction: the deferred
-// balance trigger checks them at its commit.
+// balance trigger checks them at its commit. plan_id and plan_seq are both NULL
+// for a transaction that is in no instalment plan. The origin of a plan is
+// inserted before its periods, which refer to it.
 func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionParams) (FinTransaction, error) {
 	row := q.db.QueryRow(ctx, insertTransaction,
 		arg.ID,
@@ -273,6 +260,8 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 		arg.ProjectID,
 		arg.AreaID,
 		arg.IdempotencyKey,
+		arg.PlanID,
+		arg.PlanSeq,
 	)
 	var i FinTransaction
 	err := row.Scan(
@@ -289,6 +278,8 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 		&i.CreatedAt,
 		&i.ConfirmedAt,
 		&i.VoidedAt,
+		&i.PlanID,
+		&i.PlanSeq,
 	)
 	return i, err
 }
@@ -308,28 +299,45 @@ func (q *Queries) InsertTransactionTag(ctx context.Context, arg InsertTransactio
 }
 
 const listBalances = `-- name: ListBalances :many
-SELECT a.id AS account_id, i.id AS instrument_id, sum(p.quantity)::numeric AS quantity
+SELECT a.id AS account_id, i.id AS instrument_id,
+       COALESCE(sum(p.quantity) FILTER (WHERE p.book = 'account'), 0)::numeric AS quantity,
+       COALESCE(sum(p.quantity) FILTER (WHERE p.book = 'instalment'), 0)::numeric AS unbilled_instalment
 FROM fin_posting p
 JOIN fin_transaction t ON t.id = p.transaction_id
 JOIN fin_account a ON a.id = p.account_id
 JOIN fin_instrument i ON i.id = p.instrument_id
-WHERE t.status = 'confirmed' AND p.book = 'account'
-  AND ($1::uuid IS NULL OR p.account_id = $1)
+WHERE t.status = 'confirmed' AND p.book IN ('account', 'instalment')
+  AND t.occurred_on <= $1
+  AND ($2::uuid IS NULL OR p.account_id = $2)
+  AND ($3::uuid IS NULL OR p.instrument_id = $3)
 GROUP BY a.id, a.name, i.id, i.code
 ORDER BY a.name, a.id, i.code, i.id
 `
 
-type ListBalancesRow struct {
-	AccountID    uuid.UUID
-	InstrumentID uuid.UUID
-	Quantity     decimal.Decimal
+type ListBalancesParams struct {
+	Day          time.Time
+	AccountID    uuid.NullUUID
+	InstrumentID uuid.NullUUID
 }
 
-// What each account holds of each instrument: the quantities of its postings
-// added up, counting only the confirmed transactions. Nothing is stored. With an
-// account_id it is the balances of that account only.
-func (q *Queries) ListBalances(ctx context.Context, accountID uuid.NullUUID) ([]ListBalancesRow, error) {
-	rows, err := q.db.Query(ctx, listBalances, accountID)
+type ListBalancesRow struct {
+	AccountID          uuid.UUID
+	InstrumentID       uuid.UUID
+	Quantity           decimal.Decimal
+	UnbilledInstalment decimal.Decimal
+}
+
+// What each account holds of each instrument on a day: the quantities of its
+// postings added up, counting only the confirmed transactions that happened on or
+// before the day (the day itself is in). Nothing is stored. quantity is what the
+// account holds, from its account postings. unbilled_instalment is the principal
+// of instalment plans that is not yet due, from its instalment postings: zero or
+// less, as what the account owes. There is a row for each account and instrument
+// with a posting of either book, so an account that only has unbilled instalment
+// is listed. With an account_id it is the balances of that account only, and with
+// an instrument_id of that instrument only.
+func (q *Queries) ListBalances(ctx context.Context, arg ListBalancesParams) ([]ListBalancesRow, error) {
+	rows, err := q.db.Query(ctx, listBalances, arg.Day, arg.AccountID, arg.InstrumentID)
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +345,12 @@ func (q *Queries) ListBalances(ctx context.Context, accountID uuid.NullUUID) ([]
 	var items []ListBalancesRow
 	for rows.Next() {
 		var i ListBalancesRow
-		if err := rows.Scan(&i.AccountID, &i.InstrumentID, &i.Quantity); err != nil {
+		if err := rows.Scan(
+			&i.AccountID,
+			&i.InstrumentID,
+			&i.Quantity,
+			&i.UnbilledInstalment,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -354,10 +367,16 @@ FROM fin_posting p
 JOIN fin_transaction t ON t.id = p.transaction_id
 JOIN fin_instrument i ON i.id = p.instrument_id
 WHERE t.status = 'confirmed' AND p.book = 'dealing'
-  AND ($1::uuid IS NULL OR p.party_id = $1)
+  AND t.occurred_on <= $1
+  AND ($2::uuid IS NULL OR p.party_id = $2)
 GROUP BY p.party_id, i.id, i.code
 ORDER BY p.party_id, i.code, i.id
 `
+
+type ListDealingsParams struct {
+	Day     time.Time
+	PartyID uuid.NullUUID
+}
 
 type ListDealingsRow struct {
 	PartyID      uuid.UUID
@@ -365,13 +384,14 @@ type ListDealingsRow struct {
 	Quantity     decimal.Decimal
 }
 
-// What each party owes me of each instrument: the quantities of the dealing
-// postings made to it, added up, counting only the confirmed transactions.
+// What each party owes me of each instrument on a day: the quantities of the
+// dealing postings made to it, added up, counting only the confirmed
+// transactions that happened on or before the day (the day itself is in).
 // Nothing is stored. With a party_id it is that party's only. party_id is a plain
 // uuid column, so no row of another table says which parties exist: the use case
 // orders them by name, and this by id and then instrument code.
-func (q *Queries) ListDealings(ctx context.Context, partyID uuid.NullUUID) ([]ListDealingsRow, error) {
-	rows, err := q.db.Query(ctx, listDealings, partyID)
+func (q *Queries) ListDealings(ctx context.Context, arg ListDealingsParams) ([]ListDealingsRow, error) {
+	rows, err := q.db.Query(ctx, listDealings, arg.Day, arg.PartyID)
 	if err != nil {
 		return nil, err
 	}
@@ -380,6 +400,117 @@ func (q *Queries) ListDealings(ctx context.Context, partyID uuid.NullUUID) ([]Li
 	for rows.Next() {
 		var i ListDealingsRow
 		if err := rows.Scan(&i.PartyID, &i.InstrumentID, &i.Quantity); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInstalmentPlans = `-- name: ListInstalmentPlans :many
+SELECT o.id AS plan_id,
+       op.account_id::uuid AS account_id,
+       op.instrument_id,
+       (-op.quantity)::numeric AS principal,
+       COALESCE(sum(pp.quantity) FILTER (WHERE pt.occurred_on <= $1), 0)::numeric AS charged,
+       min(pt.occurred_on) FILTER (WHERE pt.occurred_on > $1) AS next_due_on
+FROM fin_transaction o
+JOIN fin_posting op ON op.transaction_id = o.id AND op.book = 'instalment'
+LEFT JOIN fin_transaction pt ON pt.plan_id = o.id AND pt.plan_seq > 0 AND pt.status = 'confirmed'
+LEFT JOIN fin_posting pp ON pp.transaction_id = pt.id AND pp.book = 'instalment'
+WHERE o.status = 'confirmed' AND o.plan_seq = 0 AND o.occurred_on <= $1
+  AND ($2::uuid IS NULL OR op.account_id = $2)
+GROUP BY o.id, o.occurred_on, op.account_id, op.instrument_id, op.quantity
+ORDER BY o.occurred_on DESC, o.id DESC
+`
+
+type ListInstalmentPlansParams struct {
+	Day       time.Time
+	AccountID uuid.NullUUID
+}
+
+type ListInstalmentPlansRow struct {
+	PlanID       uuid.UUID
+	AccountID    uuid.UUID
+	InstrumentID uuid.UUID
+	Principal    decimal.Decimal
+	Charged      decimal.Decimal
+	NextDueOn    interface{}
+}
+
+// Where each confirmed instalment plan stands on a day. The origin of a plan has
+// an instalment posting of the whole principal, which is negative, and each of its
+// periods one of the principal it charges, which is positive. principal is the
+// former without its sign. charged is the principals of the periods that fall due
+// on or before the day (the day itself is in), and next_due_on is the first day
+// after it that a period falls due, NULL when none does. A plan is there from the
+// day of its origin, as its instalment posting is in ListBalances: one whose
+// origin is dated after the day is not listed. A plan is listed whatever it has
+// left to charge: telling the finished ones is for the use case. With an
+// account_id it is the plans that charge that account only. The newest plan is
+// first: by the day of its origin, then the latest made.
+func (q *Queries) ListInstalmentPlans(ctx context.Context, arg ListInstalmentPlansParams) ([]ListInstalmentPlansRow, error) {
+	rows, err := q.db.Query(ctx, listInstalmentPlans, arg.Day, arg.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInstalmentPlansRow
+	for rows.Next() {
+		var i ListInstalmentPlansRow
+		if err := rows.Scan(
+			&i.PlanID,
+			&i.AccountID,
+			&i.InstrumentID,
+			&i.Principal,
+			&i.Charged,
+			&i.NextDueOn,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPlanTransactions = `-- name: ListPlanTransactions :many
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq FROM fin_transaction WHERE plan_id = $1 ORDER BY plan_seq
+`
+
+// The transactions of an instalment plan: its origin, which has plan_seq 0, and
+// then its periods in the order they fall due.
+func (q *Queries) ListPlanTransactions(ctx context.Context, planID uuid.NullUUID) ([]FinTransaction, error) {
+	rows, err := q.db.Query(ctx, listPlanTransactions, planID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FinTransaction
+	for rows.Next() {
+		var i FinTransaction
+		if err := rows.Scan(
+			&i.ID,
+			&i.Kind,
+			&i.Status,
+			&i.OccurredOn,
+			&i.OccurredAt,
+			&i.Description,
+			&i.Merchant,
+			&i.ProjectID,
+			&i.AreaID,
+			&i.IdempotencyKey,
+			&i.CreatedAt,
+			&i.ConfirmedAt,
+			&i.VoidedAt,
+			&i.PlanID,
+			&i.PlanSeq,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -461,7 +592,7 @@ SET status = $1::text,
     confirmed_at = CASE WHEN $1::text = 'confirmed' THEN now() ELSE confirmed_at END,
     voided_at = CASE WHEN $1::text = 'void' THEN now() ELSE voided_at END
 WHERE id = $2
-RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at
+RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq
 `
 
 type SetTransactionStatusParams struct {
@@ -488,6 +619,8 @@ func (q *Queries) SetTransactionStatus(ctx context.Context, arg SetTransactionSt
 		&i.CreatedAt,
 		&i.ConfirmedAt,
 		&i.VoidedAt,
+		&i.PlanID,
+		&i.PlanSeq,
 	)
 	return i, err
 }

@@ -24,6 +24,8 @@ func toTransaction(t model.Transaction) usecase.Transaction {
 		IdempotencyKey: t.IdempotencyKey,
 		TagIDs:         slices.Clone(t.TagIDs),
 		Postings:       make([]usecase.Posting, len(t.Postings)),
+		PlanID:         clone(t.PlanID),
+		PlanSeq:        clone(t.PlanSeq),
 		CreatedAt:      t.CreatedAt,
 		ConfirmedAt:    clone(t.ConfirmedAt),
 		VoidedAt:       clone(t.VoidedAt),

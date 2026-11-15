@@ -11,10 +11,11 @@ version: "2"
 #   numeric                  shopspring/decimal, through its sql.Scanner and
 #                            driver.Valuer (pgx goes through the text form, so no
 #                            float is involved). A NULL needs the Null variant.
-# A nullable timestamptz, date or boolean is a pointer, nil for NULL.
+# A nullable timestamptz, date, integer or boolean is a pointer, nil for NULL.
 #
-# sqlc names numeric and boolean pg_catalog.numeric and pg_catalog.bool: an
-# override keyed "numeric" or "boolean" matches nothing, without any warning.
+# sqlc names numeric, boolean and integer pg_catalog.numeric, pg_catalog.bool and
+# pg_catalog.int4: an override keyed "numeric", "boolean" or "integer" matches
+# nothing, without any warning.
 sql:
   - engine: postgresql
     schema: migrations
@@ -58,6 +59,11 @@ sql:
             nullable: true
             go_type:
               type: bool
+              pointer: true
+          - db_type: pg_catalog.int4
+            nullable: true
+            go_type:
+              type: int32
               pointer: true
 
   - engine: postgresql

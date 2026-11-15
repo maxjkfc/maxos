@@ -8,7 +8,7 @@ M1（issue #4）的資料模型與分批計畫。用語以 `CONTEXT.md` 為準�
 |---|---|
 | M1a | `catalog` context（領域、專案、對象、標籤）；`finance` 的參考資料（標的、機構、帳戶、類別）；帳本核心：支出、收入、轉帳、換匯，草稿與確認，餘額查詢 |
 | M1b | 往來與分攤、回饋、手續費與折扣、對帳與「未記錄」 |
-| M1c | 分期與利息、買賣（只記數量與金額，成本計算在 M5）、預算與分配 |
+| M1c | 分期與利息、買賣（只記數量與金額，成本計算在 M5）、預算與分配。分期、買賣與「今天」的判斷（日期在未來的交易到那天才計入）先做，本檔的 M1c 段落記的就是這些；預算與分配另做 |
 
 M1 不含 MCP 工具（M3）、匯入（M2）、報表（M4）。use case 以測試驗證。
 
@@ -46,10 +46,14 @@ M1 不含 MCP 工具（M3）、匯入（M2）、報表（M4）。use case 以測
 
 1. **每筆交易、每個標的，分錄的 `quantity` 加總為 0。** 由 domain 檢查（`Transaction.Validate`，每個種類的建構函式都會呼叫）；資料庫在提交時以延遲的 constraint trigger 再檢查一次（第 4 節）。兩層都有測試。
 2. `quantity` 的正負以「該對象的增加」為正：帳戶增加為正；支出發生為正；收入發生為負；回饋取得為負（與收入相同）；往來為正表示對方欠我更多，為負表示對方欠我更少（或我欠對方）。
-3. `expense`、`income`、`reward` 的分錄必須有 `base_amount`（本位幣 TWD 的金額，符號與 `quantity` 相同，小數位數不超過本位幣的 `decimals`）。標的為 TWD 時等於 `quantity`（呼叫端若給了，必須相等）；否則由呼叫端提供交易當天的金額，寫入後不再變動。M1a 只收金額，每個類別行各帶一個，不收匯率，換算由呼叫端負責。M1 不查詢匯率來源。往來（`dealing`）與 `adjustment` 沒有 `base_amount`：往來以雙方結算的幣別計，只在算淨資產時才換算。
-4. 只有 `status = confirmed` 的交易計入餘額與任何統計。草稿不修改：要更正就捨棄後重記（M1a 沒有修改草稿的 use case）；已確認的交易不能修改內容，只能作廢（`void`）後重記。
+3. `expense`、`income`、`reward` 的分錄必須有 `base_amount`（本位幣 TWD 的金額，符號與 `quantity` 相同，小數位數不超過本位幣的 `decimals`）。標的為 TWD 時等於 `quantity`（呼叫端若給了，必須相等）；否則由呼叫端提供交易當天的金額，寫入後不再變動（唯一的例外：分期計畫改期時帶 `ChangePast`，已到期各期的利息支出與它的本位幣金額會被新排程重寫，見第 4 點）。M1a 只收金額，每個類別行各帶一個，不收匯率，換算由呼叫端負責。M1 不查詢匯率來源。往來（`dealing`）與 `adjustment` 沒有 `base_amount`：往來以雙方結算的幣別計，只在算淨資產時才換算。
+4. 只有 `status = confirmed` 的交易計入餘額與任何統計。草稿不修改：要更正就捨棄後重記（M1a 沒有修改草稿的 use case）；已確認的交易不能修改內容，只能作廢（`void`）後重記。**唯一的例外是分期計畫的排程**：計畫的各期（扣款日、本金、利息、期數）可以整體換成新的（`RescheduleInstalment`，第 5 節），草稿與已確認的計畫都行，因為各期是機構何時、扣多少，那會變；起點與被分期的總額不在此限。這個例外有多大，分成三點：
+   - **排程是整個換掉的**：已經到期的各期也在新排程裡，要原樣再送一次。提前清償就是把到期的各期照舊送上，再把剩下的本金放進一期。
+   - **預設過去是固定的。** 過去的期是計畫現在的各期中扣款日嚴格早於今天的（今天以時鐘為準，今天到期的不算）。沒有 `ChangePast`（預設 false）時，這些期不能少、不能多、不能被改：日期、本金、利息、利息的本位幣金額與順序都照舊，有利息時利息類別也不能換；否則回 `*PastPeriodsChangedError`（`ErrPastPeriodsChanged`）並指出是哪幾期，什麼都不寫。草稿的計畫也一樣。
+   - **帶 `ChangePast` 時，過去也能改，代價要知道**：已到期各期的利息支出與它的本位幣金額會變（所以第 3 點的「寫入後不再變動」有這一個例外）；過去的帳戶餘額與未到期分期會變（餘額依日期算，各期從新的日子起算）；已確認的、某個過去日子的對帳會因此過時，而且**不會被偵測**（與對帳那一節 M1b 已知的限制同一類：對帳那天或之前的交易事後有變，那張調整就不對了）。
 5. 帳戶的餘額 = 該帳戶所有已確認分錄的 `quantity` 依標的加總。不另存餘額欄位。
 6. **折扣**只留作記錄：`discount` 只在 `expense` 分錄上、必須大於 0、小數位數不超過標的的 `decimals`。`quantity` 是實付金額，折扣不是分錄，也不進任何餘額或統計（`CONTEXT.md`：支出以實付金額計）。
+7. **帳本不檢查餘額是否足夠。** 賣出比持有的多、從帳戶付款付到負數，都照收，餘額可以是負的；這是設計，不是漏洞：帳戶的餘額就是分錄的加總（第 5 點），不是上限（信用卡本來就是負的）。`Validate` 與資料庫都沒有這種檢查，要不要攔是呼叫端的事。
 
 ### 各種類的分錄（M1a）
 
@@ -63,7 +67,7 @@ M1 不含 MCP 工具（M3）、匯入（M2）、報表（M4）。use case 以測
 | 換匯 | 3,000 USD → 93,000 TWD | `account −3000 USD`；`conversion +3000 USD`；`conversion −93000 TWD`；`account +93000 TWD` |
 | 期初 | 建立帳戶時的餘額 | `account +N`；`opening −N` |
 
-轉帳的兩個帳戶標的相同；標的不同就是換匯。換匯的兩邊必須都是幣別（買賣在 M1c）。
+轉帳的兩個帳戶標的相同；標的不同就是換匯。換匯的兩邊必須都是幣別；一邊是非幣別標的的是買賣（M1c，見下）。
 
 ### 各種類的分錄（M1b）
 
@@ -89,6 +93,21 @@ M1 不含 MCP 工具（M3）、匯入（M2）、報表（M4）。use case 以測
 - **對帳**的差額 = 實際餘額 − 記錄的餘額，帳戶分錄的數量就是差額，所以確認後帳戶等於實際餘額。幣別的差額記成「未記錄」類別的支出（少了）或收入（多了）；非幣別標的只修正數量，用 `adjustment`，沒有 `base_amount`，也不是支出或收入。
 - **`Validate`** 對這些種類的檢查：支出是一筆帳戶分錄（或一筆為負的 `dealing`，別人付的時候）加一或多筆 `expense`，再加每個分攤對象一筆為正的 `dealing`；往來是一筆帳戶分錄加一筆 `dealing`，正負相反；回饋是為正的帳戶分錄加為負的 `reward`；對帳是一筆帳戶分錄加對沖它的一筆（「未記錄」的支出為正、「未記錄」的收入為負，或 `adjustment`），正負相反。收入、轉帳、換匯、往來、回饋可以另有手續費：不是 `expense` 的種類裡，為正、沒有折扣的 `expense` 分錄與付它的帳戶分錄（同標的、同數量、為負）是一筆手續費，拿掉手續費後再依種類檢查。有多筆帳戶分錄都可能是付款時，取最後一筆，因為建構函式把手續費放在最後；手續費和主金額一樣大時靠這條規則仍能分辨（有測試）。系統類別只有對帳可以用。
 
+### 各種類的分錄（M1c）
+
+| 種類 | 例子 | 分錄 |
+|---|---|---|
+| 消費分期（起點） | 刷卡買 12,000，分 12 期 | `instalment(卡) −12000`；`expense(飲食) +12000, base 12000`（沒有帳戶分錄：此刻帳戶一毛也沒扣） |
+| 帳單分期（起點） | 把已出的 3,000 帳單轉成 3 期 | `account(卡) +3000`；`instalment(卡) −3000` |
+| 每一期（兩種計畫相同） | 本金 1,000，利息 30 | `instalment(卡) +1000`；`account(卡) −1030`；`expense(利息類別) +30, base 30`（沒有利息就沒有第三筆） |
+| 買入 | 用 300,000 TWD 買 0.1 BTC | `account(銀行) −300000 TWD`；`conversion +300000 TWD`；`conversion −0.1 BTC`；`account(錢包) +0.1 BTC` |
+| 賣出 | 賣 0.04 BTC 得 130,000 TWD | `account(錢包) −0.04 BTC`；`conversion +0.04 BTC`；`conversion −130000 TWD`；`account(銀行) +130000 TWD` |
+
+- **分期是一個計畫（plan）**：一筆起點（origin）加每期一筆（種類 `instalment`，位置 1…N）。起點與各期在建立分期當下一次產生（消費分期是刷卡當下，帳單分期是轉成分期當下），每期的扣款日（該期交易的 `occurred_on`）與金額在那時就定了，之後只能整體改期（`RescheduleInstalment`，見第 5 節；`CONTEXT.md`：分期）。消費分期的起點種類是 `expense`（可有多個類別行與分攤，卡的扣款是全額，含替別人付的部分），帳單分期的起點種類是 `instalment`；起點的 `plan_id` 就是它自己的 id，位置為 0。各期沿用起點的說明、商家、專案、領域與標籤，沒有 `occurred_at`（不再逐日重新帶入專案與領域）；各期的冪等鍵是 `instalment:<起點 id>:<位置>`，由 domain 推出，不由呼叫端給，起點用呼叫端給的鍵。呼叫端給的鍵若以 `instalment:` 開頭，一律回 `ErrReservedIdempotencyKey`：否則那個請求會以「重複」的名義拿到某一期。這個檢查在 `NormalizeIdempotencyKey`，每一種 `Record*`、`SetOpeningBalance` 與 `Reconcile` 的鍵都經過它，先於查鍵與開資料庫交易；各期自己的鍵是在標準化之後才產生的，不受影響。
+- **未到期分期（Unbilled Instalment）**：消費分期的起點把全額記進 `instalment` 分錄（為負），不動帳戶；每一期的 `instalment` +本金 把它沖掉，同一筆交易的 `account` −(本金＋利息) 才算進帳戶。所以帳戶餘額從扣款日起才減少，還沒到期的本金單獨留在 `instalment` 帳裡，讀出來是 `Balance.UnbilledInstalment`（為負，與帳戶餘額同號，加起來就是這張卡全部欠的）。`instalment` 帳不進其他統計。消費分期的起點，付款的一邊排在前面（`instalment` 在 `expense` 之前），與 M1b 一致；帳單分期的起點是 `account` 在前，手續費排在最後。
+- **驗證**（`NewInstalmentExpense`、`NewBillInstalment`；利息類別由 use case 先載入）：至少一期（`ErrNoPeriods`）；扣款日嚴格遞增（`ErrDueDatesNotIncreasing`），第一期不早於起點的日期（`ErrFirstDueTooEarly`）；本金與利息為正、小數位數不超過標的的 `decimals`，本金加總等於被分期的金額（`ErrPrincipalMismatch`）；`InterestBaseAmount` 只在有利息時給（`ErrInterestBaseAmountWithoutInterest`），外幣的利息與類別行一樣需要它；有任何一期有利息就必須給利息類別（`ErrInterestCategoryRequired`），給了的類別必須未封存、是支出方向、不是系統類別；計畫的標的必須是幣別（`ErrNotCurrency`）；別人替我付的支出不能分期（`ErrInstalmentsWithPaidBy`）。0 或負的利息不收，沒有利息就不給。
+- **買賣**：與換匯同一個形狀，差別在被買賣的標的必須是非幣別（`ErrIsCurrency`），付款的標的必須是幣別（`ErrNotCurrency`）；方向只有 `buy`、`sell`（`ErrInvalidTradeDirection`）。M1c 只記數量與金額，不算成本與損益（M5）；可以有手續費，規則同 M1b。賣出比持有的多也照收（不變條件 7）。
+
 ## 4. 資料表
 
 主鍵都是應用程式產生的 UUIDv7。金額與數量用 `numeric`，Go 端用 `github.com/shopspring/decimal`（domain 允許 import，需加入 depguard 的 allow list）。
@@ -110,11 +129,11 @@ M1 不含 MCP 工具（M3）、匯入（M2）、報表（M4）。use case 以測
 
 ### 帳本（migration `0004_fin_ledger.sql`）
 
-- `fin_transaction`：`id`、`kind`（`expense`／`income`／`transfer`／`exchange`／`opening`；M1b 加入 `reward`／`dealing`／`reconciliation`；M1c 以新 migration 擴充）、`status`（`draft`／`confirmed`／`void`）、`occurred_on date`、`occurred_at timestamptz` 可為空、`description text`、`merchant text`、`project_id uuid`、`area_id uuid`、`idempotency_key text UNIQUE`、`created_at`、`confirmed_at`、`voided_at`。
+- `fin_transaction`：`id`、`kind`（`expense`／`income`／`transfer`／`exchange`／`opening`；M1b 加入 `reward`／`dealing`／`reconciliation`；M1c 加入 `instalment`／`trade`）、`status`（`draft`／`confirmed`／`void`）、`occurred_on date`、`occurred_at timestamptz` 可為空、`description text`、`merchant text`、`project_id uuid`、`area_id uuid`、`idempotency_key text UNIQUE`、`plan_id uuid` 與 `plan_seq integer`（M1c，可為空，見 `0006`）、`created_at`、`confirmed_at`、`voided_at`。
   - `description`、`merchant` 為 `NOT NULL DEFAULT ''`（沒有就是空字串）；`idempotency_key` 為 `NOT NULL`。M1a 沒有 `inbox_item_id` 與 `is_trial`：收件到草稿的連結在 M3 隨 inbox 的 port 加入（inbox 目前沒有能驗證收件 id 的 port），`is_trial` 等用途確定後再以新 migration 加入。
   - CHECK：`kind`、`status` 的值；狀態與時間欄位相符（草稿沒有 `confirmed_at`、`voided_at`；已確認有 `confirmed_at`；作廢兩者都有，因為只有已確認的能作廢）。索引：`(occurred_on DESC, id DESC)`（列表由新到舊）、`project_id`、`area_id`。
 - `fin_posting`：`id`、`transaction_id`（外鍵，`ON DELETE CASCADE`）、`seq smallint`、`book`、`account_id` 可為空（外鍵）、`category_id` 可為空（外鍵）、`party_id uuid` 可為空（M1b，catalog 對象的 id，不加外鍵）、`instrument_id`（外鍵）、`quantity numeric NOT NULL`、`base_amount numeric`、`discount numeric`（M1b）、`memo text`；`UNIQUE (transaction_id, seq)`；CHECK：`book` 與必填欄位的對應（第 3 節的表）。索引：`(account_id, instrument_id)`、`(category_id)`、`(party_id)`（M1b）。
-  - `memo` 為 `NOT NULL DEFAULT ''`。`book` 與欄位的對應拆成幾個 CHECK（M1b 改寫後的樣子）：`book` 是八個值之一；`account_id` 只有 `account` 有；`category_id` 只有 `expense`／`income` 有；`party_id` 只有 `dealing` 有，而且 `dealing` 一定有；`base_amount` 只有 `expense`／`income`／`reward` 有；`discount` 為空，或在 `expense` 分錄上且大於 0（`conversion`、`opening`、`adjustment` 各欄位皆空）；另有 `quantity <> 0`，以及 `base_amount` 與 `quantity` 同號。
+  - `memo` 為 `NOT NULL DEFAULT ''`。`book` 與欄位的對應拆成幾個 CHECK（M1c 改寫後的樣子）：`book` 是九個值之一；`account_id` 只有 `account` 與 `instalment` 有，而且這兩個一定有；`category_id` 只有 `expense`／`income` 有；`party_id` 只有 `dealing` 有，而且 `dealing` 一定有；`base_amount` 只有 `expense`／`income`／`reward` 有；`discount` 為空，或在 `expense` 分錄上且大於 0（`conversion`、`opening`、`adjustment` 各欄位皆空，`instalment` 只有帳戶）；另有 `quantity <> 0`，以及 `base_amount` 與 `quantity` 同號。
 - `fin_transaction_tag`：`transaction_id`（外鍵，`ON DELETE CASCADE`，捨棄草稿時標籤一起刪）、`tag_id uuid`；主鍵為兩者。
 - **平衡檢查**（不變條件 1 的資料庫層）：函式 `fin_assert_transaction_balanced` 與兩個 `DEFERRABLE INITIALLY DEFERRED` 的 constraint trigger：`fin_transaction_balanced`（新增交易時）、`fin_posting_balanced`（分錄新增、修改、刪除時）。資料庫交易提交時，對每一筆受影響且仍存在的交易檢查「至少有一筆分錄，且每個標的的 `quantity` 加總為 0」，違反時以 SQLSTATE `23514`、constraint 名稱 `fin_transaction_balanced` 中止提交。捨棄草稿時分錄連帶刪除，交易已不存在，所以通過。因為交易列與分錄是多條語句，寫入必須在同一個資料庫交易內（第 5 節）。
 
@@ -127,7 +146,16 @@ M1b 的資料庫變更全在這一個 migration；`0001`–`0004` 已合併，�
 - **系統類別**：內建兩個頂層類別，名稱都是「未記錄」，一個方向 `expense`、一個方向 `income`，id 固定（`00000000-0000-7000-8000-000000000101`、`00000000-0000-7000-8000-000000000102`），就是 `model.UnrecordedExpenseCategoryID`、`model.UnrecordedIncomeCategoryID` 的值，與 `BaseCurrencyID` 同一個做法，兩邊必須相等（有測試把對帳的分錄存進資料庫，外鍵會擋下不相等的 id）。名稱受 `UNIQUE NULLS NOT DISTINCT (direction, parent_id, name)` 約束：資料庫裡已有任一方向、同名的頂層類別時，這個 migration 在播種之前就以 `cannot apply 0005_fin_dealings: a top-level category is already called 未記錄` 中止並整個還原，HINT 說要先改名（有測試）；沒有這道檢查的話，會是 `fin_category_name_key` 的唯一性錯誤，看不出該怎麼辦。`fin_category_system_not_archived_check` 讓這兩筆不能被封存，use case 也擋（`ErrSystemCategory`）。`fin_category_system_parent_check` 讓它們沒有子類別（`parent_id` 不能是這兩個 id），`NewCategory` 與 `CreateCategory` 也擋（`ErrSystemCategory`）：類別行不能用系統類別，卻可以用它的子類別，一般的支出就會記在「未記錄」底下，繞過下一句的規則（有測試）。一般的類別行與手續費不能用系統類別，只有對帳寫入它們。
 - **Down** 還原成 `0004` 的 schema（有測試：與只套用到 `0004` 的資料庫比對 catalog 裡的欄位、約束、索引、trigger 與種子資料），並刪掉兩個系統類別與它們的兩個 CHECK。帳本裡已有 M1b 才有的資料時，Down **中止並報錯，不刪資料**：選「中止」而不是「刪除」，是因為帳本資料不該被 migration 靜默刪掉。算作 M1b 的資料：種類為 `reward`／`dealing`／`reconciliation` 的交易；`dealing`／`reward`／`adjustment` 的分錄；有 `discount` 的分錄；指向系統類別的分錄；以及手續費，也就是不在「支出」交易裡的 `expense` 分錄。要退回，先自行刪除這些交易。放在系統類別底下的類別也一樣：`fin_category_system_parent_check` 在的時候不會有，被拿掉才會；這時刪除系統類別，外鍵會丟出一個看不出原因的錯誤，所以 Down 先自己檢查，以 `cannot roll back 0005_fin_dealings: a category is a subcategory of 未記錄` 中止，不動資料；先移走或刪掉那些類別（有測試）。
 
-## 5. Use case（M1a、M1b）
+### 分期與買賣（migration `0006_fin_instalments.sql`）
+
+M1c 的資料庫變更全在這一個 migration；`0001`–`0005` 已合併，不改。
+
+- `fin_transaction_kind_check`：`kind` 加入 `instalment`、`trade`。
+- `fin_transaction`：加 `plan_id uuid`（計畫的起點的 id）與 `plan_seq integer`（在計畫裡的位置：起點 0，各期 1…N），兩者都可為空。約束：`fin_transaction_plan_check`（兩者同時有值或同時為空）、`fin_transaction_plan_seq_check`（位置 ≥ 0）、`fin_transaction_plan_origin_check`（位置為 0 若且唯若 `plan_id = id`）、`fin_transaction_plan_kind_check`（種類 `instalment` 一定有計畫；`expense` 沒有位置或位置為 0；其他種類沒有計畫）、`UNIQUE (plan_id, plan_seq)`（`fin_transaction_plan_id_plan_seq_key`），以及自我外鍵 `fin_transaction_plan_id_fkey`（`NO ACTION`：被某一期指著的交易刪不掉，所以捨棄計畫要先刪各期）。**資料庫保證的只有這些**：兩個欄位同時有值或同時為空、位置不為負、位置為 0 的是 `plan_id` 指向自己的那一筆、種類與計畫欄位的對應、同一個 `plan_id` 的位置不重複，以及 `plan_id` 指向某一筆存在的交易。它**不保證** `plan_id` 指向的是起點（原始 SQL 可以讓一期指向另一期，或指向一筆普通的交易），也不保證起點的計畫欄位沒有被清空（消費分期的起點種類是 `expense`，清空之後只是一筆普通的支出）、各期的位置連續、各期的分錄與金額對得上起點。這些是 domain 的事：`NewInstalmentExpense`、`NewBillInstalment` 一次產生整個計畫，`Transaction.Validate` 檢查每一筆的形狀，use case 在同一個資料庫交易內寫入整個計畫；不另加資料庫機制。
+- `fin_posting`：`fin_posting_book_check` 加入 `instalment`；`fin_posting_account_id_check` 改為 `account` 與 `instalment` 的分錄一定有 `account_id`，其他 book 沒有。其他 CHECK 不變：`instalment` 分錄沒有類別、對象、本位幣金額與折扣。平衡檢查的 trigger 不必改。
+- **Down** 還原成 `0005` 的 schema（有測試：與只套用到 `0005` 的資料庫比對 catalog 裡的欄位、約束、索引、trigger 與種子資料）。帳本裡已有 M1c 才有的資料時，Down **中止並報錯，不刪資料**，理由同 `0005`：種類為 `instalment`／`trade` 的交易、有 `plan_id` 的交易（消費分期的起點）、有 `instalment` 分錄的交易。訊息是 `cannot roll back 0006_fin_instalments: the ledger holds instalment plans or trades`，HINT 說要先自行刪除那些交易（每種資料各有一個測試案例）。`0005` 以前的資料不擋 Down。
+
+## 5. Use case（M1a、M1b、M1c）
 
 ### catalog（`app/catalog`）
 
@@ -143,7 +171,7 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 - 冪等在併發下的做法：鍵在資料庫有唯一約束；use case 先在資料庫交易內查鍵，沒有才驗證並以 `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING` 寫入。同時進來的相同鍵，第二個的 INSERT 會等第一個提交，然後什麼都不寫、回傳 `repo.ErrDuplicateKey`，use case 再讀回第一個寫的交易。
 - `ConfirmTransactions(ids)`、`DiscardDraft(id)`、`VoidTransaction(id)`：以 `SELECT ... FOR UPDATE` 鎖住交易列（確認時依 id 排序，避免互相等待）後，由 domain 檢查狀態轉換（草稿→已確認、草稿→刪除、已確認→作廢，其餘回 `ErrNotDraft`／`ErrNotConfirmed`）。`ConfirmTransactions` 全有或全無：先檢查全部，任何一筆不存在或不是草稿就一筆都不確認，錯誤列出所有有問題的。
 - `GetTransaction(id)`、`ListTransactions(filter)`（狀態、日期區間、帳戶、專案、領域）：以 `Limit`（預設 50，上限 200）與 `Offset` 分頁，發生日由新到舊、同一天後記的在前；`HasMore` 表示後面還有。use case 向 repo 多要一筆來判斷 `HasMore`；`TransactionRepo.List` 以同一份快照（`REPEATABLE READ` 的唯讀交易，`DB.WithinSnapshot`）讀 id、列、分錄與標籤，所以讀取期間被刪除或改了狀態的交易，不會讓頁面變短而讓 `HasMore` 誤為假，也不會讓不符合篩選條件的列出現在結果裡。
-- `GetBalances(accountID?)`：各帳戶各標的的餘額，只含已確認；有已確認分錄的帳戶與標的各一列，依帳戶名稱與標的代碼排序，分錄加總為 0 時仍列出。只有一條查詢，`accountID` 是它的可選篩選。
+- `GetBalances(accountID?, asOf?)`：各帳戶各標的的餘額，只含已確認、且 `occurred_on` 在該天或之前的分錄（`asOf` 預設為今天，見 M1c）；有已確認分錄的帳戶與標的各一列，依帳戶名稱與標的代碼排序，分錄加總為 0 時仍列出。只有一條查詢（`TransactionRepo.Balances`，帳戶、標的與日期都是它的篩選；M1b 對帳用的 `BalanceAsOf` 併入這一條，不另有第三條餘額查詢）。M1c 每列另有 `UnbilledInstalment`。
 
 驗證：帳戶、類別、標的存在且未封存；類別的 `direction` 與種類相符；專案、領域、標籤經 catalog 的 port 驗證；支出與收入的金額為正；小數位數不超過標的的 `decimals`。
 
@@ -164,7 +192,7 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 - `RecordDealing{AccountID, PartyID, InstrumentID, Amount, Direction}`：`Direction` 是 `paid_out` 或 `received`（`ErrInvalidDealingDirection`）；標的必須是幣別（`ErrNotCurrency`）。`RecordReward{AccountID, InstrumentID, Amount, BaseAmount}`。
 - 對象經 catalog 的 `VerifyReferences`（`PartyIDs`）驗證存在且未封存，錯誤是 catalog 的 `*ReferenceError`：分攤的對象、別人替我付時的那個對象、往來的對象都是。
 - `Reconcile{帳戶, 標的, ActualBalance, DifferenceBaseAmount?}` → `ReconcileOutput{RecordedBalance, Difference, Transaction, Duplicate}`：
-  - `OccurredOn` 是觀察餘額的那一天（只看日期）。記錄的餘額 = 該帳戶、該標的、`occurred_on` 在該天或之前的已確認分錄加總：當天算入，隔天不算（`TransactionRepo.BalanceAsOf`，有測試）。`Difference` = 實際 − 記錄。
+  - `OccurredOn` 是觀察餘額的那一天（只看日期）。記錄的餘額 = 該帳戶、該標的、`occurred_on` 在該天或之前的已確認分錄加總：當天算入，隔天不算（`TransactionRepo.Balances` 以 `Day` 取該帳戶、該標的的那一列，沒有分錄就是 0，有測試）。`Difference` = 實際 − 記錄。
   - 有草稿在該帳戶、該標的上有分錄、日期在該天或之前時拒絕，回 `*PendingDraftsError`（`errors.Is` 為 `ErrPendingDrafts`，帶草稿的張數，一張草稿只算一次；`TransactionRepo.PendingDrafts`）：記錄的餘額要等它們確認或捨棄才知道。這也擋下上一次對帳的草稿還在時又對帳一次，否則差額會記兩次。
   - **同一個帳戶的對帳一次只做一個。** 資料庫交易的第一個語句鎖住帳戶列（`AccountRepo.Lock`：`SELECT id FROM fin_account WHERE id = $1 FOR NO KEY UPDATE`，交易結束才放），之後才查鍵、數草稿、讀餘額。後來的對帳在鎖上等，等到前一個提交（或回滾）才往下讀，讀到的就是前一個寫的草稿，所以被 `*PendingDraftsError` 擋下。沒有鎖的話，同時進來、鍵各不相同的對帳在 `READ COMMITTED` 下讀到同一個餘額與同一個「沒有草稿」，每一個都記一筆差額（併發測試在沒有鎖時寫出 4 張草稿，確認後餘額是 1920，不是 1980）。這個做法靠交易是 `READ COMMITTED`：鎖之後的每個語句都看得到前一個對帳提交的內容；`REPEATABLE READ` 的快照在第一個語句（也就是鎖）就定了，鎖之後讀到的仍是舊的資料，擋不住重複。用 `FOR NO KEY UPDATE`，不用 `FOR UPDATE`：記到這個帳戶的分錄，外鍵取的是 `FOR KEY SHARE`，與前者不衝突，所以對帳不會擋住別的交易記帳（有測試）。鎖的是帳戶，不分標的：比檢查需要的粗，但同一個帳戶同時對兩個標的對帳不值得做得更細。
   - **鎖在查冪等鍵之前，不在之後。** 與還在跑的那一次同鍵的重送，先查鍵的話查不到（前一次還沒提交），接著等鎖，等到時前一次的草稿已經在了，重送就被它擋下（`*PendingDraftsError`），而不是拿到那一次的結果。先鎖，重送等到前一次提交之後才查鍵，查到就回傳那一次的草稿（`Duplicate`）（併發測試涵蓋）。帳戶不存在時鎖不算失敗（略過 `ErrNotFound`）：用過的鍵不管它寫的是哪個帳戶都先被回答，帳戶在後面驗證請求時才檢查。
@@ -180,6 +208,27 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 
 驗證沿用 M1a：參照存在且未封存（對象經 catalog）、金額為正、小數位數不超過標的的 `decimals`、冪等不變、一律是草稿、全部在同一個資料庫交易內。
 
+### 帳本（M1c，`app/finance`）
+
+**「今天」與計入帳戶的時間。** 餘額與往來只計 `occurred_on` 在那一天或之前的已確認分錄：日期在未來的交易，確認了也要到它的日子才算（M1a、M1b 的讀取同樣如此，這是既有行為的改變）。分期每一期的扣款日就是這樣生效的，沒有排程或背景工作去「入帳」。「今天」來自注入的時鐘 `usecase/port/out/clock.Clock`（只有 `Now()`），use case 取它的日期（`model.DateOf`，沿用時鐘自己的時區）；`cmd/` 以 `pkg/clock` 實作，時區是環境變數 `MAXOS_TIMEZONE`（IANA 名稱，預設 `Asia/Taipei`），啟動時以 `time.LoadLocation` 驗證，不合法就失敗並指名這個變數；二進位內嵌 `time/tzdata`，沒有時區資料庫的執行環境（Alpine 映像）也載得到。測試給假的時鐘，不靠真實日期，也不 sleep。要「今天」的讀取是 `GetBalances`、`GetDealings`（兩者的 `AsOf` 可指定日期，不給就是今天）與 `ListInstalmentPlans`。`Reconcile` 不用時鐘：它看的是呼叫者給的 `OccurredOn`，所以日期在對帳那天之後才到期的各期草稿，不會擋下對帳。
+
+- `RecordExpense` 的 `Instalments`：給了就是消費分期。`InstalmentSchedule{Periods []InstalmentPeriod{DueOn, Principal, Interest?, InterestBaseAmount?}, InterestCategoryID?}`；use case 為每期產生 UUIDv7、載入並驗證利息類別，其餘由 domain 檢查（第 3 節）。`AccountID` 是被分期的卡；`PaidByPartyID` 不能分期。`RecordBillInstalment{帳戶, 標的, Principal, Schedule, Fees}` 是帳單分期。兩者的輸出都是起點（`RecordOutput`）。
+- 起點與各期在同一個資料庫交易內寫入，起點先寫（各期的外鍵指向它）；整個計畫只有起點的那一個冪等鍵：鍵已用過時回傳當初的起點（`Duplicate`），不再寫各期（各期的鍵由起點推出，也不會撞到別的交易）。
+- `ConfirmTransactions`、`DiscardDraft`、`VoidTransaction` 以計畫為單位：給起點的 id，帶著整個計畫。期也是各自的交易，`ListTransactions` 會列出，所以「確認列出的全部草稿」會把起點與各期的 id 一起送來：**起點也在請求裡的期，由起點的展開涵蓋，不算錯，也不重複處理**（每一筆只確認一次，整個呼叫仍是一個資料庫交易）；起點不在請求裡的期回 `ErrPartOfPlan`（錯誤列出所有這樣的期），而且不鎖那一期，即使請求裡有別的計畫的起點。`ConfirmTransactions` 的輸出是請求的每個 id 各一筆（重複的 id 算一次），依請求的順序，是確認之後的樣子：給了的期在輸出裡，沒給的期不在（只給起點就只有起點一筆，各期用 `GetInstalmentPlan` 讀）。`DiscardDraft` 與 `VoidTransaction` 只收一個 id，起點不可能與期同在一個請求裡，所以期的 id 一律是 `ErrPartOfPlan`。捨棄先刪各期、再刪起點（自我外鍵）；作廢給起點，各期已經到期也可以，作廢後整個計畫從餘額與計畫列表消失。
+- **鎖的順序**：先不鎖地讀一次，把請求的 id 分類（一般交易、起點、期）；然後所有呼叫（確認、捨棄、作廢、改期）都照同一個順序鎖：先是不是期的那些，也就是起點與一般交易，依 id 升冪 `SELECT ... FOR UPDATE`；再來是每個已鎖住的起點的計畫，它的各期依 id 升冪（起點也在請求裡的期併入這個展開，不另鎖）。一個計畫的各期只有握著它起點的那個呼叫會鎖，所以各期的鎖永遠不必等，也不會成為環的一部分；兩個有重疊的呼叫在起點與一般交易上依同一個 id 順序鎖，所以不會死結；後到的在鎖上等，等到時狀態已變，回 `ErrNotDraft`／`ErrNotConfirmed`。各期要等起點鎖到手才查：改期會把各期換成新的，起點鎖到之前讀到的各期，鎖到時可能已經不在。分類到鎖之間計畫被刪掉了，也回錯誤而不是靜默略過。use case 的測試以假的 repo 紀錄鎖的順序（起點與一般交易升冪，然後各計畫的各期升冪；被拒絕的期沒有鎖；每一筆只鎖一次）與分類後才不見的期；對真實資料庫的併發測試見第 6 節。
+  - **由起點涵蓋的期，鎖住起點之後要再對一次。** 分類時它是請求裡的一期、由起點涵蓋，不另鎖；但改期可以在分類之後、鎖之前提交，把那一期換成新的，鎖住起點之後計畫已經沒有這一期。所以鎖住每個起點、讀到它現在的各期之後，請求裡由它涵蓋的期都必須在其中；不在的，與不存在的 id 一樣回 `ErrNotFound`（錯誤指名那些 id），整個呼叫什麼都不確認，不會把它當成已涵蓋、輸出一筆空的交易。`ConfirmTransactions` 的輸出迴圈也不靜默略過：請求的 id 沒有確認的結果時回 `ErrNotFound`，不補一筆空的。測試：use case 層以假的 repo 的 `beforeLock` 在起點被鎖時先做一次改期；真的 PostgreSQL 上改期握著起點的鎖、確認在鎖上等（第 6 節）。
+- `GetInstalmentPlan(planID)` → `InstalmentPlan{Origin, Periods}`（各期依位置）；它讀的是存起來的交易，沒有依日期算的金額，所以不看今天；id 不是起點（一般交易、期、不存在）回 `ErrNotFound`。`ListInstalmentPlans{AccountID?, IncludeFinished}` → `InstalmentPlanSummary{PlanID, AccountID, InstrumentID, Principal, Charged, Remaining, NextDueOn}`：只含已確認、起點日期在今天或之前的計畫，以今天為準。計畫從起點的日期起算，與 `GetBalances` 一樣（起點的 `instalment` 分錄那天才進餘額）：起點日期在今天之後的，兩邊都沒有。三個金額都是**大小**，不為負：`Charged` = 已到期各期的本金（不含利息），`Remaining` = `Principal` − `Charged`，也就是這個計畫還沒入帳的本金。`Remaining` 與 `Balance.UnbilledInstalment` 是同一個量、符號相反：後者是 `instalment` 分錄的加總，為 0 或負（−11,000 表示還有 11,000 要在之後的各期入帳），一個帳戶的 `UnbilledInstalment` 等於它所有計畫的 `Remaining` 之和取負（有測試逐日比對）。`NextDueOn` 為空表示已全部到期，預設不列已全部到期的（`IncludeFinished` 才列）；起點日由新到舊。以一條彙總查詢算出，所以是同一份快照。
+- `RescheduleInstalment{PlanID, Schedule, ChangePast}` → `InstalmentPlan`：把計畫的排程整個換成新的。`Schedule` 與記錄時是同一個 `InstalmentSchedule`，檢查也一樣（日期遞增、第一期不早於起點、本金為正、利息與利息類別、本位幣金額），所以各期的扣款日、本金、利息、利息類別與**期數**都可以變。不變的有兩樣：起點從頭到尾不動；新排程的本金加總必須等於計畫的本金（起點的 `instalment` 分錄），否則回 `*PrincipalMismatchError`（`errors.Is` 為 `ErrPrincipalMismatch`，帶著兩個金額：排程加起來的與計畫的）。總額變了就是購買變了，要作廢重記；提前清償就是改期：到期的各期原樣再送，把剩下的本金放進清償那天的一期。草稿與已確認的計畫都可以，已作廢的回 `ErrPlanVoid`；id 不是起點（一般交易、期、不存在）回 `ErrNotFound`。已經到期的期要改（機構實際扣的未必是排的），得帶 `ChangePast`，見下。
+  - **這是「已確認的交易不能修改」的唯一例外**（不變條件 4）：被改的是排程，也就是機構何時、扣多少，那會變；購買（起點）與總額不變。做法是刪掉舊的各期、寫入新的各期，所以**各期的交易 id 會變**（鍵 `instalment:<起點 id>:<位置>` 不變，位置 1…N），舊的各期不再存在。新的各期用記錄時的同一份程式碼做（`InstalmentSchedule.periods`）：沿用起點的說明、商家、專案、領域與標籤。新的各期取計畫的狀態：草稿計畫的是草稿，已確認計畫的是已確認，`confirmed_at` 是改期當時的資料庫時間。寫入仍是「先寫成草稿、再確認」：`Insert` 只收草稿，沒有放寬，確認走 `ConfirmTransactions` 同一條路（`SetStatus`），資料表的狀態與時間 CHECK 照常把關，平衡檢查在提交時檢查每一筆新的期。
+  - **排程是整個換掉的**：新排程就是計畫從此的全部各期，已經到期的也在裡面。所以提前清償要把到期的各期原樣再送一次（日期、本金、利息都照舊），再加清償那天的一期放剩下的本金；沒有「只送改的那幾期」這種用法。
+  - **過去是固定的，除非帶 `ChangePast`（`RescheduleInstalmentInput` 的欄位，預設 false）。** 過去的期是計畫現在的各期中扣款日嚴格早於今天的；今天以時鐘為準，今天到期的不算過去，可以改。沒有 `ChangePast` 時，新排程裡扣款日早於今天的各期，必須正好是這些期：同一天、同樣的本金、利息與利息的本位幣金額，順序也一樣；過去的期只要有一期有利息，利息類別也不能換（沒有一期有利息時，類別不是過去的一部分，可以換）。過去的期不能少、不能多、不能被改，否則回 `*PastPeriodsChangedError`（`errors.Is` 為 `ErrPastPeriodsChanged`；`Differences` 逐期列出位置、扣款日，以及是少了、多了還是哪些欄位不同，`InterestCategoryChanged` 說類別換了；訊息說明要 `ChangePast`），什麼都不寫。草稿的計畫一樣。這一關在排程本身的檢查之後、寫入之前，用的是鎖住之後讀到的各期。
+  - **`ChangePast` 的範圍。** 帶著它，過去的期可以隨新排程改，也就是已確認的交易被改了，後果是：已到期各期的利息支出與它的本位幣金額會變（不變條件 3 的「寫入後不再變動」因此有這個例外）；過去的帳戶餘額與未到期分期會變；某個過去日子的、已確認的對帳可能因此過時，而且不會被偵測（與上面對帳的已知限制同一類）。不帶它，過去固定，這些都不會發生。
+  - **利息類別**：新排程的利息類別與記錄時一樣要能用（不是已封存、是支出類別、不是系統類別）。唯一的放寬是計畫的各期現在用的那一個：它在記錄之後被封存了，仍可以沿用，否則用了已封存類別的計畫連改期都不行；換成別的已封存的類別仍回 `ErrArchived`。「現在用的」以計畫現在的各期為準：換成別的類別之後，原來那個已封存的就不再放行；沒有任何一期有利息的計畫沒有「現在用的」，已封存的類別就是已封存。
+  - 一個 `WithinTx`：先鎖計畫（上面的鎖的順序），鎖住之後重讀計畫，狀態與有沒有被刪都在鎖下檢查，由 domain（`InstalmentPlan.Reschedule`；今天與 `ChangePast` 由 use case 傳進去，domain 不讀時鐘）檢查排程與過去的各期、做出新的各期，通過了才寫（刪、寫、確認）；被拒絕的什麼都不寫。沒有冪等鍵：同樣的請求做兩次得到同樣的排程，第二次把各期重寫一次，沒關係。
+  - 餘額、未到期分期、計畫列表與對帳都是依日期算的，所以改期之後各期從新的日子起算：一期從未來移到今天或之前，帳戶餘額多了它的本金與利息，未到期分期少了本金，反過來也一樣；沒有利息的期移動時，兩者加起來不變。移到今天不是過去，移到今天之前，或把今天之前的期移走，才要 `ChangePast`。草稿的期移到對帳那天或之前，那天的對帳就被它擋下（`ErrPendingDrafts`），移回去就不擋。這些都不特別處理，也沒有快取。
+- `RecordTrade{Direction, AccountID, InstrumentID, Quantity, CashAccountID, CurrencyID, Amount, Fees}`：`Direction` 是 `buy` 或 `sell`；`AccountID` 持有被買賣的標的，`CashAccountID` 收付金額。
+- **已知的限制**：被分期的總額不能改（改了就是改了那筆購買：作廢整個計畫、重記）；提前清償就是改期，把到期的各期原樣再送一次、剩下的本金放進清償那天的一期（`RescheduleInstalment`）。各期是一般的交易，會出現在 `ListTransactions`（可用 `PlanID` 篩選整個計畫）；不自動確認各期。
+
 ## 6. 測試
 
 - domain：分錄產生與不變條件（每個種類、外幣、多類別、不平衡時拒絕）。
@@ -188,8 +237,17 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 - `pkg/postgres`：`WithinTx` 的整合測試，含巢狀 savepoint 的各種失敗（內層回傳錯誤、內層 context 在提交前已結束、內層忽略失敗的語句後回傳 nil、panic、多層）：內層的寫入還原，外層交易仍可繼續使用；`WithinSnapshot` 讀到的是開始時已提交的資料。
 - `TransactionRepo.List` 的快照：以 pgx tracer 在列 id 的語句之後、讀列的語句之前，從另一條連線刪除或改狀態，驗證頁面仍是列 id 時看到的那一頁；不用 sleep，所以每次執行都一樣。
 - M1b domain：第 3 節 M1b 表的每一種分錄（逐筆比對分錄），外幣分攤；拒絕的情形（對象重複、兩種付款人、別人付時有分攤、沒有自己的行、非支出的折扣、手續費用收入類別、系統類別、系統類別底下的子類別、非幣別的往來、分攤或別人代付用非幣別標的（沒有分攤的非幣別支出仍可以）、對帳的 `DifferenceBaseAmount`）；手續費與主金額一樣大時仍認得出手續費；`Validate` 對新種類與新分錄的各種錯誤。
-- M1b use case：以假的 port 測驗證（對象經 catalog、手續費各自載入）、冪等、對帳的各個分支（差額 0、少、多、非幣別、缺本位幣金額、有草稿在等）與以日期計的餘額、`GetDealings` 的順序，以及給對象時只用 `VerifyReferences` 問那一個對象（找不到回 `ErrNotFound` 且不讀 repo，已封存的可以，catalog 的其他錯誤不當成找不到；假的 catalog 照真的回 `*ReferenceError`，以 `Archived` 分出找不到與已封存）；對帳先鎖帳戶、再查鍵、再數草稿與讀餘額（假的 repo 與假的帳戶共用一份呼叫紀錄，驗證順序），鎖失敗就停，用過的鍵不管帳戶存不存在都先回答。假的 repo 的 `BalanceAsOf`、`PendingDrafts` 依記憶體裡的交易照真實語意計算，所以「對帳草稿確認後餘額等於實際餘額」在 use case 層就能驗證。
-- M1b postgres adapter：新的 CHECK 擋下錯誤的 book 與欄位組合；新的 book 仍受平衡檢查；`Dealings` 只計已確認、抵銷往來增減、加總為 0 仍列出；`BalanceAsOf`（當天算入、隔天不算，草稿、作廢與其他帳戶、標的不算）；`PendingDrafts`（一張草稿只算一次）；`PartyID` 篩選；系統類別的 id、不可封存與沒有子類別；`AccountRepo.Lock`（不存在的 id、鎖住時另一個鎖被擋、外鍵的 `KEY SHARE` 不被擋；用 `NOWAIT`，所以不必等）。
+- M1b use case：以假的 port 測驗證（對象經 catalog、手續費各自載入）、冪等、對帳的各個分支（差額 0、少、多、非幣別、缺本位幣金額、有草稿在等）與以日期計的餘額、`GetDealings` 的順序，以及給對象時只用 `VerifyReferences` 問那一個對象（找不到回 `ErrNotFound` 且不讀 repo，已封存的可以，catalog 的其他錯誤不當成找不到；假的 catalog 照真的回 `*ReferenceError`，以 `Archived` 分出找不到與已封存）；對帳先鎖帳戶、再查鍵、再數草稿與讀餘額（假的 repo 與假的帳戶共用一份呼叫紀錄，驗證順序），鎖失敗就停，用過的鍵不管帳戶存不存在都先回答。假的 repo 的 `Balances`、`PendingDrafts` 依記憶體裡的交易照真實語意計算，所以「對帳草稿確認後餘額等於實際餘額」在 use case 層就能驗證。
+- M1b postgres adapter：新的 CHECK 擋下錯誤的 book 與欄位組合；新的 book 仍受平衡檢查；`Dealings` 只計已確認、抵銷往來增減、加總為 0 仍列出；`Balances` 以日期取（當天算入、隔天不算，草稿、作廢與其他帳戶、標的不算）；`PendingDrafts`（一張草稿只算一次）；`PartyID` 篩選；系統類別的 id、不可封存與沒有子類別；`AccountRepo.Lock`（不存在的 id、鎖住時另一個鎖被擋、外鍵的 `KEY SHARE` 不被擋；用 `NOWAIT`，所以不必等）。
 - migration：`migrations/` 的整合測試把 `0005` 往下再往上，與只套用到 `0004` 的資料庫比對 catalog；帳本裡有 M1b 的資料時 Down 中止且不動資料；有類別放在系統類別底下時（要先拿掉 CHECK 才放得進去）Down 以自己的訊息中止、不動資料，而不是丟出外鍵錯誤；已有同名的頂層類別時 Up 以自己的訊息與 HINT 中止並整個還原，而不是丟出唯一性錯誤。
 - `cmd/` 的整合測試：真的 Fx 模組（`CatalogModule`、`FinanceModule`）加真的 PostgreSQL，把分攤、往來增減、回饋與對帳走過一遍（確認後 `GetDealings` 與餘額，對帳少與多的草稿確認後餘額等於實際餘額；`GetDealings` 問 catalog 沒有的對象回 `ErrNotFound`，問已封存的對象不出錯）。adapter 不能 import use case，use case 也不能 import adapter，只有 `cmd/` 同時知道兩邊，所以端到端的測試放在這裡。
 - `cmd/` 的併發測試：同一個帳戶的對帳同時進來，鍵各不相同時只寫一張草稿、其餘回 `ErrPendingDrafts`，確認後餘額等於實際餘額；鍵相同的重送回傳第一個的草稿，不被那張草稿擋下。不靠 sleep 等某個時間點：pgx tracer 把第一個呼叫停在數完草稿之後，其他呼叫在那時才啟動，然後每隔 5 毫秒問一次 PostgreSQL（`pg_stat_activity` 的 `wait_event_type = 'Lock'`）每個呼叫是已經結束、還是在等鎖（tracer 記下每個呼叫用的後端，所以對得上是哪一個呼叫），都有了答案才放第一個呼叫走，所以結果每次都一樣。這個輪詢有期限（20 秒）：到了還有呼叫既沒結束也沒在等鎖，測試就失敗並指出是哪幾個；每個呼叫自己也有期限，卡在別處的呼叫會以錯誤結束，不會讓測試掛到 `go test -timeout`。沒有鎖時，兩個測試都會失敗；鎖放在查鍵之後時，第二個會失敗。
+- M1c domain：消費分期與帳單分期的起點與每一期的分錄（逐筆比對）、利息與外幣利息、各期沿用起點的欄位、冪等鍵的推導；拒絕的情形（沒有期、扣款日不遞增、第一期早於起點、本金加總不符、利息沒有類別或類別是系統類別、收入方向、已封存、沒有利息卻給 `InterestBaseAmount`、別人替我付、非幣別的標的）；`Validate` 對計畫欄位與分期分錄的各種錯誤；買賣的兩個方向與各種拒絕。
+- M1c use case：以假的 port 與假的時鐘測驗證各期的 id 與鍵、起點先於各期寫入、重送不重複、確認／捨棄／作廢以計畫為單位（期的 id 被拒且不上鎖、鎖依 id 升冪、分類後才不見的期）、`GetBalances` 與 `GetDealings` 的 `AsOf` 與預設（今天）、`ListInstalmentPlans` 的篩選與順序、`RecordTrade`。
+- M1c postgres adapter：`instalment` 分錄的 CHECK 與平衡檢查；計畫欄位的各個 CHECK、`UNIQUE` 與外鍵；起點在各期還在時刪不掉、先刪各期可以；計畫寫入全有或全無；`GetPlan` 依位置讀回、不是起點就是 `ErrNotFound`；餘額與未到期分期隨日期變化（購買前、購買當天、第一期前一天、扣款日當天、最後一期之後；草稿與作廢的計畫不算）；日期在未來的一般交易與往來到那天才算；`InstalmentPlans` 的本金、已入帳（不含利息）、下一個扣款日、已結清、帳戶篩選、順序；`PendingDrafts` 只在各期到期那天起才算；買賣的餘額與平衡檢查。
+- migration：`0006` 往下再往上，與只套用到 `0005` 的資料庫比對 catalog；Down 對各種 M1c 的資料各有一個拒絕案例，且不動資料；`0005` 以前的資料不擋 Down。`0005` 的測試改成先退到 `0005` 再開始。
+- `pkg/config`：`MAXOS_TIMEZONE` 合法、沒設（用預設）與非法（錯誤指名這個變數）。
+- `cmd/` 的端到端測試（M1c）：真的模組加真的 PostgreSQL 與可控的時鐘，走過 12 期分期（確認起點、期被拒、各個日子的餘額與未到期分期、計畫列表與已結清的、作廢起點）、買入再賣出、日期在未來的支出到那天才算、對帳不被尚未到期的各期草稿擋下。
+- M1c 審查後的修正：use case：起點也在請求裡的期由起點涵蓋、只確認一次，輸出依請求的順序、重複的 id 算一次，別的計畫的起點在請求裡也不能讓這一期通過；每個 `Record*`、`SetOpeningBalance` 與 `Reconcile` 對 `instalment:` 開頭的鍵回 `ErrReservedIdempotencyKey`，不查鍵、不開資料庫交易。domain：`NormalizeIdempotencyKey` 只擋這個前綴（不擋含有它的鍵、不同大小寫的鍵），各期自己的鍵照常產生。postgres adapter：起點日期在那天之後的計畫不列，`InstalmentPlans` 與 `Balances` 逐日一致。`cmd/`：列出全部草稿、一次確認，計畫只入帳一次。
+- M1c 改期：domain：新的各期照記錄時的做法（逐筆分錄、沿用起點的欄位、鍵與位置）、起點與被呼叫的計畫都不變、所有排程的拒絕（沒有期、日期、本金、利息與類別，總額不符且帶著兩個金額）、已作廢的計畫、各期與起點狀態不一致、標的不符、沒有 `instalment` 分錄的起點。過去的各期（草稿與已確認的計畫各一遍）：到期的各期原樣再送、剩下的放進一期（提前清償）不需要 `ChangePast`；少一期、在今天之前多一期、日期、本金、利息或利息的本位幣金額不同、有利息時換利息類別、沒有利息的期多出利息、同時改好幾期，都回 `*PastPeriodsChangedError` 並指出是哪幾期，帶 `ChangePast` 就成功；今天到期的期可以改，昨天到期的不行；沒有任何過去的期有利息時類別可以換。已封存的利息類別：計畫的各期現在用的放行，別的已封存的、系統類別仍被拒，沒有任何一期有利息的計畫沒有「現在用的」。use case：草稿與已確認的計畫（新各期的狀態與 `confirmed_at`）、舊各期已刪、起點不動、一個資料庫交易、鎖的順序、鎖住之後才發現作廢或被刪、各種拒絕都什麼也不寫、同一排程做兩次結果相同；過去的各期：到期的原樣再送不需要 `ChangePast`，各種改動沒有它就被拒且什麼也不寫（交易、刪除、寫入與狀態都不動），帶了就成功（草稿與已確認的各一遍），今天取自時鐘（到期那天可以改、隔天不行）；已封存的利息類別。postgres adapter：刪、寫、確認在一個交易裡取代排程，草稿與已確認的都行，餘額隨新的日子變，一期不平衡時整個取代還原、舊排程原樣。`cmd/` 端到端：12 期的計畫確認、三期過去後把剩下的 9,000 改成下個月一期（利息也改），到期的三期原樣再送，不需要 `ChangePast`：餘額、未到期分期、計畫列表與利息支出都對，總共欠的不變；同一個呼叫把過去一期的利息打錯就被拒（指出是第 1 期）、計畫與餘額照舊，帶 `ChangePast` 才改（那一期的利息支出從 30 變 33，卡多欠 3）；一期在今天前後來回移動（沒有 `ChangePast` 被拒，帶了才動）；作廢後拒絕；總額不符的錯誤帶著兩個金額；草稿的期移到對帳那天前後；利息類別在記錄後被封存，計畫仍可以用它改期，別的已封存的類別不行，計畫換了別的類別之後原來那個也不行。
+- 計畫的併發（`cmd/finance_plan_concurrency_integration_test.go`，真的 PostgreSQL）：要看某一種交錯時，交錯是做出來的，不靠運氣：pgx tracer 把第一個呼叫停在它的第一個鎖之後，其他的在那時才啟動，每隔 5 毫秒問 PostgreSQL 它們是已經結束還是在等鎖（有 20 秒的期限），都有了答案才放第一個走。停住、輪詢與期限只寫了一份（`heldCalls`，在 `cmd/finance_concurrency_integration_test.go`），對帳與計畫的測試共用。兩個呼叫以相反的順序確認同樣兩個計畫：第一個全部確認，第二個等它、然後回 `ErrNotDraft`，沒有 `40P01`。改期握著起點的鎖時，確認或作廢要等它，等到時動的是新的各期（舊的各期已不在）；確認同時給了起點與它的各期（「確認列出的全部草稿」會這樣送），等到時那些期已被換掉：回 `ErrNotFound` 並指名那幾期，不回一筆筆空的交易，計畫仍是草稿。要看的是「任何交錯都對」時，跑固定的回合數（20），呼叫同時啟動，沒有 sleep，`-race` 乾淨，每個呼叫有自己的期限（20 秒）：卡住的呼叫以 `context deadline exceeded` 結束，被當成沒有任何執行順序解釋得了的錯誤，測試失敗並指出是哪一個，不會掛到 `go test -timeout`：兩個計畫以相反順序確認、同時有人捨棄一個、作廢另一個；同一個計畫的兩個確認、一個作廢、一個捨棄；計畫確認與同一帳戶的對帳（對帳不是被草稿擋下，就是算到了那一期，不會拿過時的餘額）；隨機挑的多個計畫與一般草稿一起確認（含起點旁的期）；兩個改期與確認、作廢重疊。每回合檢查：沒有資料庫錯誤（尤其是死結 `40P01`）、一個計畫只有一種狀態、每一筆只被確認一次（tracer 數 `SetTransactionStatus` 到 `confirmed` 的次數）、各呼叫成功與否是某個執行順序留得下的。在副本上弄壞鎖時這些測試會失敗（不在程式碼裡）：起點與一般交易不依 id 排序，相反順序的測試以 `40P01` 失敗；拿掉 `FOR UPDATE`，或讓作廢先鎖一期再鎖起點，對同一個計畫的測試失敗；拿掉鎖住之後對「由起點涵蓋的期」的比對（與輸出迴圈的檢查），確認同時給起點與各期的測試失敗（呼叫成功、輸出是空的交易、計畫被確認）。

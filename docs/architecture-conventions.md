@@ -34,7 +34,7 @@ app/
         persistence/postgres/    repo 實作、sqlc 查詢與產生碼
         <kind>/                  其他對外實作
 pkg/                             與業務無關的技術元件
-  config/  log/  postgres/  cfaccess/  mcpserver/
+  config/  log/  postgres/  cfaccess/  mcpserver/  clock/
 migrations/                      goose 的 SQL migration（Go package，內嵌進 binary）
 internal/testpg/                 整合測試用的資料庫輔助
 docs/
@@ -80,8 +80,9 @@ adapter  →  usecase  →  domain
 4. **跨 context 只能 import 對方的 `usecase/port/in`。** 不能 import 對方的 `domain`、`adapter` 或 use case 實作。這比 admin-service 嚴格，原因見第 9 節。
 5. 跨 context 的資料關聯用一般的 `uuid` 欄位存放對方的 id，不加外鍵；寫入前由 use case 經對方的 `usecase/port/in` 驗證存在（例如 `finance` 的 `project_id`、`area_id`、`party_id`、`tag_id`）。種類不固定的多對多關聯才用 `catalog_link`。同一個 context 內的資料表可以加外鍵。
 6. 只有 `cmd/` 知道具體實作，負責把 adapter 注入 port。
+7. **時間**：use case 與 domain 不呼叫 `time.Now()`、`time.Since()`、`time.Until()`（三者都讀牆上的時鐘）。use case 要知道現在或今天，只經自己 context 的 `usecase/port/out/clock`（介面只有 `Now()`），由 `cmd/` 以 `pkg/clock` 實作並注入，時區來自 `MAXOS_TIMEZONE`（預設 `Asia/Taipei`）；測試給假的時鐘。資料庫記下的寫入時間（`confirmed_at` 等）不在此限，那是何時寫入，不是使用者的「今天」。
 
-以上規則由 golangci-lint 的 import 限制在 `make check` 檢查。
+以上規則由 golangci-lint 在 `make check` 檢查：第 1 至 6 點是 import 限制（depguard），第 7 點是 `forbidigo`，禁止 `app/<context>/domain` 與 `app/<context>/usecase` 的非測試檔使用 `time.Now`、`time.Since`、`time.Until`（`pkg/clock` 與 `cmd/` 不在此限）。
 
 ## 5. 技術選型
 

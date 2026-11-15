@@ -8,10 +8,26 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
+	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
 )
+
+// held is what the ledger says the account holds of the instrument on the day: the
+// quantity of the one balance the repo has for them, zero when it has none.
+func (e *env) held(account model.Account, instrument model.Instrument, on time.Time) decimal.Decimal {
+	e.t.Helper()
+	balances, err := e.txns.Balances(context.Background(), repo.BalanceFilter{AccountID: &account.ID, InstrumentID: &instrument.ID, Day: on})
+	if err != nil {
+		e.t.Fatalf("Balances: %v", err)
+	}
+	if len(balances) == 0 {
+		return decimal.Zero
+	}
+	return balances[0].Quantity
+}
 
 // confirmedOpening records what the account holds of the instrument on the day
 // of the tests, and confirms it, which is how a balance gets there.
@@ -61,12 +77,12 @@ func TestReconcileBelowTheRecordedBalanceDraftsAnUnrecordedExpenseThatSettlesThe
 	}
 	wantLines(t, e.lines(*out.Transaction), "account(cash) -120 TWD", "expense(未記錄) +120 TWD, base +120")
 	// A draft changes no balance, so it is still 1000 until it is confirmed.
-	if got, _ := e.txns.BalanceAsOf(ctx, e.cash.ID, e.twd.ID, day); !got.Equal(dec("1000")) {
+	if got := e.held(e.cash, e.twd, day); !got.Equal(dec("1000")) {
 		t.Errorf("balance before the draft is confirmed = %s, want 1000", got)
 	}
 
 	e.confirm(*out.Transaction)
-	if got, _ := e.txns.BalanceAsOf(ctx, e.cash.ID, e.twd.ID, day); !got.Equal(dec("880")) {
+	if got := e.held(e.cash, e.twd, day); !got.Equal(dec("880")) {
 		t.Errorf("balance once confirmed = %s, want the actual balance, 880", got)
 	}
 	again, err := e.svc.Reconcile(ctx, e.reconcileOf("reconcile-00002", e.cash, e.twd, "880"))
@@ -94,7 +110,7 @@ func TestReconcileAboveTheRecordedBalanceDraftsAnUnrecordedIncomeThatSettlesTheB
 	wantLines(t, e.lines(*out.Transaction), "account(cash) +80 TWD", "income(未記錄) -80 TWD, base -80")
 
 	e.confirm(*out.Transaction)
-	if got, _ := e.txns.BalanceAsOf(ctx, e.cash.ID, e.twd.ID, day); !got.Equal(dec("1080")) {
+	if got := e.held(e.cash, e.twd, day); !got.Equal(dec("1080")) {
 		t.Errorf("balance once confirmed = %s, want the actual balance, 1080", got)
 	}
 }
