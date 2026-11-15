@@ -268,6 +268,32 @@ var (
 	ErrPastPeriodsChanged = errors.New("the new schedule changes periods that have fallen due")
 )
 
+// The errors of budgets and their allocations: what a budget can be refused for.
+var (
+	// ErrMonthRequired is returned for the budget of an area that is set for no
+	// month, or read for none.
+	ErrMonthRequired = errors.New("the month of the budget is required")
+
+	// ErrBudgetAmountNegative is returned for a budget of less than nothing. A
+	// budget of nothing is not refused: for an area it means no budget from that
+	// month on.
+	ErrBudgetAmountNegative = errors.New("the amount of a budget must not be negative")
+
+	// ErrDuplicateAllocation is returned for a budget that allocates the same
+	// category twice.
+	ErrDuplicateAllocation = errors.New("a category can have one allocation in a budget only")
+
+	// ErrParentAndChildAllocated is returned for a budget that allocates a category
+	// and its parent: the allocation of a category is for what is spent on it and
+	// on its subcategories, so one more for a subcategory would divide a share that
+	// the allocation of the parent already holds.
+	ErrParentAndChildAllocated = errors.New("a category and its parent cannot both have an allocation in one budget")
+
+	// ErrAllocationsExceedBudget is returned for a budget whose allocations add up
+	// to more than the budget.
+	ErrAllocationsExceedBudget = errors.New("the allocations add up to more than the budget")
+)
+
 // PendingDraftsError is what reconciling an account returns while drafts that
 // touch it, in the instrument and up to the day, are still drafts. It is an
 // ErrPendingDrafts.

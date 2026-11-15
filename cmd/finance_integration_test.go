@@ -59,6 +59,19 @@ type ledgerApp struct {
 	Discard              usecase.DiscardDraft
 	RescheduleInstalment usecase.RescheduleInstalment
 	GetTransaction       usecase.GetTransaction
+
+	RecordTransfer usecase.RecordTransfer
+
+	CreateArea     catalogusecase.CreateArea
+	ArchiveArea    catalogusecase.ArchiveArea
+	CreateProject  catalogusecase.CreateProject
+	ArchiveProject catalogusecase.ArchiveProject
+
+	SetAreaBudget       usecase.SetAreaBudget
+	SetProjectBudget    usecase.SetProjectBudget
+	RemoveProjectBudget usecase.RemoveProjectBudget
+	GetAreaBudgets      usecase.GetAreaBudgets
+	GetProjectBudgets   usecase.GetProjectBudgets
 }
 
 func newLedgerApp(t *testing.T) ledgerApp {

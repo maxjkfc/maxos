@@ -8,7 +8,7 @@ M1（issue #4）的資料模型與分批計畫。用語以 `CONTEXT.md` 為準�
 |---|---|
 | M1a | `catalog` context（領域、專案、對象、標籤）；`finance` 的參考資料（標的、機構、帳戶、類別）；帳本核心：支出、收入、轉帳、換匯，草稿與確認，餘額查詢 |
 | M1b | 往來與分攤、回饋、手續費與折扣、對帳與「未記錄」 |
-| M1c | 分期與利息、買賣（只記數量與金額，成本計算在 M5）、預算與分配。分期、買賣與「今天」的判斷（日期在未來的交易到那天才計入）先做，本檔的 M1c 段落記的就是這些；預算與分配另做 |
+| M1c | 分期與利息、買賣（只記數量與金額，成本計算在 M5）、預算與分配。分兩個 PR：第一個是分期、買賣與「今天」的判斷（日期在未來的交易到那天才計入），本檔的 M1c 段落記的就是這些；第二個是預算與分配，見第 4 節的 `0007` 與第 5 節的「預算與分配」 |
 
 M1 不含 MCP 工具（M3）、匯入（M2）、報表（M4）。use case 以測試驗證。
 
@@ -155,6 +155,16 @@ M1c 的資料庫變更全在這一個 migration；`0001`–`0005` 已合併，�
 - `fin_posting`：`fin_posting_book_check` 加入 `instalment`；`fin_posting_account_id_check` 改為 `account` 與 `instalment` 的分錄一定有 `account_id`，其他 book 沒有。其他 CHECK 不變：`instalment` 分錄沒有類別、對象、本位幣金額與折扣。平衡檢查的 trigger 不必改。
 - **Down** 還原成 `0005` 的 schema（有測試：與只套用到 `0005` 的資料庫比對 catalog 裡的欄位、約束、索引、trigger 與種子資料）。帳本裡已有 M1c 才有的資料時，Down **中止並報錯，不刪資料**，理由同 `0005`：種類為 `instalment`／`trade` 的交易、有 `plan_id` 的交易（消費分期的起點）、有 `instalment` 分錄的交易。訊息是 `cannot roll back 0006_fin_instalments: the ledger holds instalment plans or trades`，HINT 說要先自行刪除那些交易（每種資料各有一個測試案例）。`0005` 以前的資料不擋 Down。
 
+### 預算與分配（migration `0007_fin_budgets.sql`）
+
+M1c 第二個 PR 的資料庫變更全在這一個 migration；`0001`–`0006` 已合併，不改。預算屬於 `finance`（第 2 節），領域與專案的 id 是一般的 `uuid` 欄位，不加外鍵，寫入前由 use case 經 catalog 的 `VerifyReferences` 驗證存在且未封存（架構規範第 4 節第 5 點）。
+
+- `fin_budget`：`id`、`scope`（`area`／`project`）、`area_id uuid`、`project_id uuid`、`effective_from date`、`amount numeric`、`created_at`。`scope` 決定要哪些欄位，多一個少一個都不行（`fin_budget_scope_columns_check`）：領域的預算有 `area_id` 與 `effective_from`，沒有 `project_id`；專案的預算有 `project_id`，沒有 `area_id` 與 `effective_from`。其他約束：`fin_budget_scope_check`（`scope` 的值）、`fin_budget_effective_from_check`（`effective_from` 是月的第一天）、`fin_budget_amount_check`（`amount >= 0`）、`UNIQUE (area_id, effective_from)`（`fin_budget_area_id_effective_from_key`）與 `UNIQUE (project_id)`（`fin_budget_project_id_key`）；NULL 與任何值都不相等，所以兩個唯一約束不會擋到另一種 scope 的列。
+  - **領域的預算，一列是「從這個月起」**：某個月的預算是 `effective_from` 不晚於該月的列中最大的那一列，所以設一次就一直有效，直到後面的月份另設一列；`amount` 為 0 是「這個月起沒有預算」，用來結束先前的預算（`CONTEXT.md`：領域的預算每月一個額度，不累積）。專案的預算只有一列：整個專案一個總額。
+  - 金額是本位幣，小數位數不超過它的 `decimals`；本位幣是 `fin_instrument` 的一列，CHECK 看不到它，所以由 domain 檢查。
+- `fin_budget_allocation`：`budget_id`（外鍵，`ON DELETE CASCADE`，拿掉預算時分配一起刪）、`category_id`（外鍵到 `fin_category`，同一個 context 內）、`amount`；主鍵 `(budget_id, category_id)`，所以一個類別在一個預算裡只有一筆；`fin_budget_allocation_amount_check`（`amount > 0`）。分配是預算按類別切出的份額，類別本身沒有預算（`CONTEXT.md`：分配）。分配與預算之間的規則資料庫不檢查：分配的類別是支出方向、未封存、不是系統類別，一個類別與它的父類別不同時有分配，分配加總不超過預算。這些要同時看類別與預算，CHECK 看不到，由 domain 與 use case 檢查（第 5 節）。
+- **Down** 還原成 `0006` 的 schema（有測試：與只套用到 `0006` 的資料庫比對 catalog 裡的欄位、約束、索引、trigger 與種子資料）。資料庫裡有預算時，Down **中止並報錯，不刪資料**，理由同 `0005`、`0006`：預算是使用者設定的資料，不該被 migration 靜默刪掉。訊息是 `cannot roll back 0007_fin_budgets: the database holds budgets`，HINT 說要先自行刪除預算（分配隨預算一起刪）。有測試：領域與專案的預算各一個案例，不動資料；帳本裡的交易不擋 Down。`0005`、`0006` 的測試改成先退到各自的版本再開始（`atVersion`）。
+
 ## 5. Use case（M1a、M1b、M1c）
 
 ### catalog（`app/catalog`）
@@ -229,6 +239,32 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 - `RecordTrade{Direction, AccountID, InstrumentID, Quantity, CashAccountID, CurrencyID, Amount, Fees}`：`Direction` 是 `buy` 或 `sell`；`AccountID` 持有被買賣的標的，`CashAccountID` 收付金額。
 - **已知的限制**：被分期的總額不能改（改了就是改了那筆購買：作廢整個計畫、重記）；提前清償就是改期，把到期的各期原樣再送一次、剩下的本金放進清償那天的一期（`RescheduleInstalment`）。各期是一般的交易，會出現在 `ListTransactions`（可用 `PlanID` 篩選整個計畫）；不自動確認各期。
 
+### 預算與分配（M1c，`app/finance`）
+
+預算只用來比對與告警：不從現有的錢裡預留，超過了什麼都不擋，只回報（`Over`）。`usecase/budget` 一個套件實作五個 use case，port 在 `usecase/port/in/usecase/budget.go`；`BudgetRepo`（`usecase/port/out/repo/budget_repo.go`）存取預算與分配，也加總「花了多少」；規則在 `domain/model/budget.go`。
+
+**寫入**（每個都在一個資料庫交易內，驗證失敗什麼都不寫）
+
+- `SetAreaBudget{AreaID, Month, Amount, Allocations []Allocation{CategoryID, Amount}}` → `AreaBudget{AreaID, From, Amount, Allocations}`：設定領域**從該月起**的預算。`Month` 必填（`ErrMonthRequired`），取它所在的月（以它自己的時區讀，與 `model.DateOf` 相同），存成該月第一天，所以月內任何一天都行。同一個領域、同一個月再設，取代那一列的金額與全部分配，列的 id 與 `created_at` 不變；其他月份的列不動，也不看晚於該月的列。`Amount` 為 0 是從該月起沒有預算。
+- `SetProjectBudget{ProjectID, Amount, Allocations}` → `ProjectBudget`：整個專案一個總額，再設就取代金額與全部分配。專案沒有「0 就是沒有預算」：0 是金額為 0 的預算，花任何錢都算超過；沒有預算用 `RemoveProjectBudget{ProjectID}`（連分配一起刪）。專案沒有預算時，拿掉它回 `ErrNotFound`（寧可讓打錯 id 的呼叫看得到，不靜默成功）；專案已封存也可以拿掉，拿掉預算不是新的參照，所以不問 catalog。
+- 驗證：領域或專案經 catalog 的 `VerifyReferences` 必須存在且未封存（`*ReferenceError`）。分配的類別必須存在（`ErrNotFound`，錯誤指出是第幾筆）、未封存（`ErrArchived`）、是支出方向（`ErrWrongCategoryDirection`）、不是系統類別（`ErrSystemCategory`）；一個類別只能一筆（`ErrDuplicateAllocation`）；一個類別與它的父類別不能同時有分配，不論誰先（`ErrParentAndChildAllocated`）；分配加總不超過預算，剛好等於可以（`ErrAllocationsExceedBudget`，訊息帶兩個金額）。預算不為負（`ErrBudgetAmountNegative`），分配大於 0（`ErrAmountNotPositive`），兩者的小數位數都不超過本位幣（`ErrTooManyDecimals`）。
+- `BudgetRepo.SaveAreaBudget`／`SaveProjectBudget` 以三條語句寫（`INSERT ... ON CONFLICT ... DO UPDATE` 存那一列、刪舊分配、插新分配），所以必須在資料庫交易內呼叫。每個儲存都從那條 upsert 開始，它鎖住那一列到交易結束，所以同一個月的兩個同時進來的設定一個接一個，後到的整個取代先到的，不會留下一邊的金額加另一邊的分配（有真的 PostgreSQL 的併發測試：同時存同一個月，剩下的是其中一個呼叫設的、完整的那一份）。
+
+**「花了多少」** 是已確認交易的 `expense` 分錄的 `base_amount` 加總，`occurred_on` 不晚於今天（注入的時鐘，與餘額同一個「今天」：日期在未來的支出到那天才算）；屬於哪個月由 `occurred_on` 決定。
+
+- **任何種類的交易都算**：手續費是別種交易（轉帳、收入…）裡的 `expense` 分錄，分期的利息是各期（種類 `instalment`）裡的 `expense` 分錄，都在被收取的那一天、那個月算；消費分期的起點在它的日子全額算，每期的本金不是支出；帳單分期的起點沒有 `expense` 分錄，不算；對帳的「未記錄」是 `expense` 分錄，照算，落入「未分配」。分攤只算自己的份（`expense` 分錄就是自己的份，替別人付的是 `dealing` 分錄）；折扣不減（`base_amount` 是實付）；回饋（`reward` 分錄）與收入不減。外幣支出用交易當天固定下來的 `base_amount`。草稿與作廢的交易哪裡都不算。
+- **歸哪個領域、專案**：交易自己的 `area_id`、`project_id`。沒有領域的支出不屬於任何領域，不在領域的任何數字裡；分期各期沿用起點的領域與專案。屬於專案的支出只計入專案預算，但仍計入領域的統計（`SpentWithProjects`）。
+- **落入哪個分配**：自己的類別的分配，否則父類別的分配，否則「未分配」（`model.NewBudgetStatus`，純函式）。`AreaSpending`／`ProjectSpending` 回傳每個類別連同它的父類別 id（`Spending.ParentID`，SQL 讀 `fin_category.parent_id`），歸入哪個分配由 domain 決定，規則只有一份，也就不必在 SQL 裡重做一次「有效的預算是哪一列」。沒有預算的領域或專案沒有分配，所以花的全部是「未分配」，`Over` 為假。
+- `BudgetRepo.AreaSpending(from, to)`（兩端都含）與 `ProjectSpending(projectID?, to)` 各一條語句，依領域（專案）、類別、是否屬於專案分組。領域的範圍是「該月第一天到該月最後一天與今天中較早的一天」，還沒開始的月份不問 repo；專案是「到今天」，不分月。
+
+**讀取**
+
+- `GetAreaBudgets{Month}` → `GetAreaBudgetsOutput{Month, Areas []AreaBudgetStatus{AreaID, Budget?, Spent, SpentWithProjects, Allocations []AllocationStatus{CategoryID, Amount, Spent}, Unallocated, Over}}`：`Month` 必填，同樣取它所在的月。列出該月有預算在效力中、或有已確認支出的領域，依 catalog 列出的順序（名稱），已封存的也列（它花的仍然算）；兩者都沒有的領域不列。該月的預算在 domain 由全部的預算列挑出（`model.BudgetsInForce`：`effective_from` 不晚於該月的列中最大的那一列，晚於該月的列不適用，金額為 0 的列在效力中就是沒有預算），所以 `BudgetRepo.AreaBudgets` 回傳所有領域的所有列，不依月份篩；每列連同它的分配，依類別名稱再依 id 排序（名稱只在同一個父類別底下唯一），一條語句讀，所以預算與它的分配一致。`Spent` 是不屬於專案的支出，預算拿它比對；`SpentWithProjects` 是該領域該月全部的支出（統計用的數字）；分配的 `Spent` 與 `Unallocated` 也只算不屬於專案的，所以 `Spent` 等於各分配的 `Spent` 加 `Unallocated`；`Over` 是有預算且 `Spent` **大於**預算，剛好花完不算。
+- `GetProjectBudgets{ProjectID?}` → `GetProjectBudgetsOutput{Projects []ProjectBudgetStatus{ProjectID, Budget?, Spent, Allocations, Unallocated, Over}}`：有預算或有已確認支出的專案，依 catalog 的順序（含已封存的），`Spent` 是它全部的支出（到今天為止，不分月）。給了 `ProjectID` 時只問那一個專案，不列 catalog 的全部專案：先以 `VerifyReferences` 確認它存在（找不到回 `ErrNotFound`，不讀 repo；已封存的放行：它花的仍然算），與 `GetDealings(partyID)` 同一個做法；這個專案沒有預算也沒有支出時是空的結果，不是錯誤。
+- 預算或支出指著 catalog 列表裡沒有的領域或專案時回 `ErrNotFound` 並指名，不猜；沒有東西可排序時不呼叫 catalog。
+- 讀取不開資料庫交易，也不用快照：預算與分配是一條語句，花了多少是另一條，同時有人改預算時，這一次的數字可能一邊新一邊舊，下一次就對了。
+- 這幾個 use case 還沒有 MCP 工具（M3）。
+
 ## 6. 測試
 
 - domain：分錄產生與不變條件（每個種類、外幣、多類別、不平衡時拒絕）。
@@ -251,3 +287,9 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 - M1c 審查後的修正：use case：起點也在請求裡的期由起點涵蓋、只確認一次，輸出依請求的順序、重複的 id 算一次，別的計畫的起點在請求裡也不能讓這一期通過；每個 `Record*`、`SetOpeningBalance` 與 `Reconcile` 對 `instalment:` 開頭的鍵回 `ErrReservedIdempotencyKey`，不查鍵、不開資料庫交易。domain：`NormalizeIdempotencyKey` 只擋這個前綴（不擋含有它的鍵、不同大小寫的鍵），各期自己的鍵照常產生。postgres adapter：起點日期在那天之後的計畫不列，`InstalmentPlans` 與 `Balances` 逐日一致。`cmd/`：列出全部草稿、一次確認，計畫只入帳一次。
 - M1c 改期：domain：新的各期照記錄時的做法（逐筆分錄、沿用起點的欄位、鍵與位置）、起點與被呼叫的計畫都不變、所有排程的拒絕（沒有期、日期、本金、利息與類別，總額不符且帶著兩個金額）、已作廢的計畫、各期與起點狀態不一致、標的不符、沒有 `instalment` 分錄的起點。過去的各期（草稿與已確認的計畫各一遍）：到期的各期原樣再送、剩下的放進一期（提前清償）不需要 `ChangePast`；少一期、在今天之前多一期、日期、本金、利息或利息的本位幣金額不同、有利息時換利息類別、沒有利息的期多出利息、同時改好幾期，都回 `*PastPeriodsChangedError` 並指出是哪幾期，帶 `ChangePast` 就成功；今天到期的期可以改，昨天到期的不行；沒有任何過去的期有利息時類別可以換。已封存的利息類別：計畫的各期現在用的放行，別的已封存的、系統類別仍被拒，沒有任何一期有利息的計畫沒有「現在用的」。use case：草稿與已確認的計畫（新各期的狀態與 `confirmed_at`）、舊各期已刪、起點不動、一個資料庫交易、鎖的順序、鎖住之後才發現作廢或被刪、各種拒絕都什麼也不寫、同一排程做兩次結果相同；過去的各期：到期的原樣再送不需要 `ChangePast`，各種改動沒有它就被拒且什麼也不寫（交易、刪除、寫入與狀態都不動），帶了就成功（草稿與已確認的各一遍），今天取自時鐘（到期那天可以改、隔天不行）；已封存的利息類別。postgres adapter：刪、寫、確認在一個交易裡取代排程，草稿與已確認的都行，餘額隨新的日子變，一期不平衡時整個取代還原、舊排程原樣。`cmd/` 端到端：12 期的計畫確認、三期過去後把剩下的 9,000 改成下個月一期（利息也改），到期的三期原樣再送，不需要 `ChangePast`：餘額、未到期分期、計畫列表與利息支出都對，總共欠的不變；同一個呼叫把過去一期的利息打錯就被拒（指出是第 1 期）、計畫與餘額照舊，帶 `ChangePast` 才改（那一期的利息支出從 30 變 33，卡多欠 3）；一期在今天前後來回移動（沒有 `ChangePast` 被拒，帶了才動）；作廢後拒絕；總額不符的錯誤帶著兩個金額；草稿的期移到對帳那天前後；利息類別在記錄後被封存，計畫仍可以用它改期，別的已封存的類別不行，計畫換了別的類別之後原來那個也不行。
 - 計畫的併發（`cmd/finance_plan_concurrency_integration_test.go`，真的 PostgreSQL）：要看某一種交錯時，交錯是做出來的，不靠運氣：pgx tracer 把第一個呼叫停在它的第一個鎖之後，其他的在那時才啟動，每隔 5 毫秒問 PostgreSQL 它們是已經結束還是在等鎖（有 20 秒的期限），都有了答案才放第一個走。停住、輪詢與期限只寫了一份（`heldCalls`，在 `cmd/finance_concurrency_integration_test.go`），對帳與計畫的測試共用。兩個呼叫以相反的順序確認同樣兩個計畫：第一個全部確認，第二個等它、然後回 `ErrNotDraft`，沒有 `40P01`。改期握著起點的鎖時，確認或作廢要等它，等到時動的是新的各期（舊的各期已不在）；確認同時給了起點與它的各期（「確認列出的全部草稿」會這樣送），等到時那些期已被換掉：回 `ErrNotFound` 並指名那幾期，不回一筆筆空的交易，計畫仍是草稿。要看的是「任何交錯都對」時，跑固定的回合數（20），呼叫同時啟動，沒有 sleep，`-race` 乾淨，每個呼叫有自己的期限（20 秒）：卡住的呼叫以 `context deadline exceeded` 結束，被當成沒有任何執行順序解釋得了的錯誤，測試失敗並指出是哪一個，不會掛到 `go test -timeout`：兩個計畫以相反順序確認、同時有人捨棄一個、作廢另一個；同一個計畫的兩個確認、一個作廢、一個捨棄；計畫確認與同一帳戶的對帳（對帳不是被草稿擋下，就是算到了那一期，不會拿過時的餘額）；隨機挑的多個計畫與一般草稿一起確認（含起點旁的期）；兩個改期與確認、作廢重疊。每回合檢查：沒有資料庫錯誤（尤其是死結 `40P01`）、一個計畫只有一種狀態、每一筆只被確認一次（tracer 數 `SetTransactionStatus` 到 `confirmed` 的次數）、各呼叫成功與否是某個執行順序留得下的。在副本上弄壞鎖時這些測試會失敗（不在程式碼裡）：起點與一般交易不依 id 排序，相反順序的測試以 `40P01` 失敗；拿掉 `FOR UPDATE`，或讓作廢先鎖一期再鎖起點，對同一個計畫的測試失敗；拿掉鎖住之後對「由起點涵蓋的期」的比對（與輸出迴圈的檢查），確認同時給起點與各期的測試失敗（呼叫成功、輸出是空的交易、計畫被確認）。
+- 預算 domain：`NewAreaBudget`／`NewProjectBudget`（月取所在月的第一天、以月份自己的時區讀；沒有月；金額 0 可以、為負與位數太細不行；分配大於 0 且位數合法；加總剛好等於預算可以、多一分不行，訊息帶兩個金額；封存、收入方向、兩種系統類別、重複、與父類別同時有分配（不論誰先）各被拒，且指出是第幾筆；子類別單獨、手足、與別的父類別的分配並存都可以）、`MonthOf`／`LastDayOf`（含閏年二月）、`BudgetsInForce`（較早的列適用、晚於該月的列不適用、金額 0 結束且之後能再開始、各領域各自、輸入不照順序）、`NewBudgetStatus`（落入自己類別的分配、子類別落入父類別的分配、子類別自己有分配時只拿自己的、沒有分配的歸未分配、各分配加未分配等於 `Spent`、沒花的分配仍列出、剛好花完不算超過、金額 0 的預算花一分就超過、沒有預算時沒有超過且全部未分配）。
+- 預算 use case：以假的 port（假的 repo 照真的語意依日期與領域、專案篩列，並拒絕資料庫交易以外的寫入）與假的時鐘測：設定從所在月第一天起、取代同一個月且保留列的 id 與時間、不動其他月份與領域、一次資料庫交易、經 `VerifyReferences` 驗證領域或專案（找不到與已封存各一）、各種驗證的拒絕（兩種預算共用一張表）且什麼都不存；`RemoveProjectBudget`（拿掉後不再列出、再拿回 `ErrNotFound`、已封存的專案也能拿掉且不問 catalog）；`GetAreaBudgets` 的月份查找（較早的預算適用、金額 0 結束、晚於該月的預算不適用）、專案的支出不進領域的 `Spent` 與分配但進 `SpentWithProjects`、`Over` 只看 `Spent`、父類別的分配、未記錄類別與沒有分配的歸未分配、沒有預算只有支出與有預算沒有支出、依 catalog 順序（含已封存、不照 id）、catalog 沒有的領域回 `ErrNotFound`、沒有東西可列時不問 catalog；月份與今天：月初、月末、下個月的第一天、時鐘時區（台北凌晨）、未來的月份不問 repo、範圍是「月初到月底與今天中較早的一天」；`GetProjectBudgets` 的全部支出不分月、未來日期的支出到那天才算、金額 0 的預算、只有預算與只有支出、順序、單一專案（只經 `VerifyReferences`、不列 catalog、找不到回 `ErrNotFound` 且不讀 repo、已封存的放行、沒有東西時是空的）。
+- 預算 postgres adapter（真的 PostgreSQL）：`fin_budget` 的各個 CHECK（`scope` 與欄位的對應、月的第一天、金額不為負）與兩個 `UNIQUE`、`fin_budget_allocation` 的 CHECK、主鍵、兩個外鍵與連帶刪除；儲存（取代金額與分配、保留列的 id 與時間、不動其他月份、半途失敗時整個還原、依類別名稱再依 id 的順序）與同時存同一個月的併發測試；`DeleteProjectBudget`（連分配一起刪、沒有就是 `ErrNotFound`、領域的 id 刪不到）；`AreaBudgets` 與 `ProjectBudgets`（依領域再依月份、有與沒有分配、專案的預算不在領域的裡面、依專案篩）；花了多少：依領域與類別加總並分開專案的（順序是領域、類別、不屬於專案的在前，專案是專案、類別）、月界（第一天與最後一天含、前後一天不含、單日範圍）、只算已確認（草稿與作廢都不算、確認後算、作廢後不算）、日期在未來的到那天才算（領域與專案各一）、子類別連同父類別回傳，真的資料庫回來的列交給 `NewBudgetStatus`，子類別的支出就落入父類別的分配、手續費與分期利息照算（利息在各期的扣款日，之前不算）、帳單分期不算、對帳的「未記錄」照算且沒有父類別、分攤只算自己的份、外幣用本位幣金額、折扣不減、回饋與收入不減、專案不分月且可只問一個。
+- migration：`0007` 往下再往上，與只套用到 `0006` 的資料庫比對 catalog；有預算時 Down 中止且不動資料（領域與專案各一）；帳本裡的交易不擋 Down。
+- `cmd/` 的端到端測試（預算，`cmd/budget_integration_test.go`）：真的模組、真的 PostgreSQL 與可控的時鐘。領域：先設各月的預算與分配，記下並確認支出（午餐是食物的子類別、轉帳的手續費、對帳少的 120、12 期的消費分期與它的利息、日期在未來的房租、專案的支出、草稿、記了又作廢的、10 月最後一天與 12 月第一天），讀十一月的狀態（分配、未分配、`Spent` 與 `SpentWithProjects`），十月、九月與十二月，時鐘走到 20 日（未來的房租算進來）、花超過（`Over`，沒有任何東西被擋）、12 月 4 日與 5 日（利息只在到期那天算進十二月、十一月不變）、金額 0 的預算結束預算、作廢分期後十一月與十二月都少掉它。專案：專案的支出（含沒給領域而帶入預設領域的）不計入領域的預算、整個專案的預算不分月、超過、日期在未來的到那天才算、拿掉預算後仍列出、找不到的專案、已封存的專案仍列出且不能再設預算。規則：各種被拒的預算（領域與專案各一遍）都不留下東西，之後能設，再設同一個月會取代。
+- 每條規則的測試在沒有那條規則時都會失敗：月界（use case 的範圍與 SQL 的兩端）、專案的支出不進領域的 `Spent`（use case 與 SQL 的 `in_project`）、父類別的分配（domain 的歸入、SQL 回傳父類別）、日期在未來的到那天才算（use case 的「不晚於今天」與 SQL 的上界，領域與專案各一）、月份的查找（晚於該月的不適用、金額 0 結束、取最大的一列）、各種驗證、草稿與作廢、手續費與利息、外幣、回饋與收入。這是在一份拷貝裡逐條拿掉規則（改程式碼或 SQL）、跑測試試出來的，不在程式碼裡：每一條都有至少一個測試失敗；月界在 `cmd/` 的端到端測試裡也會失敗，所以那個測試放了 10 月最後一天與 12 月第一天的支出。
