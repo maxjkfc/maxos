@@ -218,6 +218,8 @@ type ledger struct {
 	ListCategories      usecase.ListCategories
 	VoidTransaction     usecase.VoidTransaction
 	DiscardDraft        usecase.DiscardDraft
+	GetDealings         usecase.GetDealings
+	ListParties         catalog.ListParties
 	ListProjects        catalog.ListProjects
 }
 
@@ -271,6 +273,44 @@ func (e importEnv) balance(l ledger, account, code string, asOf time.Time) decim
 	for _, b := range out.Balances {
 		if b.InstrumentID == instrumentID {
 			return b.Quantity
+		}
+	}
+	return decimal.Zero
+}
+
+// owed is what the party owes me in the instrument, by the confirmed dealings of the ledger.
+func (e importEnv) owed(l ledger, party, code string) decimal.Decimal {
+	e.t.Helper()
+	ctx := context.Background()
+	parties, err := l.ListParties.ListParties(ctx, catalog.ListPartiesInput{IncludeArchived: true})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	instruments, err := l.ListInstruments.ListInstruments(ctx, usecase.ListInstrumentsInput{IncludeArchived: true})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	var partyID, instrumentID uuid.UUID
+	for _, p := range parties.Parties {
+		if p.Name == party {
+			partyID = p.ID
+		}
+	}
+	for _, i := range instruments.Instruments {
+		if i.Code == code {
+			instrumentID = i.ID
+		}
+	}
+	if partyID == uuid.Nil || instrumentID == uuid.Nil {
+		e.t.Fatalf("the ledger has no party %q, or no instrument %q", party, code)
+	}
+	out, err := l.GetDealings.GetDealings(ctx, usecase.GetDealingsInput{PartyID: &partyID})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	for _, d := range out.Dealings {
+		if d.InstrumentID == instrumentID {
+			return d.Quantity
 		}
 	}
 	return decimal.Zero
@@ -518,6 +558,21 @@ func TestImportFromPlanToVerifyOnARealDatabase(t *testing.T) {
 	}
 	if got := e.balance(l, "Fake Bank USD", "USD", jan31); !got.Equal(decimal.RequireFromString("289")) {
 		t.Errorf("Bank USD on 31 January = %s, want 289: 200, -10, +1.5, +100, and the adjustment of -2.5", got)
+	}
+
+	// What was paid for the company is one dealing of all that left the card for it, the 500 of
+	// the lunch and the 5 of its fee, which is no fee expense of its own: the company owes 505.
+	lunch := e.ofRow(l, e.rowKey("團膳"))
+	if len(lunch) != 1 || lunch[0].Kind != "dealing" || lunch[0].Status != "confirmed" {
+		t.Fatalf("the lunch paid for the company is %+v, want one confirmed dealing", lunch)
+	}
+	for _, p := range lunch[0].Postings {
+		if p.CategoryID != nil || (p.AccountID != nil && !p.Quantity.Equal(decimal.RequireFromString("-505"))) {
+			t.Errorf("posting %+v of the dealing, want the card to pay 505 and no posting of a category (the fee has none of its own)", p)
+		}
+	}
+	if got := e.owed(l, "公司", "TWD"); !got.Equal(decimal.RequireFromString("505")) {
+		t.Errorf("the company owes %s, want 505: what was paid for it and the fee of the row", got)
 	}
 
 	verify := e.must("verify")

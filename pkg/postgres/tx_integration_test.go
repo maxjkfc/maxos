@@ -141,200 +141,61 @@ func TestStatementsOutsideATransactionCommitOnTheirOwn(t *testing.T) {
 	}
 }
 
-func TestNestedWithinTxUndoesOnlyTheInnerWrites(t *testing.T) {
+// A use case does not call another that opens its own transaction, and WithinTx says so:
+// given a context that carries a transaction it returns ErrNestedTx, before it runs its
+// function or sends a statement. The transaction that is open is as it was, and goes on.
+func TestWithinTxInsideATransactionIsRefusedAndTheOuterOneGoesOn(t *testing.T) {
 	ctx := context.Background()
 	db, pool := newProbe(t)
-	boom := errors.New("inner failed")
 
+	ran := false
+	var inner error
 	err := db.WithinTx(ctx, func(ctx context.Context) error {
 		if err := insertProbe(ctx, db, 1); err != nil {
 			return err
 		}
-		inner := db.WithinTx(ctx, func(ctx context.Context) error {
-			if err := insertProbe(ctx, db, 2); err != nil {
-				return err
-			}
-			return boom
+		inner = db.WithinTx(ctx, func(ctx context.Context) error {
+			ran = true
+			return insertProbe(ctx, db, 2)
 		})
-		if !errors.Is(inner, boom) {
-			return fmt.Errorf("inner err = %v, want the inner function's error", inner)
-		}
+		// Nothing was sent: the transaction is as usable as it was before the call.
 		return insertProbe(ctx, db, 3)
 	})
 	if err != nil {
 		t.Fatalf("WithinTx: %v", err)
 	}
-
+	if !errors.Is(inner, postgres.ErrNestedTx) || ran {
+		t.Fatalf("inner err = %v, function run = %v, want ErrNestedTx and the function not run", inner, ran)
+	}
 	if got := committedIDs(t, pool); !slices.Equal(got, []int{1, 3}) {
-		t.Fatalf("committed = %v, want [1 3]: the inner write undone, the rest kept", got)
+		t.Fatalf("committed = %v, want [1 3]: what the outer function wrote, and nothing of the inner one", got)
 	}
 }
 
-func TestNestedWithinTxIsRolledBackWithTheOuterOne(t *testing.T) {
+// The function that gets the error back returns it, which is what a call that must never
+// have been made is for: all of the transaction is rolled back, and the connection goes
+// back to the pool clean.
+func TestWithinTxInsideATransactionRollsTheOuterOneBackWhenItReturnsTheError(t *testing.T) {
 	ctx := context.Background()
 	db, pool := newProbe(t)
-	boom := errors.New("outer failed")
 
 	err := db.WithinTx(ctx, func(ctx context.Context) error {
-		if err := db.WithinTx(ctx, func(ctx context.Context) error { return insertProbe(ctx, db, 1) }); err != nil {
+		if err := insertProbe(ctx, db, 1); err != nil {
 			return err
 		}
-		return boom
+		return db.WithinTx(ctx, func(ctx context.Context) error { return insertProbe(ctx, db, 2) })
 	})
-	if !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want the outer function's error", err)
+	if !errors.Is(err, postgres.ErrNestedTx) {
+		t.Fatalf("err = %v, want ErrNestedTx", err)
 	}
 	if got := committedIDs(t, pool); len(got) != 0 {
-		t.Fatalf("committed = %v, want nothing: the inner write was never the inner call's to commit", got)
+		t.Fatalf("committed = %v, want nothing", got)
 	}
-}
-
-// The caller of the inner call gives up after the work of the function is done
-// and before the call commits. A call that cannot commit has failed, so its
-// writes must go, and the outer transaction, whose own context is as it was,
-// carries on without them.
-func TestNestedWithinTxUndoesItsWritesWhenItsContextIsDoneBeforeTheCommit(t *testing.T) {
-	ctx := context.Background()
-	db, pool := newProbe(t)
-
-	err := db.WithinTx(ctx, func(ctx context.Context) error {
-		if err := insertProbe(ctx, db, 1); err != nil {
-			return err
-		}
-
-		innerCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-		inner := db.WithinTx(innerCtx, func(ctx context.Context) error {
-			if err := insertProbe(ctx, db, 2); err != nil {
-				return err
-			}
-			cancel()
-			return nil
-		})
-		if !errors.Is(inner, context.Canceled) {
-			return fmt.Errorf("inner err = %v, want the cancellation: a nested call that cannot commit has failed", inner)
-		}
-		return insertProbe(ctx, db, 3)
-	})
-	if err != nil {
-		t.Fatalf("WithinTx: %v", err)
+	if err := db.WithinTx(ctx, func(ctx context.Context) error { return insertProbe(ctx, db, 3) }); err != nil {
+		t.Fatalf("WithinTx after it: %v", err)
 	}
-
-	if got := committedIDs(t, pool); !slices.Equal(got, []int{1, 3}) {
-		t.Fatalf("committed = %v, want [1 3]: the write of the call that returned an error undone", got)
-	}
-}
-
-// The inner function ignores a statement that failed and returns nil. The
-// transaction is then in a failed state (SQLSTATE 25P02), in which the savepoint
-// cannot even be released. The inner call must report that it failed, with its
-// writes undone, and leave the outer transaction in a state it can go on from.
-func TestNestedWithinTxUndoesItsWritesWhenTheFunctionIgnoresAFailedStatement(t *testing.T) {
-	ctx := context.Background()
-	db, pool := newProbe(t)
-
-	err := db.WithinTx(ctx, func(ctx context.Context) error {
-		if err := insertProbe(ctx, db, 1); err != nil {
-			return err
-		}
-
-		inner := db.WithinTx(ctx, func(ctx context.Context) error {
-			if err := insertProbe(ctx, db, 2); err != nil {
-				return err
-			}
-			if dup := insertProbe(ctx, db, 2); !postgres.IsUniqueViolation(dup) {
-				return fmt.Errorf("the second insert of 2: err = %v, want a unique violation", dup)
-			}
-			return nil // as if nothing had happened
-		})
-		if inner == nil {
-			return errors.New("inner err = nil, want an error: a nested call in a failed transaction cannot commit")
-		}
-		return insertProbe(ctx, db, 3)
-	})
-	if err != nil {
-		t.Fatalf("WithinTx: %v", err)
-	}
-
-	if got := committedIDs(t, pool); !slices.Equal(got, []int{1, 3}) {
-		t.Fatalf("committed = %v, want [1 3]: the write of the call that returned an error undone", got)
-	}
-}
-
-func TestNestedWithinTxIsUndoneWhenItsFunctionPanicsAndTheOuterOneRecovers(t *testing.T) {
-	ctx := context.Background()
-	db, pool := newProbe(t)
-
-	err := db.WithinTx(ctx, func(ctx context.Context) error {
-		if err := insertProbe(ctx, db, 1); err != nil {
-			return err
-		}
-		func() {
-			defer func() { _ = recover() }()
-			_ = db.WithinTx(ctx, func(ctx context.Context) error {
-				if err := insertProbe(ctx, db, 2); err != nil {
-					return err
-				}
-				panic("boom")
-			})
-		}()
-		return insertProbe(ctx, db, 3)
-	})
-	if err != nil {
-		t.Fatalf("WithinTx: %v", err)
-	}
-
-	if got := committedIDs(t, pool); !slices.Equal(got, []int{1, 3}) {
-		t.Fatalf("committed = %v, want [1 3]: the write of the call that panicked undone", got)
-	}
-}
-
-func TestNestedWithinTxNestsMoreThanOneLevel(t *testing.T) {
-	ctx := context.Background()
-	db, pool := newProbe(t)
-	boom := errors.New("innermost failed")
-
-	err := db.WithinTx(ctx, func(ctx context.Context) error {
-		if err := insertProbe(ctx, db, 1); err != nil {
-			return err
-		}
-		// A call that fails inside one that goes on: only the failed one is undone.
-		middle := db.WithinTx(ctx, func(ctx context.Context) error {
-			if err := insertProbe(ctx, db, 2); err != nil {
-				return err
-			}
-			innermost := db.WithinTx(ctx, func(ctx context.Context) error {
-				if err := insertProbe(ctx, db, 3); err != nil {
-					return err
-				}
-				return boom
-			})
-			if !errors.Is(innermost, boom) {
-				return fmt.Errorf("innermost err = %v, want its function's error", innermost)
-			}
-			return insertProbe(ctx, db, 4)
-		})
-		if middle != nil {
-			return fmt.Errorf("middle err = %v, want it to commit", middle)
-		}
-		// A call that succeeds inside one that fails: it goes with it.
-		failing := db.WithinTx(ctx, func(ctx context.Context) error {
-			if err := db.WithinTx(ctx, func(ctx context.Context) error { return insertProbe(ctx, db, 5) }); err != nil {
-				return err
-			}
-			return boom
-		})
-		if !errors.Is(failing, boom) {
-			return fmt.Errorf("failing err = %v, want its function's error", failing)
-		}
-		return insertProbe(ctx, db, 6)
-	})
-	if err != nil {
-		t.Fatalf("WithinTx: %v", err)
-	}
-
-	if got := committedIDs(t, pool); !slices.Equal(got, []int{1, 2, 4, 6}) {
-		t.Fatalf("committed = %v, want [1 2 4 6]: 3 undone with its call, 5 with the call around it", got)
+	if got := committedIDs(t, pool); !slices.Equal(got, []int{3}) {
+		t.Fatalf("committed = %v, want [3]", got)
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
 )
 
@@ -114,21 +116,94 @@ func TestRateThatTheRatesLackIsAProblemNotAGuess(t *testing.T) {
 	}
 }
 
-func TestExpenseOfAProjectThatIsPaidForAPartyIsADealing(t *testing.T) {
-	p := plan(row(model.TypeExpense, "Card", "TWD", "-500", main_("Food", "Lunch"), project("Corp paid"),
-		name("Team lunch"), discount("50"), fee("-5")))
-	u := unitOf(t, p)
-	if u.Kind != model.KindDealing || u.Party != "Corp" || u.Direction != "paid_out" {
-		t.Fatalf("unit = %s %q %q, want a dealing paid out to Corp", u.Kind, u.Party, u.Direction)
+// What was paid for a party is a dealing, and what the party owes is all that left the
+// account for it: the price less the discount, and the fee of the row, which is part of
+// paying for the party and not an expense of the user's own. A dealing has no column for a
+// discount or for a fee, so the description says both. The dealing does to the account what
+// the row says, so the plan has nothing to tell of it.
+func TestExpenseOfAProjectThatIsPaidForAPartyIsADealingOfWhatLeftTheAccount(t *testing.T) {
+	for _, tt := range []struct {
+		name                      string
+		account, currency, amount string
+		opts                      []rowOpt
+		from, owed, description   string
+	}{
+		{"with a fee", "Card", "TWD", "-500", []rowOpt{fee("-5")}, "Card", "505", "Team lunch\n手續費 5 TWD\n〔Food/Lunch〕"},
+		{"with no fee", "Card", "TWD", "-500", nil, "Card", "500", "Team lunch\n〔Food/Lunch〕"},
+		{"with a discount", "Card", "TWD", "-500", []rowOpt{discount("50")}, "Card", "450", "Team lunch\n折扣 50 TWD\n〔Food/Lunch〕"},
+		{"with a discount and a fee", "Card", "TWD", "-500", []rowOpt{discount("50"), fee("-5")}, "Card", "455", "Team lunch\n折扣 50 TWD\n手續費 5 TWD\n〔Food/Lunch〕"},
+		// A discount that is the whole price takes nothing but the fee: the dealing is the fee alone.
+		{"whose discount is the whole price, with a fee", "Card", "TWD", "-500", []rowOpt{discount("500"), fee("-5")}, "Card", "5", "Team lunch\n折扣 500 TWD\n手續費 5 TWD\n〔Food/Lunch〕"},
+		{"whose discount is more than the price, with a fee that is more than the excess", "Card", "TWD", "-100", []rowOpt{discount("120"), fee("-25")}, "Card", "5", "Team lunch\n折扣 120 TWD\n手續費 25 TWD\n〔Food/Lunch〕"},
+		// The USD account of MOZE is the account of the bank of the ledger: the dealing is in USD.
+		{"with a fee, in the currency of the row", "Bank USD", "USD", "-10", []rowOpt{fee("-0.5")}, "Bank", "10.5", "Team lunch\n手續費 0.5 USD\n〔Food/Lunch〕"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := append([]rowOpt{main_("Food", "Lunch"), project("Corp paid"), name("Team lunch")}, tt.opts...)
+			p := plan(row(model.TypeExpense, tt.account, tt.currency, tt.amount, opts...))
+			u := unitOf(t, p)
+			if u.Kind != model.KindDealing || u.Party != "Corp" || u.Direction != "paid_out" {
+				t.Fatalf("unit = %s %q %q, want a dealing paid out to Corp", u.Kind, u.Party, u.Direction)
+			}
+			if !isLeg(u.Main, tt.from, tt.currency, tt.owed) {
+				t.Errorf("amount = %+v, want %s %s from %s: what was paid, less the discount, and the fee", u.Main, tt.owed, tt.currency, tt.from)
+			}
+			if len(u.Fees) != 0 {
+				t.Errorf("fees = %+v, want none: the fee is part of the amount, no expense of its own", u.Fees)
+			}
+			if u.Description != tt.description {
+				t.Errorf("description = %q, want %q (nothing of the row is lost)", u.Description, tt.description)
+			}
+			if len(p.Differences) != 0 || len(p.Unrecorded) != 0 || p.Blocked() {
+				t.Errorf("differences = %+v, unrecorded = %+v, problems = %+v, want a dealing that does what its row says", p.Differences, p.Unrecorded, p.Problems)
+			}
+		})
 	}
-	if !u.Main.Amount.Equal(d("450")) {
-		t.Errorf("amount = %s, want 450: what was paid", u.Main.Amount)
+}
+
+// A row paid for a party that took nothing from the account has no dealing: its discount is
+// the whole price and it has no fee, or it is more than the price and the fee does not make
+// up for the excess. It is left out as a row of no amount.
+func TestRowPaidForAPartyThatTookNothingFromTheAccountIsLeftOut(t *testing.T) {
+	p := plan(
+		row(model.TypeExpense, "Card", "TWD", "-500", main_("Food", "Lunch"), project("Corp paid"), discount("500")),
+		row(model.TypeExpense, "Card", "TWD", "-100", main_("Food", "Lunch"), project("Corp paid"), discount("120"), fee("-15")),
+	)
+	if got := skippedReasons(p); !reflect.DeepEqual(got, []model.Reason{model.ReasonZeroAmount, model.ReasonZeroAmount}) {
+		t.Errorf("reasons = %v, want both rows left out as rows of no amount", got)
 	}
-	if want := "Team lunch\n折扣 50 TWD\n〔Food/Lunch〕"; u.Description != want {
-		t.Errorf("description = %q, want %q (nothing of the row is lost)", u.Description, want)
+	if len(p.Units) != 0 {
+		t.Errorf("units = %+v, want none: a dealing has a positive amount", p.Units)
 	}
-	if len(u.Fees) != 1 || !u.Fees[0].Amount.Equal(d("5")) || u.Fees[0].Category != "Fees" || u.Fees[0].Account != "Card" {
-		t.Errorf("fees = %+v, want the fee of 5 from the card", u.Fees)
+}
+
+// What a party owes is what the rows paid for it take from the accounts: their effects, with
+// the fee and the discount that are in them. A dealing says no less and no more, for every
+// row that is paid for the party, and a row that is not is not in it.
+func TestWhatAPartyOwesIsWhatTheRowsPaidForItTakeFromTheAccounts(t *testing.T) {
+	p := plan(
+		row(model.TypeExpense, "Card", "TWD", "-500", main_("Food", "Lunch"), project("Corp paid"), fee("-5"), discount("50"), on("2026-03-04")),
+		row(model.TypeExpense, "Cash", "TWD", "-200", main_("Food", "Lunch"), project("Corp paid"), fee("-3"), on("2026-03-05")),
+		row(model.TypeExpense, "Card", "TWD", "-300", main_("Food", "Lunch"), project("Corp paid"), discount("300"), fee("-4"), on("2026-03-05")),
+		row(model.TypeExpense, "Card", "TWD", "-120", main_("Food", "Lunch"), fee("-2"), on("2026-03-06")),
+	)
+	byRow := map[string]decimal.Decimal{}
+	for _, e := range p.Effects {
+		byRow[e.Row] = byRow[e.Row].Add(e.Quantity)
+	}
+	owed, left, dealings := decimal.Zero, decimal.Zero, 0
+	for _, u := range p.Units {
+		if u.Kind != model.KindDealing || u.Party != "Corp" {
+			continue
+		}
+		dealings++
+		owed = owed.Add(u.Main.Amount)
+		for _, key := range u.Rows {
+			left = left.Sub(byRow[key])
+		}
+	}
+	if dealings != 3 || !owed.Equal(left) || !owed.Equal(d("662")) {
+		t.Errorf("Corp owes %s by %d dealings, the rows paid for it take %s from the accounts, want both to be 662 (455, 203 and the 4 of the row that its discount paid)", owed, dealings, left)
 	}
 }
 

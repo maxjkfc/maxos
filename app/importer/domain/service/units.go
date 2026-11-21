@@ -355,21 +355,26 @@ func (b *builder) expenseUnit(r model.Row, path string, price decimal.Decimal, c
 }
 
 // paidFor is what was paid for a party: money out of an account, and what the party
-// owes me grown by it. A discount is not recorded by a dealing; it is said in the
-// description.
+// owes me grown by it. What the party owes is all that left the account for it: the
+// price, less the discount, and the fee that MOZE writes in the same row, which was part
+// of paying for the party, so it is in the amount of the dealing and no expense of its
+// own. A dealing has no column for a discount or for a fee, so the description says both.
+//
+// A row that took nothing from the account has no dealing and is left out. A discount
+// that is the whole price is that only when the row has no fee; with one, the party owes
+// the fee, and the row is a dealing of the fee alone.
 func (b *builder) paidFor(r model.Row, party string, price decimal.Decimal, ctx rowContext) {
-	paid := price.Sub(r.Discount)
-	if !paid.IsPositive() {
+	owed := price.Sub(r.Discount).Add(r.Fee.Abs())
+	if !owed.IsPositive() {
 		b.skip(model.ReasonZeroAmount, r)
 		return
 	}
 	u := b.newUnit(model.KindDealing, r)
-	u.Description = describe(r, discountNote(r))
+	u.Description = describe(r, discountNote(r), feeNote(r))
 	u.Merchant = r.Merchant
 	u.Area, u.Project, u.Tags = ctx.area, ctx.project, ctx.tags
 	u.Party, u.Direction = party, "paid_out"
-	u.Main = model.Leg{Account: b.ledger(r.Account), Instrument: r.Currency, Amount: paid}
-	u.Fees = b.feeOf(r)
+	u.Main = model.Leg{Account: b.ledger(r.Account), Instrument: r.Currency, Amount: owed}
 	b.add(u)
 }
 
@@ -378,6 +383,15 @@ func discountNote(r model.Row) string {
 		return ""
 	}
 	return "折扣 " + r.Discount.String() + " " + r.Currency
+}
+
+// feeNote says the fee of a row that is not a fee of its own in the ledger, as the
+// description of the unit says the discount.
+func feeNote(r model.Row) string {
+	if r.Fee.IsZero() {
+		return ""
+	}
+	return "手續費 " + r.Fee.Abs().String() + " " + r.Currency
 }
 
 // income is a 收入: an income, or a reward, or what a party gives back, by what the
