@@ -52,6 +52,21 @@ func HTTPModule() fx.Option {
 	return fx.Provide(newHTTPHandler)
 }
 
+// NewHTTPServer is the server that serve runs: handler on addr, with its limits and
+// switches. A test runs it as well, so that what it checks is the server as it runs.
+func NewHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		// net/http answers "OPTIONS *" itself, with a 200, before it asks the handler:
+		// before the verifier, and with none of the headers. Switched off, the request
+		// goes to the handler like any other: without a token it is refused (401), and
+		// with one the mux answers it (400: there is no path to route).
+		DisableGeneralOptionsHandler: true,
+	}
+}
+
 // serveHTTP ties the HTTP server to the app: it listens when the app starts and
 // drains in-flight requests when it stops.
 func serveHTTP(
@@ -61,11 +76,7 @@ func serveHTTP(
 	logger *slog.Logger,
 	handler http.Handler,
 ) {
-	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	srv := NewHTTPServer(cfg.HTTPAddr, handler)
 
 	lc.Append(fx.Hook{
 		OnStart: func(context.Context) error {
@@ -99,14 +110,17 @@ func serveHTTP(
 // pages are also built with the verifier as their guard, which they cannot be built
 // without, so that they do not rely on being mounted behind it: for a page that is a
 // second check of a token that the first has let through. The pages are mounted at
-// /app too, which they send on to /app/.
+// /app too, which they send on to /app/. The MCP endpoint is also behind
+// webserver.NoStore: the SDK sets Cache-Control to "no-cache, no-transform" on the
+// answer to a call, over the no-store that the headers above set, and what it
+// answers is the owner's data as much as a page is.
 func newHTTPHandler(registry *mcpserver.Registry, pages *webserver.Registry, verifier *cfaccess.Verifier) (http.Handler, error) {
 	web, err := pages.Pages(userFromAccess, verifier.Middleware)
 	if err != nil {
 		return nil, fmt.Errorf("build the pages: %w", err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", registry.HTTPHandler(callerFromAccess))
+	mux.Handle("/mcp", webserver.NoStore(registry.HTTPHandler(callerFromAccess)))
 	mux.Handle(webserver.Prefix+"/", web)
 	mux.Handle(webserver.Prefix, web)
 	return webserver.Secure(verifier.Middleware(mux)), nil

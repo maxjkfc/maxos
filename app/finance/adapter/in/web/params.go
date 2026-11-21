@@ -102,6 +102,22 @@ func pageParam(q url.Values) (int, error) {
 // maxPage is the last page of a list that a request may ask for.
 const maxPage = 10000
 
+// noPeriods is what the periods parameter says to list an instalment plan by its
+// origin and leave its periods out, which is how the drafts are counted.
+const noPeriods = "none"
+
+// periodsParam reads whether the list leaves the periods of instalment plans out.
+func periodsParam(q url.Values) (bool, error) {
+	switch q.Get("periods") {
+	case "":
+		return false, nil
+	case noPeriods:
+		return true, nil
+	default:
+		return false, webserver.BadRequest("periods 只能是 none，或不給。")
+	}
+}
+
 // pathID reads the id in the path of a page that is of one thing, which is not
 // there when it is not an id: a page of nothing is a page that is not found.
 func pathID(value, what string) (uuid.UUID, error) {

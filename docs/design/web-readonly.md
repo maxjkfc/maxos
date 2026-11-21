@@ -16,7 +16,7 @@
 | 路徑 | 頁面 | 參數 | 呼叫的 use case（另外每頁讀一次需要的參考清單） |
 |---|---|---|---|
 | `/app/` | 總覽：各機構的餘額、未到期分期、往來、等著確認的草稿 | | `GetBalances`、`GetDealings`、`ListInstalmentPlans`、`GetDraftSummary` |
-| `/app/transactions` | 一個月的交易，可篩帳戶、狀態、種類 | `month=YYYY-MM`、`account`（帳戶 id，或 `none`：沒有帳戶的交易）、`status`、`kind`、`page` | `ListTransactions`（一頁 100 筆） |
+| `/app/transactions` | 一個月的交易，可篩帳戶、狀態、種類 | `month=YYYY-MM`、`account`（帳戶 id，或 `none`：沒有帳戶的交易）、`status`、`kind`、`periods`（只能是 `none`：分期計畫只列起點，不列各期）、`page` | `ListTransactions`（一頁 100 筆） |
 | `/app/transactions/{id}` | 一筆交易的所有部分、標籤、所屬的分期計畫 | | `GetTransaction`、`GetInstalmentPlan`（屬於計畫時） |
 | `/app/drafts` | 草稿依月份再依帳戶分組，附筆數與金額 | | `GetDraftSummary` |
 | `/app/cards` | 信用卡：進行中的一期與最近結帳的十二期 | | `ListCardStatements`（每張設了結帳日的卡一次） |
@@ -41,10 +41,10 @@ app/finance/adapter/in/web        finance 的頁面：handler、view、templates
 internal/webtest                  測試用的 Access 替身（自簽金鑰）
 ```
 
-- **守門**：`newHTTPHandler` 最外面是 `webserver.Secure(verifier.Middleware(mux))`，所以 mux 自己回的轉址與 404 也在驗證後面：沒有 token 的請求只得到 401，每個回應都帶標頭；`/mcp` 因此也帶這些標頭，行為其餘不變。`Registry.Pages(userOf, guard)` 的 guard 與 userOf 仍是必填，頁面自己也被它包住，所以頁面不靠被掛在哪裡；顯示的使用者是 token 的 email（服務 token 是 `service:<id>`）。只認 `Cf-Access-Jwt-Assertion` 標頭，不認 `CF_Authorization` cookie。沒有任何繞過驗證的開關；測試用 `internal/webtest` 的自簽金鑰，視覺檢查也是（第 7 節）。
-- **標頭**（`webserver.Secure`，每個回應，包括 401）：`Content-Security-Policy: default-src 'self'; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`、`X-Frame-Options: DENY`。沒有 inline script 也沒有 inline style（進度條與圖表是 SVG 元素，以 class 上色），沒有 JavaScript、CDN、字型或圖片的外部請求。
+- **守門**：`newHTTPHandler` 最外面是 `webserver.Secure(verifier.Middleware(mux))`，所以 mux 自己回的轉址與 404 也在驗證後面：沒有 token 的請求只得到 401，每個回應都帶標頭。`Registry.Pages(userOf, guard)` 的 guard 與 userOf 仍是必填，頁面自己也被它包住，所以頁面不靠被掛在哪裡；顯示的使用者是 token 的 email（服務 token 是 `service:<id>`）。只認 `Cf-Access-Jwt-Assertion` 標頭，不認 `CF_Authorization` cookie。沒有任何繞過驗證的開關；測試用 `internal/webtest` 的自簽金鑰，視覺檢查也是（第 7 節）。**`/mcp` 也帶這些標頭，而且 `Cache-Control` 是 `no-store, no-transform`**：go-sdk 在 `tools/call` 的 200 回應裡把它改成 `no-cache, no-transform`，蓋掉 `Secure` 設的 `no-store`，所以 `/mcp` 另外包一層 `webserver.NoStore`，在回應送出標頭的那一刻（`WriteHeader`、第一次 `Write`、`Flush`，或 handler 什麼都沒寫就返回）把它設回去；它實作 `Unwrap`，SDK 串流（SSE）的 flush 照常，其餘四個標頭不動。**`OPTIONS *` 也在驗證後面**：`net/http` 自己會在 handler 之前回它 200、沒有任何標頭，所以 server 設了 `DisableGeneralOptionsHandler`（`cmd.NewHTTPServer`，`serve` 與測試用同一個）：沒有 token 是 401 並帶標頭，有 token 是 mux 回的 400。被拒絕的請求記在日誌裡的路徑與原因最多 200 個字元（超過的接 `…`，另記原本的位元組數），客戶端給的 900 KB 路徑不會原樣寫進日誌。
+- **標頭**（`webserver.Secure`，每個回應，包括 401）：`Content-Security-Policy: default-src 'self'; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`（`/mcp` 是 `no-store, no-transform`）、`X-Frame-Options: DENY`。沒有 inline script 也沒有 inline style（進度條與圖表是 SVG 元素，以 class 上色），沒有 JavaScript、CDN、字型或圖片的外部請求。
 - **方法**：只有 GET 與 HEAD，其他一律 `405` 並帶 `Allow: GET, HEAD`。
-- **圖表**是伺服器產生的 inline SVG（`pkg/svgchart`：橫條圖、直條圖、進度條），所有文字都經過跳脫，連結只收站內路徑，幾何用 decimal 算，沒有浮點數。每張圖旁邊都有一張同樣數字的表，表是依據，圖是它的樣子；SVG 的 `<title>`/`<desc>` 也寫了同樣的數字給讀屏軟體。
+- **圖表**是伺服器產生的 inline SVG（`pkg/svgchart`：橫條圖、直條圖、進度條），所有文字都經過跳脫，連結只收站內路徑，幾何用 decimal 算，沒有浮點數。直條圖上高亮欄的數字畫在它蓋到的欄裡最高的那一根的上方，不壓在比它高的鄰欄上（數字的寬度由字數估計，估得寬一點；超出左右邊界時靠該欄的邊）。每張圖旁邊都有一張同樣數字的表，表是依據，圖是它的樣子；SVG 的 `<title>`/`<desc>` 也寫了同樣的數字給讀屏軟體。
 - **可及性與版面**：真的 `<table>`、`<th scope>`、`<caption>`，數字靠右並用等寬數字，負數以負號（U+2212）標示，顏色只是第二個線索；超支同時有文字與顏色；亮色與暗色跟著系統（`prefers-color-scheme`），桌面寬度圖與表並排。手機寬度（40rem 以下）每一列排成一張小卡片，每格前面寫欄名（`data-label`；欄標題留給讀屏軟體，標記上的 `role` 讓它仍是一張表）；欄位多的表在手機與桌面之間保持寬度，在框內橫向捲動。
 - **金額**依標的的小數位數、千分位；**日期**是帳本裡的日曆日（不轉時區），**時刻**（建立、確認、作廢、發生時間）以 `MAXOS_TIMEZONE` 顯示。
 
@@ -53,11 +53,11 @@ internal/webtest                  測試用的 Access 替身（自簽金鑰）
 網頁只排版，數字是 use case 的（架構慣例第 11 節）。有取捨的地方：
 
 - **總覽**：餘額依機構分組，沒有機構的最後；一個標的一行，未到期分期是另一行（負的，和餘額同號）。所有標的都是零、也沒有未到期分期的帳戶收進摺疊的清單，已封存又沒有餘額的不列。未到期分期的表列的是分期的本金，所以是正數（欄名「已到期的本金」「未到期分期」），旁邊一行字說明它在餘額裡是負數、另外列出。往來為正是「對方欠我」，為負是「我欠對方」，用文字說出來，全部為零的對象收進摺疊清單。草稿的表是「如果這些草稿今天全部確認，帳戶的餘額今天會有的變動」，另有一行「自己帳戶之間的轉帳」的筆數。
-- **交易**：一頁 100 筆，超過時有上一頁、下一頁；篩選與月份的連結都保留其他篩選；帳戶篩選除了帳戶還有「沒有帳戶的交易」（`account=none`）。金額欄是每個帳戶的增減（帳戶、未到期分期、往來的順序找第一種有的）；金額不是帳戶的增減時（未到期分期、往來）一律寫出它是什麼（「好銀行信用卡・未到期分期」「往來・Bob」），不只在有好幾筆金額時。草稿的列有虛線邊與底色，並有「草稿」標籤；已作廢的列劃線。
+- **交易**：一頁 100 筆，超過時有上一頁、下一頁；篩選與月份的連結都保留其他篩選；帳戶篩選除了帳戶還有「沒有帳戶的交易」（`account=none`）。狀態篩選列出有那個狀態的交易：分期計畫的各期是各自的交易，草稿計畫的各期也是草稿，照列；只有草稿頁連過來的清單帶 `periods=none`，分期計畫只列起點（和草稿頁的筆數一樣），清單上方有一行字說明並附「連各期一起列」的連結，表單與月份的連結也保留它。金額欄是每個帳戶的增減（帳戶、未到期分期、往來的順序找第一種有的）；金額不是帳戶的增減時（未到期分期、往來）一律寫出它是什麼（「好銀行信用卡・未到期分期」「往來・Bob」），不只在有好幾筆金額時；手機寬度時這個說明排在金額上面，長的帳戶名不會把金額擠出畫面。草稿的列有虛線邊與底色，並有「草稿」標籤；已作廢的列劃線。
 - **交易明細**：每個分錄是一列，項目名稱由種類與帳簿決定（支出裡的 `expense` 分錄是「主要金額」，其他種類的是「手續費」，分期的是「利息」，對帳的是「未記錄」；支出裡正的 `dealing` 是「分攤」，負的是「往來（我欠對方）」），折扣是它所屬分錄之後的一列，不影響支出。項目與簿、種類、狀態、HTTP 狀態都用 `domain/model` 的常數與 `net/http` 的常數，不寫字串。
-- **草稿**：用 `GetDraftSummary`，數字都是它的，頁面照寫。一筆草稿是 `ConfirmTransactions` 一次確認的單位：分期計畫算一筆（它的起點，在起點那個月），各期不另外算。金額是「如果這些草稿今天全部確認，帳戶的餘額今天會有的變動」：日期在今天之後的草稿與還沒到期的分期各期要到那一天才會影響餘額，所以不在金額裡（筆數照算）。帳戶的列包含轉帳進出這個帳戶的部分，一筆草稿動到兩個帳戶（轉帳）時兩邊各算一筆；月與總數的流出和流入不含「自己帳戶之間的轉帳」，那是另一列，只有筆數。草稿屬於一個帳戶，是它有分錄到那個帳戶（任何簿，所以消費分期的起點算在那張卡），這和交易頁的帳戶篩選同一個定義；沒有任何帳戶分錄的（對象先付、記成往來的支出）自成「沒有帳戶的草稿」一列，連到 `account=none`。每一組連到該月該帳戶的草稿清單，那份清單列的就是它算的那些（狀態是草稿時，`ListTransactions` 不列分期計畫的各期）。
-- **信用卡帳單**：總覽的範圍是「今天往前十三個月」到「今天往後 31 天」，從中取進行中的一期（含今天的那一期）與最近十二期已結帳的。一張帳單的「依類別的消費」是 `GetCardStatement` 的 `Charges`：這一期卡被扣的款，每筆交易的扣款依它各行的順序分給各行（支出的行依頂層類別，手續費與分期利息也是支出的行，所以在它們自己的類別，與支出頁同一個；我替別人付的行是「分攤」），不夠解釋的是「其他」（轉帳、往來、分期的本金）；每個標的一張圖與一張表，加起來等於那一期的「本期消費」。頁面只寫 use case 分好的各行，合計取自帳單的數字。
-- **預算**：領域用 `GetAreaBudgets` 該月的狀態，專案用 `GetProjectBudgets`（整個專案一個總額，不分月，頁面有一行字說專案不隨月份改變）。超支與每一個分配的「超過分配」是 use case 的 `Over`（已花大於預算或分配，剛好花完不算），頁面不比較。沒有預算的領域只顯示已花。
+- **草稿**：用 `GetDraftSummary`，數字都是它的，頁面照寫。一筆草稿是 `ConfirmTransactions` 一次確認的單位：分期計畫算一筆（它的起點，在起點那個月），各期不另外算。金額是「如果這些草稿今天全部確認，帳戶的餘額今天會有的變動」：日期在今天之後的草稿與還沒到期的分期各期要到那一天才會影響餘額，所以不在金額裡（筆數照算）。帳戶的列包含轉帳進出這個帳戶的部分，一筆草稿動到兩個帳戶（轉帳）時兩邊各算一筆，所以一筆自己帳戶之間的轉帳在兩個帳戶的列各出現一次；月與總數的流出和流入不含它，那是「自己帳戶之間的轉帳」那一列，寫筆數與這些錢（use case 的 `OwnTransferAmounts`，以負號寫在流出與流入，淨額為 0，不用損失的顏色）：每一欄的各帳戶的列加上這一列，剛好是「這個月合計」，網頁的測試把表上的數字加起來驗證。草稿屬於一個帳戶，是它有分錄到那個帳戶（任何簿，所以消費分期的起點算在那張卡），這和交易頁的帳戶篩選同一個定義；沒有任何帳戶分錄的（對象先付、記成往來的支出）自成「沒有帳戶的草稿」一列，連到 `account=none`。每一組連到該月該帳戶的草稿清單（帶 `periods=none`，計畫只列起點），那份清單列的就是它算的那些。
+- **信用卡帳單**：總覽的範圍是「今天往前十三個月」到「今天往後 31 天」，從中取進行中的一期（含今天的那一期）與最近十二期已結帳的。一張帳單的「依類別的消費」是 `GetCardStatement` 的 `Charges`：這一期卡被扣的款，每筆交易的扣款依它各行的順序分給各行：支出的行依頂層類別；手續費與分期利息也是支出的行，所以在它們自己的類別，與支出頁同一個，但手續費只有付它的是這張卡才算（轉帳的手續費由銀行付，不是這張卡被扣的款）；我替別人付的行，只有支出裡的才是「分攤」，用卡付的往來（借錢給對方、替對方墊的錢）不是；不夠解釋的是「其他」（轉帳、往來、分期的本金）。每個標的一張圖與一張表，加起來等於那一期的「本期消費」。頁面只寫 use case 分好的各行，合計取自帳單的數字。
+- **預算**：領域用 `GetAreaBudgets` 該月的狀態，專案用 `GetProjectBudgets`（整個專案一個總額，不分月，頁面有一行字說專案不隨月份改變；只讀屬於專案的支出，不讀整個帳本）。超支與每一個分配的「超過分配」是 use case 的 `Over`（已花大於預算或分配，剛好花完不算），頁面不比較。沒有預算的領域只顯示已花。
 - **支出**：「已花」與預算同一個定義（已確認、`expense` 帳簿、本位幣金額、到今天為止）。每個頂層類別的合計、它自己的金額與子類別是 `GetSpending` 的 `TopLevel`，頁面不加總。每月合計的窗口是「到今天所在的月為止的十二個月」，標題是「最近十二個月每月的支出」；選的月份不在其中時，窗口改成到選定的月份為止，標題改成「起月 到 迄月 每月的支出」，所以選定的月份一定是其中一根，並以不同顏色標出。
 
 ## 5. 之後要加寫入的動作
@@ -79,7 +79,7 @@ internal/webtest                  測試用的 Access 替身（自簽金鑰）
 
 ## 7. 測試與視覺檢查
 
-- `pkg/webserver`：版面、導覽、錯誤頁、標頭、方法與守門（沒有 guard 就建不出頁面、被拒絕的請求不會執行 handler）、格式。`pkg/svgchart`：縮放（零、一根、全相等、極大極小、沒資料、負值）、跳脫、連結過濾、結構合法。
-- `app/finance/adapter/in/web`：透過真的 mux 與 Access verifier（`internal/webtest`）：每條路由沒有 token、錯誤的 token、過期、受眾不對、只有 cookie 都是 401 且 use case 一個都沒被呼叫；有 token 是 200；非 GET 是 405；不存在的 id 與帳戶是 404、壞參數是 400、use case 失敗是不洩漏原因的 500；每個回應（含錯誤）帶安全標頭且沒有外部資源。每一頁的內容、空狀態、金額的小數位數與負號、`<script>` 在備註與商家裡不被執行、一頁的呼叫數固定、「今天」取自時鐘（台北凌晨與 UTC 的日期不同時）。查詢字串讀不懂（壞的跳脫、分號）或收的參數給了兩次是 400 而且 use case 一個都沒被呼叫；400 的頁面不重複收到的值（十萬字元的值也是）。每個測試取得的每一頁都對照 `CONTEXT.md` 的 `_Avoid_` 詞（`glossary_test.go`，詞從檔案讀）。
-- `cmd/`：真的模組與 PostgreSQL，記帳並確認一個小帳本後，用有效的 token 讀每一頁，檢查關鍵數字；一個不需要資料庫的測試（`http_handler_test.go`）走過 mux 自己回答的路徑（`//app`、`/app/./x`、`/`、`/APP/`、`/mcp/`、`/app%2fx` 等）：沒有 token 時每一個都只得到 401（不轉址、不 404）並帶安全標頭，有 token 時是 mux 的回答，也帶標頭。
+- `pkg/webserver`：版面、導覽、錯誤頁、標頭、方法與守門（沒有 guard 就建不出頁面、被拒絕的請求不會執行 handler）、格式；`NoStore`（`WriteHeader`、第一次 `Write`、`Flush`、什麼都沒寫、`Unwrap` 各一個測試）。`pkg/svgchart`：縮放（零、一根、全相等、極大極小、沒資料、負值）、跳脫、連結過濾、結構合法、高亮欄的數字不壓在比它高的鄰欄上（鄰欄比它高或矮、第一欄、最後一欄、只有一根、兩個高亮）。
+- `app/finance/adapter/in/web`：透過真的 mux 與 Access verifier（`internal/webtest`）：每條路由沒有 token、錯誤的 token、過期、受眾不對、只有 cookie 都是 401 且 use case 一個都沒被呼叫；有 token 是 200；非 GET 是 405；不存在的 id 與帳戶是 404、壞參數是 400、use case 失敗是不洩漏原因的 500；每個回應（含錯誤）帶安全標頭且沒有外部資源。每一頁的內容、空狀態、金額的小數位數與負號、`<script>` 在備註與商家裡不被執行、一頁的呼叫數固定、「今天」取自時鐘（台北凌晨與 UTC 的日期不同時）。查詢字串讀不懂（壞的跳脫、分號）或收的參數給了兩次是 400 而且 use case 一個都沒被呼叫；400 的頁面不重複收到的值（十萬字元的值也是）。每個測試取得的每一頁都對照 `CONTEXT.md` 的 `_Avoid_` 詞（`glossary_test.go`，詞從檔案讀）。草稿頁的表：各帳戶的列加上「自己帳戶之間的轉帳」那一列，每一欄每個標的都等於「這個月合計」（把頁面上的數字加起來驗證）；草稿頁連到的清單帶 `periods=none`，只給狀態的篩選照列各期，`periods` 不是 `none` 或給了兩次是 400。
+- `cmd/`：真的模組與 PostgreSQL，記帳並確認一個小帳本後，用有效的 token 讀每一頁，檢查關鍵數字；一個不需要資料庫的測試（`http_handler_test.go`）走過 mux 自己回答的路徑（`//app`、`/app/./x`、`/`、`/APP/`、`/mcp/`、`/app%2fx` 等）：沒有 token 時每一個都只得到 401（不轉址、不 404）並帶安全標頭，有 token 時是 mux 的回答，也帶標頭；`OPTIONS *` 走真的 socket、用與 `serve` 同一份 server 設定（沒有 token 是 401 並帶標頭）；`/mcp` 以真的 `capture` 工具呼叫（含串流的事件）驗證五個標頭齊全、`Cache-Control` 是 `no-store, no-transform`、結果完好（`mcp_http_integration_test.go`）。`pkg/cfaccess` 驗證被拒絕的路徑與原因在日誌裡最多 200 個字元。
 - 視覺檢查（不進版控）：用拋棄式的測試把一個 `web_` 開頭的臨時資料庫以真正的 use case 填滿，用 `internal/webtest` 的自簽金鑰與 verifier 起真正的 handler，用 Chrome for Testing 以手機與桌面寬度拍每一頁；程式與資料庫用完即刪。真正的 Cloudflare Access 在這裡無法測試。

@@ -20,6 +20,9 @@ type DraftSummary struct {
 	// OwnTransfers is how many of them move money between my own accounts, which the
 	// Amounts leave out.
 	OwnTransfers int
+	// OwnTransferAmounts is the money that they move between my own accounts, by
+	// instrument code: the OwnTransferAmounts of Months added up.
+	OwnTransferAmounts []DraftAmount
 	// Amounts are what all the drafts would change in the balances of all the
 	// accounts together, by instrument code: the Amounts of Months added up.
 	Amounts []DraftAmount
@@ -37,6 +40,13 @@ type DraftMonth struct {
 	Count int
 	// OwnTransfers is how many of them move money between my own accounts.
 	OwnTransfers int
+	// OwnTransferAmounts is the money that they move between my own accounts, by
+	// instrument code: of each instrument, Outflow and Inflow are both what moves, so
+	// the Net is zero. It is in the Amounts of each account that it moves (it leaves
+	// one and arrives in another) and not in the Amounts of the month, so the Amounts
+	// of the Accounts added up, less these, are the Amounts of the month, Outflow and
+	// Inflow each.
+	OwnTransferAmounts []DraftAmount
 	// Amounts are what the drafts of the month would change in the balances of all
 	// the accounts together, by instrument code: what moves between my own accounts
 	// is not in them, so they are not the Amounts of Accounts added up.
@@ -166,7 +176,7 @@ func SummarizeDrafts(txns []DraftTransaction, today time.Time) (DraftSummary, er
 		first := MonthOf(day)
 		month := months[first]
 		if month == nil {
-			month = &draftMonthSums{moves: make(draftMoves), accounts: make(map[uuid.UUID]*draftAccountSums)}
+			month = &draftMonthSums{moves: make(draftMoves), own: make(draftMoves), accounts: make(map[uuid.UUID]*draftAccountSums)}
 			months[first] = month
 		}
 		if !t.isPlanPeriod() {
@@ -178,9 +188,9 @@ func SummarizeDrafts(txns []DraftTransaction, today time.Time) (DraftSummary, er
 	}
 
 	out := DraftSummary{Months: make([]DraftMonth, 0, len(months))}
-	overall := make(draftMoves)
+	overall, overallOwn := make(draftMoves), make(draftMoves)
 	for first, sums := range months {
-		month := DraftMonth{Month: first, Count: sums.drafts, OwnTransfers: sums.ownTransfers, Amounts: sums.moves.amounts()}
+		month := DraftMonth{Month: first, Count: sums.drafts, OwnTransfers: sums.ownTransfers, OwnTransferAmounts: sums.own.amounts(), Amounts: sums.moves.amounts()}
 		accounts := make([]*draftAccountSums, 0, len(sums.accounts))
 		for _, a := range sums.accounts {
 			accounts = append(accounts, a)
@@ -197,11 +207,15 @@ func SummarizeDrafts(txns []DraftTransaction, today time.Time) (DraftSummary, er
 		for _, a := range sums.moves {
 			overall.add(a.InstrumentID, a.InstrumentCode, a.Outflow, a.Inflow)
 		}
+		for _, a := range sums.own {
+			overallOwn.add(a.InstrumentID, a.InstrumentCode, a.Outflow, a.Inflow)
+		}
 		out.Count += month.Count
 		out.OwnTransfers += month.OwnTransfers
 		out.Months = append(out.Months, month)
 	}
 	out.Amounts = overall.amounts()
+	out.OwnTransferAmounts = overallOwn.amounts()
 	slices.SortFunc(out.Months, func(a, b DraftMonth) int { return b.Month.Compare(a.Month) })
 	return out, nil
 }
@@ -213,9 +227,10 @@ type draftMonthSums struct {
 	// of them move money between my own accounts; ofNone is how many have no account.
 	drafts, ownTransfers, ofNone int
 	// moves is what the drafts move in all the accounts together, without what moves
-	// between my own accounts.
-	moves    draftMoves
-	accounts map[uuid.UUID]*draftAccountSums
+	// between my own accounts, which is own: of each instrument, as an outflow and as
+	// an inflow both.
+	moves, own draftMoves
+	accounts   map[uuid.UUID]*draftAccountSums
 }
 
 // draftAccountSums is what is known of the drafts of one month that are of one
@@ -273,6 +288,7 @@ func (m *draftMonthSums) move(t DraftTransaction) {
 		for _, a := range moved {
 			if internal := decimal.Min(a.Outflow, a.Inflow); internal.IsPositive() {
 				a.Outflow, a.Inflow = a.Outflow.Sub(internal), a.Inflow.Sub(internal)
+				m.own.add(a.InstrumentID, a.InstrumentCode, internal, internal)
 				own = true
 			}
 		}

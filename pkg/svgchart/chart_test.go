@@ -783,3 +783,158 @@ func TestCJKPassesThroughUnescaped(t *testing.T) {
 		t.Errorf("CJK was numerically escaped: %s", out)
 	}
 }
+
+// valueTextWidth is the test's own estimate of a value text at the 12px font of
+// the stylesheet: letters and digits 8 units, ',' '.' ' ' 4, CJK 12.
+func valueTextWidth(s string) decimal.Decimal {
+	w := 0
+	for _, r := range s {
+		switch {
+		case r >= 0x1100:
+			w += 12
+		case r == ',' || r == '.' || r == ' ':
+			w += 4
+		default:
+			w += 8
+		}
+	}
+	return decimal.NewFromInt(int64(w))
+}
+
+// valueBox returns the horizontal extent a value text covers, from its anchor.
+func valueBox(t *testing.T, v *node) (from, to decimal.Decimal) {
+	t.Helper()
+	x, w := d(v.attrs["x"]), valueTextWidth(v.text)
+	switch v.attrs["text-anchor"] {
+	case "start":
+		return x, x.Add(w)
+	case "end":
+		return x.Sub(w), x
+	case "middle":
+		return x.Sub(w.Div(d("2"))), x.Add(w.Div(d("2")))
+	}
+	t.Fatalf("unexpected anchor %q", v.attrs["text-anchor"])
+	return from, to
+}
+
+// checkValueTexts asserts, for every value text of the rendered columns, that
+// there is one per highlighted bar with a Text, that its box stays inside the
+// viewBox, that no bar taller than its baseline lies under the box, and that
+// the baseline sits 4 above the tallest bar under the box (or above the chart
+// baseline when the box covers no bar).
+func checkValueTexts(t *testing.T, bars []svgchart.Bar) []*node {
+	t.Helper()
+	root := parse(t, svgchart.Columns(chart, bars))
+	var want []string
+	for _, b := range bars {
+		if b.Highlight && b.Text != "" {
+			want = append(want, b.Text)
+		}
+	}
+	values := root.byClass(svgchart.ClassValue)
+	if got := texts(values); !equal(got, want) {
+		t.Fatalf("value texts = %v, want %v", got, want)
+	}
+	rects := root.byClass(svgchart.ClassBar)
+	for _, v := range values {
+		from, to := valueBox(t, v)
+		y := d(v.attrs["y"])
+		if from.Sign() < 0 || to.GreaterThan(d("360")) {
+			t.Errorf("text %q spans %s..%s, outside the viewBox", v.text, from, to)
+		}
+		if y.LessThan(d("12")) || y.GreaterThan(d("170")) {
+			t.Errorf("text %q baseline y=%s leaves the viewBox (12px high)", v.text, y)
+		}
+		wantY := d("140")
+		for _, r := range rects {
+			x, w, top := d(r.attrs["x"]), d(r.attrs["width"]), d(r.attrs["y"])
+			if !x.LessThan(to) || !x.Add(w).GreaterThan(from) {
+				continue
+			}
+			if top.LessThan(y) {
+				t.Errorf("text %q at y=%s x=%s..%s overlaps the bar at x=%s..%s whose top is y=%s", v.text, y, from, to, x, x.Add(w), top)
+			}
+			wantY = decimal.Min(wantY, top)
+		}
+		if !y.Equal(wantY.Sub(d("4"))) {
+			t.Errorf("text %q baseline y=%s, want 4 above the tallest bar under it (%s)", v.text, y, wantY.Sub(d("4")))
+		}
+	}
+	return values
+}
+
+// withValues builds bars whose Text is a typical amount, highlighting the
+// given indexes.
+func withValues(values []string, highlighted ...int) []svgchart.Bar {
+	bars := vals(values...)
+	for i := range bars {
+		bars[i].Text = "16,865.00 TWD"
+	}
+	for _, i := range highlighted {
+		bars[i].Highlight = true
+	}
+	return bars
+}
+
+func TestColumnsValueTextClearsTallerNeighbours(t *testing.T) {
+	tests := []struct {
+		name        string
+		values      []string
+		highlighted []int
+	}{
+		{"shorter than both neighbours", []string{"100", "100", "100", "20", "100", "100", "100"}, []int{3}},
+		{"shorter than its left neighbours", []string{"100", "100", "100", "100", "20", "5", "5"}, []int{4}},
+		{"shorter than its right neighbours", []string{"5", "5", "20", "100", "100", "100", "100"}, []int{2}},
+		{"first column shorter", []string{"20", "100", "100", "100", "100", "100", "100"}, []int{0}},
+		{"last column shorter", []string{"100", "100", "100", "100", "100", "100", "20"}, []int{6}},
+		{"first of twelve", []string{"1", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9"}, []int{0}},
+		{"last of twelve", []string{"9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "9", "1"}, []int{11}},
+		{"single bar", []string{"5"}, []int{0}},
+		{"taller than its neighbours", []string{"20", "20", "100", "20", "20"}, []int{2}},
+		{"two highlighted", []string{"100", "10", "10", "100", "100", "10", "100"}, []int{1, 5}},
+		{"all highlighted", []string{"100", "10", "50"}, []int{0, 1, 2}},
+		{"zero highlighted between tall", []string{"100", "0", "100"}, []int{1}},
+		{"zero highlighted first", []string{"0", "100", "100"}, []int{0}},
+		{"all zero", []string{"0", "0", "0"}, []int{1}},
+		{"zero and negative", []string{"-3", "0", "7"}, []int{0, 1}},
+		{"ascending to the highlighted last", []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"}, []int{11}},
+		{"descending to the highlighted last", []string{"12", "11", "10", "9", "8", "7", "6", "5", "4", "3", "2", "1"}, []int{11}},
+		{"thirty-one days", []string{"9", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1"}, []int{15, 30}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checkValueTexts(t, withValues(tt.values, tt.highlighted...))
+		})
+	}
+
+	t.Run("highlighted without Text draws none", func(t *testing.T) {
+		bars := withValues([]string{"100", "20", "100"}, 1)
+		bars[1].Text = ""
+		checkValueTexts(t, bars)
+	})
+	t.Run("CJK text", func(t *testing.T) {
+		bars := withValues([]string{"100", "100", "20", "100", "100"}, 2)
+		bars[2].Text = "本月合計一千六百元"
+		checkValueTexts(t, bars)
+	})
+}
+
+// The 12-month trend of /app/spending: the current month is last and the
+// shortest; its text runs left over the previous months, so it sits on the
+// top of the tallest of the four columns it spans (the 9th, value 4).
+func TestColumnsValueTextOverShortLastColumn(t *testing.T) {
+	values := withValues([]string{"12", "11", "10", "9", "8", "7", "6", "5", "4", "3", "2", "1"}, 11)
+	v := checkValueTexts(t, values)[0]
+	if v.attrs["text-anchor"] != "end" || v.attrs["x"] != "350.1" || v.attrs["y"] != "101.3" {
+		t.Errorf("text anchor=%s x=%s y=%s, want end 350.1 101.3", v.attrs["text-anchor"], v.attrs["x"], v.attrs["y"])
+	}
+}
+
+// A highlighted column taller than everything its text spans keeps the text
+// directly above itself.
+func TestColumnsValueTextOverTallestColumn(t *testing.T) {
+	v := checkValueTexts(t, withValues([]string{"20", "20", "100", "20", "20"}, 2))[0]
+	if v.attrs["text-anchor"] != "middle" || v.attrs["y"] != "32" {
+		t.Errorf("text anchor=%s y=%s, want middle 32", v.attrs["text-anchor"], v.attrs["y"])
+	}
+}

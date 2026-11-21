@@ -18,7 +18,9 @@ import (
 // What a card was charged for on a statement, through the real use cases on a real
 // PostgreSQL, against what GetSpending says was spent on the same things: a fee, the
 // interest of an instalment, an expense of a subcategory are for the same top-level
-// category on the statement as they are in the spending of the month.
+// category on the statement as they are in the spending of the month. What is not
+// spent is not for a category: money lent with the card is Other, and so is a
+// transfer out of the card, whose fee is the card's only when the card paid it.
 
 func TestTheChargesOfAStatementAreForTheCategoriesThatTheMonthSpentOn(t *testing.T) {
 	ctx := context.Background()
@@ -73,6 +75,37 @@ func TestTheChargesOfAStatementAreForTheCategoriesThatTheMonthSpentOn(t *testing
 		t.Fatalf("RecordExpense in instalments: %v", err)
 	}
 	w.confirm(t, plan.Transaction)
+	// 700 lent to Alice with the card, which is a dealing and no share of what was paid for her;
+	d = w.details(w.key())
+	d.OccurredOn = dateOn(2026, time.October, 18)
+	loan, err := w.RecordDealing.RecordDealing(ctx, usecase.RecordDealingInput{
+		RecordDetails: d, AccountID: w.card, PartyID: alice.ID, InstrumentID: model.BaseCurrencyID, Amount: dec("700"), Direction: "paid_out",
+	})
+	if err != nil {
+		t.Fatalf("RecordDealing: %v", err)
+	}
+	w.confirm(t, loan.Transaction)
+	// 500 from the card to the bank, with a fee of 10 that the card paid and another of 10 that the
+	// bank paid, of a category of its own: the same amount, so that only the order of the postings
+	// says which fee is whose;
+	bankFees, err := w.CreateCategory.CreateCategory(ctx, usecase.CreateCategoryInput{Direction: "expense", Name: "Bank fees"})
+	if err != nil {
+		t.Fatalf("CreateCategory: %v", err)
+	}
+	w.names[bankFees.ID] = "Bank fees"
+	d = w.details(w.key())
+	d.OccurredOn = dateOn(2026, time.October, 19)
+	toBank, err := w.RecordTransfer.RecordTransfer(ctx, usecase.RecordTransferInput{
+		RecordDetails: d, FromAccountID: w.card, ToAccountID: w.bank, InstrumentID: model.BaseCurrencyID, Amount: dec("500"),
+		Fees: []usecase.Fee{
+			{AccountID: w.card, InstrumentID: model.BaseCurrencyID, CategoryID: w.fees, Amount: dec("10")},
+			{AccountID: w.bank, InstrumentID: model.BaseCurrencyID, CategoryID: bankFees.ID, Amount: dec("10")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RecordTransfer to the bank: %v", err)
+	}
+	w.confirm(t, toBank.Transaction)
 	// and what is not charged on it: a payment into the card, a draft, and a purchase
 	// that belongs to the next statement.
 	d = w.details(w.key())
@@ -99,9 +132,10 @@ func TestTheChargesOfAStatementAreForTheCategoriesThatTheMonthSpentOn(t *testing
 	for _, category := range c.Categories {
 		lines = append(lines, fmt.Sprintf("%s %s", w.names[category.CategoryID], category.Amount))
 	}
-	want := []string{"Food 420", "Interest 50", "Fees 15"}
-	if strings.Join(lines, ", ") != strings.Join(want, ", ") || !c.Shares.Equal(dec("200")) || !c.Other.Equal(dec("2000")) {
-		t.Errorf("charges = %v, shares %s, other %s; want %v, shares 200, other 2000 (the 1,000 taken out, and the 1,000 of principal)", lines, c.Shares, c.Other, want)
+	want := []string{"Food 420", "Interest 50", "Fees 25"}
+	if strings.Join(lines, ", ") != strings.Join(want, ", ") || !c.Shares.Equal(dec("200")) || !c.Other.Equal(dec("3200")) {
+		t.Errorf("charges = %v, shares %s, other %s; want %v, shares 200, other 3200 (the 1,000 taken out, the 1,000 of principal, the 700 lent and the 500 sent to the bank)",
+			lines, c.Shares, c.Other, want)
 	}
 
 	// They are the charges of the figures, divided up and nothing over.
@@ -111,19 +145,26 @@ func TestTheChargesOfAStatementAreForTheCategoriesThatTheMonthSpentOn(t *testing
 		total = total.Add(category.Amount)
 		byCategory[category.CategoryID] = category.Amount
 	}
-	if len(statement.Figures) != 1 || !total.Equal(statement.Figures[0].Charges) || !total.Equal(dec("2685")) {
-		t.Errorf("the charges add up to %s, the figures say %+v, want both 2,685", total, statement.Figures)
+	if len(statement.Figures) != 1 || !total.Equal(statement.Figures[0].Charges) || !total.Equal(dec("3895")) {
+		t.Errorf("the charges add up to %s, the figures say %+v, want both 3,895", total, statement.Figures)
 	}
 
 	// The same things are the same categories as in the spending of the month: the fee, the
 	// interest and the food of the lunch and of the dinner, which is what the card was
-	// charged for them, whatever the instrument paid.
+	// charged for them, whatever the instrument paid. The month spent on one thing more,
+	// which the card was not charged for: the fee that the bank paid.
 	for _, top := range spent.TopLevel {
-		if got, ok := byCategory[top.CategoryID]; !ok || !got.Equal(top.Total) {
+		got, onStatement := byCategory[top.CategoryID]
+		switch {
+		case top.CategoryID == bankFees.ID:
+			if onStatement || !top.Total.Equal(dec("10")) {
+				t.Errorf("Bank fees: the statement charged %s for it (%t), and the month spent %s on it, want nothing charged and 10 spent", got, onStatement, top.Total)
+			}
+		case !onStatement || !got.Equal(top.Total):
 			t.Errorf("%s: the statement charged %s for it, and the month spent %s on it", w.names[top.CategoryID], got, top.Total)
 		}
 	}
-	if len(spent.TopLevel) != len(byCategory) {
-		t.Errorf("the month spent on %d categories (%s), the statement was charged for %d", len(spent.TopLevel), strings.Join(w.categoryLines(spent), "; "), len(byCategory))
+	if len(spent.TopLevel) != len(byCategory)+1 {
+		t.Errorf("the month spent on %d categories (%s), the statement was charged for %d and the bank's fee is the one more", len(spent.TopLevel), strings.Join(w.categoryLines(spent), "; "), len(byCategory))
 	}
 }

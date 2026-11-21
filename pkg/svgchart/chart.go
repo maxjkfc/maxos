@@ -60,7 +60,15 @@ const (
 	columnsMaxHeight = 104 // height of the tallest column
 	columnsLabelY    = 160
 	columnsMaxWidth  = 48
-	columnsEdge      = 60 // within this distance of a side, value text is anchored to the side
+	columnsValueGap  = 4 // between a highlighted column's text baseline and the tallest bar under the text
+
+	// The width of a value text is estimated, not measured: the package knows
+	// neither the font nor the renderer. The units are generous for the 12px
+	// sans-serif of the stylesheet, so the estimate errs on the wide side.
+	valueRuneWidth     = 8  // letters, digits, symbols
+	valueNarrowRuneW   = 4  // ',', '.', ' '
+	valueWideRuneWidth = 12 // CJK and everything else at or above valueWideFrom
+	valueWideFrom      = 0x1100
 
 	progressWidth  = 200
 	progressHeight = 14
@@ -128,8 +136,11 @@ func HBars(c Chart, bars []Bar) template.HTML {
 
 // Columns draws the bars as columns side by side, in the caller's order, with a
 // label under every column. Only the highlighted columns show their Text above
-// them; the other numbers belong in the table next to the chart. It returns the
-// empty string for no bars.
+// them, on the baseline of the tallest column the text spans so that it never
+// runs over a taller neighbour; the other numbers belong in the table next to
+// the chart. The text is centred on its column, or anchored to the nearer side
+// of the chart when the centred text would leave it. It returns the empty
+// string for no bars.
 func Columns(c Chart, bars []Bar) template.HTML {
 	if len(bars) == 0 {
 		return ""
@@ -142,35 +153,76 @@ func Columns(c Chart, bars []Bar) template.HTML {
 		decimal.NewFromInt(columnsMaxWidth),
 	)
 	half := decimal.NewFromInt(2)
+	baseline := decimal.NewFromInt(columnsBaseline)
+
+	// Every column's centre, left edge and top (the baseline for an empty one).
+	centres := make([]decimal.Decimal, len(bars))
+	lefts := make([]decimal.Decimal, len(bars))
+	tops := make([]decimal.Decimal, len(bars))
+	for i, b := range bars {
+		left := decimal.NewFromInt(columnsPad).Add(slot.Mul(decimal.NewFromInt(int64(i))))
+		centres[i] = left.Add(slot.DivRound(half, divScale))
+		lefts[i] = centres[i].Sub(barWidth.DivRound(half, divScale))
+		tops[i] = baseline.Sub(length(b.Value, maxValue, full))
+	}
 
 	var s svg
 	s.begin(c, ClassColumns, columnsWidth, columnsHeight, describe(bars))
 	for i, b := range bars {
-		left := decimal.NewFromInt(columnsPad).Add(slot.Mul(decimal.NewFromInt(int64(i))))
-		centre := left.Add(slot.DivRound(half, divScale))
-		x := centre.Sub(barWidth.DivRound(half, divScale))
-		h := length(b.Value, maxValue, full)
-		top := decimal.NewFromInt(columnsBaseline).Sub(h)
-
 		s.openLink(b.Href)
-		if h.Sign() > 0 {
-			s.rect(barClass(b), num(x), num(top), num(barWidth), num(h))
+		if h := baseline.Sub(tops[i]); h.Sign() > 0 {
+			s.rect(barClass(b), num(lefts[i]), num(tops[i]), num(barWidth), num(h))
 		}
-		s.text(ClassLabel, num(centre), itoa(columnsLabelY), "middle", b.Label)
+		s.text(ClassLabel, num(centres[i]), itoa(columnsLabelY), "middle", b.Label)
 		if b.Highlight && b.Text != "" {
-			y := top.Sub(decimal.NewFromInt(4))
-			switch {
-			case centre.LessThan(decimal.NewFromInt(columnsEdge)):
-				s.text(ClassValue, num(x), num(y), "start", b.Text)
-			case centre.GreaterThan(decimal.NewFromInt(columnsWidth - columnsEdge)):
-				s.text(ClassValue, num(x.Add(barWidth)), num(y), "end", b.Text)
-			default:
-				s.text(ClassValue, num(centre), num(y), "middle", b.Text)
+			anchor, ax, from, to := valueSpan(b.Text, centres[i], lefts[i], barWidth)
+			top := tops[i]
+			for j := range bars {
+				if lefts[j].LessThan(to) && lefts[j].Add(barWidth).GreaterThan(from) {
+					top = decimal.Min(top, tops[j])
+				}
 			}
+			s.text(ClassValue, num(ax), num(top.Sub(decimal.NewFromInt(columnsValueGap))), anchor, b.Text)
 		}
 		s.closeLink(b.Href)
 	}
 	return s.finish()
+}
+
+// valueSpan places the text of the column with the given centre and left edge:
+// centred when that stays inside the chart, else anchored to the column's left
+// edge (text running right) or right edge (text running left). It returns the
+// anchor, the x of the anchor and the horizontal extent [from, to] the text is
+// estimated to cover.
+func valueSpan(text string, centre, left, barWidth decimal.Decimal) (anchor string, x, from, to decimal.Decimal) {
+	w := decimal.NewFromInt(int64(valueWidth(text)))
+	half := w.DivRound(decimal.NewFromInt(2), divScale)
+	switch {
+	case centre.Sub(half).Sign() < 0:
+		return "start", left, left, left.Add(w)
+	case centre.Add(half).GreaterThan(decimal.NewFromInt(columnsWidth)):
+		right := left.Add(barWidth)
+		return "end", right, right.Sub(w), right
+	default:
+		return "middle", centre, centre.Sub(half), centre.Add(half)
+	}
+}
+
+// valueWidth estimates the width of a value text in viewBox units, from the
+// 12px font size the stylesheet gives to every chart text.
+func valueWidth(text string) int {
+	w := 0
+	for _, r := range text {
+		switch {
+		case r >= valueWideFrom:
+			w += valueWideRuneWidth
+		case r == ',' || r == '.' || r == ' ':
+			w += valueNarrowRuneW
+		default:
+			w += valueRuneWidth
+		}
+	}
+	return w
 }
 
 // Progress draws one meter: spent against limit on a scale of the larger of the

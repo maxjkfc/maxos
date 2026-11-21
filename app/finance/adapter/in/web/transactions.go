@@ -44,6 +44,10 @@ type filterView struct {
 	Statuses []choice
 	Kinds    []choice
 	Reset    string
+	// WithoutPeriods is whether the list leaves the periods of instalment plans out,
+	// which the form keeps, and WithPeriods is the link to the same list with them.
+	WithoutPeriods bool
+	WithPeriods    string
 }
 
 // choice is an option of a select.
@@ -91,7 +95,7 @@ type movement struct {
 // asks for one page, and reads the lists that name the rows once.
 func (h *handlers) transactions(r *http.Request) (webserver.Page, error) {
 	ctx := r.Context()
-	q, err := queryOf(r, "month", "account", "status", "kind", "page")
+	q, err := queryOf(r, "month", "account", "status", "kind", "periods", "page")
 	if err != nil {
 		return webserver.Page{}, err
 	}
@@ -103,22 +107,27 @@ func (h *handlers) transactions(r *http.Request) (webserver.Page, error) {
 	if err != nil {
 		return webserver.Page{}, err
 	}
+	withoutPeriods, err := periodsParam(q)
+	if err != nil {
+		return webserver.Page{}, err
+	}
 	page, err := pageParam(q)
 	if err != nil {
 		return webserver.Page{}, err
 	}
-	f := listFilter{Month: month, Account: account, WithoutAccount: withoutAccount, Status: q.Get("status"), Kind: q.Get("kind")}
+	f := listFilter{Month: month, Account: account, WithoutAccount: withoutAccount, WithoutPeriods: withoutPeriods, Status: q.Get("status"), Kind: q.Get("kind")}
 
 	to := model.LastDayOf(month)
 	out, err := h.p.ListTransactions.ListTransactions(ctx, usecase.ListTransactionsInput{
-		Status:         f.Status,
-		Kind:           f.Kind,
-		From:           &month,
-		To:             &to,
-		AccountID:      account,
-		WithoutAccount: withoutAccount,
-		Limit:          pageSize,
-		Offset:         (page - 1) * pageSize,
+		Status:             f.Status,
+		Kind:               f.Kind,
+		From:               &month,
+		To:                 &to,
+		AccountID:          account,
+		WithoutAccount:     withoutAccount,
+		ExcludePlanPeriods: withoutPeriods,
+		Limit:              pageSize,
+		Offset:             (page - 1) * pageSize,
 	})
 	if err != nil {
 		return webserver.Page{}, fail(err)
@@ -135,7 +144,7 @@ func (h *handlers) transactions(r *http.Request) (webserver.Page, error) {
 		Current:  f.link(model.MonthOf(h.today()), 1),
 		Filters:  f.form(names),
 		Page:     page,
-		Filtered: f.Account != nil || f.WithoutAccount || f.Status != "" || f.Kind != "",
+		Filtered: f.Account != nil || f.WithoutAccount || f.WithoutPeriods || f.Status != "" || f.Kind != "",
 	}
 	if page > 1 {
 		v.PrevPage = f.link(month, page-1)
@@ -156,6 +165,9 @@ type listFilter struct {
 	// WithoutAccount lists the transactions that are of no account, which an account
 	// cannot be chosen for.
 	WithoutAccount bool
+	// WithoutPeriods lists an instalment plan by its origin and leaves its periods
+	// out, as the drafts are counted.
+	WithoutPeriods bool
 	Status         string
 	Kind           string
 }
@@ -183,6 +195,9 @@ func (f listFilter) link(month time.Time, page int) string {
 	case f.WithoutAccount:
 		q.Set("account", noAccount)
 	}
+	if f.WithoutPeriods {
+		q.Set("periods", noPeriods)
+	}
 	if page > 1 {
 		q.Set("page", strconv.Itoa(page))
 	}
@@ -192,8 +207,14 @@ func (f listFilter) link(month time.Time, page int) string {
 // form is the form of the filters, with the choices that are set marked.
 func (f listFilter) form(r *refs) filterView {
 	v := filterView{
-		Month: webserver.FormatMonth(f.Month),
-		Reset: link("/app/transactions", url.Values{"month": {webserver.FormatMonth(f.Month)}}),
+		Month:          webserver.FormatMonth(f.Month),
+		Reset:          link("/app/transactions", url.Values{"month": {webserver.FormatMonth(f.Month)}}),
+		WithoutPeriods: f.WithoutPeriods,
+	}
+	if f.WithoutPeriods {
+		withPeriods := f
+		withPeriods.WithoutPeriods = false
+		v.WithPeriods = withPeriods.link(f.Month, 1)
 	}
 	v.Accounts = append(v.Accounts,
 		choice{Value: "", Label: "全部帳戶", Selected: f.Account == nil && !f.WithoutAccount},

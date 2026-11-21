@@ -368,7 +368,8 @@ func (e *env) spend(on time.Time, area, project *uuid.UUID, category model.Categ
 
 // asked writes what the repo was asked for, one to a line: the days, as
 // "2026-11-01..2026-11-14", with nothing before the dots when there is no first day,
-// and " of 日本旅行" when it was limited to a project.
+// " in projects" when it was limited to the expenses that belong to a project, and
+// " of 日本旅行" when it was limited to one project.
 func (e *env) asked() []string {
 	lines := make([]string, len(e.budgets.asked))
 	for i, f := range e.budgets.asked {
@@ -376,6 +377,9 @@ func (e *env) asked() []string {
 			lines[i] = f.From.Format(time.DateOnly)
 		}
 		lines[i] += ".." + f.To.Format(time.DateOnly)
+		if f.InProject {
+			lines[i] += " in projects"
+		}
 		if f.ProjectID != nil {
 			lines[i] += " of " + e.catalog.projects[*f.ProjectID].Name
 		}

@@ -180,6 +180,13 @@ func (r *refs) signed(instrument uuid.UUID, quantity decimal.Decimal) amountView
 	return amountView{Text: webserver.FormatSigned(quantity, decimals), Unit: i.Code, Negative: quantity.IsNegative()}
 }
 
+// taken writes a quantity that is taken out of a total: with a minus sign, which says
+// what is done with it and not that it is a loss, so it has no colour for one.
+func (r *refs) taken(instrument uuid.UUID, quantity decimal.Decimal) amountView {
+	i, decimals := r.instrument(instrument)
+	return amountView{Text: webserver.FormatAmount(quantity.Neg(), decimals), Unit: i.Code}
+}
+
 // base writes an amount of the base currency.
 func (r *refs) base(amount decimal.Decimal) amountView {
 	return r.money(model.BaseCurrencyID, amount)

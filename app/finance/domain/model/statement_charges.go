@@ -19,11 +19,12 @@ type CardCharges struct {
 	// Categories are the top-level categories the charges were for, the largest
 	// amount first and, for the same amount, by category id.
 	Categories []CategoryAmount
-	// Shares is what was charged for others: the dealing lines of what I paid for
-	// them, which they owe me.
+	// Shares is what was charged for others in an expense: the dealing lines of what
+	// I paid for them in it, which they owe me.
 	Shares decimal.Decimal
-	// Other is what no expense or dealing line explains: a transfer out of the card,
-	// the principal of an instalment period.
+	// Other is what no expense line or share explains: a transfer out of the card, a
+	// payment to a party (a dealing, such as a loan), the principal of an instalment
+	// period.
 	Other decimal.Decimal
 }
 
@@ -49,15 +50,24 @@ func (c CardCharges) Total() decimal.Decimal {
 //
 // The charge of a transaction in an instrument is what its account postings to the
 // card in it take, the negative ones added up. It is spread over the lines of the
-// transaction in that instrument, in the order of its postings: an expense line,
-// which is one of any kind of transaction (the fee of a transfer, the interest of an
-// instalment period are lines like those of an expense), goes to the top-level
-// category of its own category, and a dealing line that grows what a party owes me,
-// what I paid for them, to Shares. A line is taken for no more than what is left of
-// the charge, so a transaction that was paid with the card and something else
-// charges the card only its part. What is left of the charge when the lines are done
-// is Other. A transaction that charged the card nothing, because it only credited
-// it, is for nothing.
+// transaction in that instrument, in the order of its postings, each taken for no
+// more than what is left of the charge, so a transaction that was paid with the
+// card and something else charges the card only its part:
+//
+//   - an expense line goes to the top-level category of its own category, when the
+//     card paid for it (see expenseLinesOfCard). The lines of an expense and the
+//     interest of an instalment period are the card's whenever it was charged. A
+//     fee, which is the expense line of a transfer, a dealing and the other kinds
+//     that have none of their own, is the card's only when an account posting to the
+//     card pays it: of a transfer out of the card to a bank, the fee that the card
+//     paid is, and the fee that the bank paid is not;
+//   - a dealing line that grows what a party owes me goes to Shares, in an expense
+//     only, where it is what I paid for others in it. What the card paid to a party,
+//     a transaction of the kind dealing, is no share: its line is left, as the
+//     transfer out of the card is.
+//
+// What is left of the charge when the lines are done is Other. A transaction that
+// charged the card nothing, because it only credited it, is for nothing.
 //
 // The result is in no order that matters but one that is the same every time: by
 // the id of the instrument. Only the instruments that were charged are in it.
@@ -67,7 +77,12 @@ func ChargesOfCard(cardID uuid.UUID, transactions []Transaction, topLevel func(c
 		byTop   = make(map[uuid.UUID]map[uuid.UUID]decimal.Decimal) // instrument -> top-level category -> amount
 	)
 	for _, txn := range transactions {
-		for instrument, charge := range chargedToCard(txn, cardID) {
+		charges := chargedToCard(txn, cardID)
+		if len(charges) == 0 {
+			continue
+		}
+		lines := expenseLinesOfCard(txn, cardID)
+		for instrument, charge := range charges {
 			c, ok := charged[instrument]
 			if !ok {
 				c = &CardCharges{InstrumentID: instrument}
@@ -75,7 +90,7 @@ func ChargesOfCard(cardID uuid.UUID, transactions []Transaction, topLevel func(c
 				byTop[instrument] = make(map[uuid.UUID]decimal.Decimal)
 			}
 			left := charge
-			for _, p := range txn.Postings {
+			for i, p := range txn.Postings {
 				if left.IsZero() {
 					break
 				}
@@ -83,12 +98,12 @@ func ChargesOfCard(cardID uuid.UUID, transactions []Transaction, topLevel func(c
 					continue
 				}
 				switch {
-				case p.Book == BookExpense && p.CategoryID != nil:
+				case lines[i]:
 					take := decimal.Min(p.Quantity, left)
 					top := topLevel(*p.CategoryID)
 					byTop[instrument][top] = byTop[instrument][top].Add(take)
 					left = left.Sub(take)
-				case p.Book == BookDealing:
+				case p.Book == BookDealing && txn.Kind == KindExpense:
 					take := decimal.Min(p.Quantity, left)
 					c.Shares = c.Shares.Add(take)
 					left = left.Sub(take)
@@ -128,4 +143,29 @@ func chargedToCard(txn Transaction, cardID uuid.UUID) map[uuid.UUID]decimal.Deci
 		charges[p.InstrumentID] = charges[p.InstrumentID].Add(p.Quantity.Neg())
 	}
 	return charges
+}
+
+// expenseLinesOfCard says, for each posting of the transaction by its index, whether
+// it is an expense line that the card paid for: one that the charge of the card may
+// be spread over.
+//
+// An expense, a reconciliation and a period of an instalment plan have expense lines
+// of their own, which the account that paid for the transaction paid for, and that
+// is the card when it was charged. Any other kind has fees only, and a fee is paid
+// for by the account posting that pays it (see Transaction.feePairs): it is the
+// card's when that is a posting to the card, and when it is another account's, as the
+// fee that the bank paid for a transfer out of the card, it is not.
+func expenseLinesOfCard(txn Transaction, cardID uuid.UUID) []bool {
+	lines := make([]bool, len(txn.Postings))
+	if !txn.takesFees() {
+		for i, p := range txn.Postings {
+			lines[i] = p.Book == BookExpense && p.CategoryID != nil
+		}
+		return lines
+	}
+	for _, pair := range txn.feePairs() {
+		fee, payer := txn.Postings[pair.fee], txn.Postings[pair.payer]
+		lines[pair.fee] = fee.CategoryID != nil && payer.AccountID != nil && *payer.AccountID == cardID
+	}
+	return lines
 }

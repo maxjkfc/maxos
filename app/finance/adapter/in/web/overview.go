@@ -290,6 +290,17 @@ func draftAmountOf(r *refs, a usecase.DraftAmount) draftAmount {
 	}
 }
 
+// takenOutOf is what the drafts would move of one instrument, as it is taken out of a
+// total: each amount with a minus sign and without the colour of a loss, for it is
+// no loss but money that the rows of the accounts have twice.
+func takenOutOf(r *refs, a usecase.DraftAmount) draftAmount {
+	return draftAmount{
+		Outflow: r.taken(a.InstrumentID, a.Outflow),
+		Inflow:  r.taken(a.InstrumentID, a.Inflow),
+		Net:     r.signed(a.InstrumentID, a.Net),
+	}
+}
+
 // accountLink is the page of the transactions of an account.
 func accountLink(id uuid.UUID) string {
 	return link("/app/transactions", url.Values{"account": {id.String()}})

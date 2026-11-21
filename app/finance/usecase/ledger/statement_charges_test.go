@@ -122,3 +122,114 @@ func TestAStatementWithNothingChargedHasNoCharges(t *testing.T) {
 		t.Errorf("charges = %+v with figures %+v, want no charges for a card that was only paid", got.Charges, got.Figures)
 	}
 }
+
+// chargesAddUp is what the categories, the shares and the rest of the charges of an
+// instrument add up to.
+func chargesAddUp(c usecase.StatementCharges) decimal.Decimal {
+	total := c.Shares.Add(c.Other)
+	for _, category := range c.Categories {
+		total = total.Add(category.Amount)
+	}
+	return total
+}
+
+func TestWhatTheCardPaidToAPartyIsOtherOnTheStatementAndNotShares(t *testing.T) {
+	e := newEnv(t)
+	e.at(on(2026, time.November, 14))
+	bob := e.refs.addParty("Bob", false)
+
+	// A dinner of food of which 200 was for Bob, which is a share; and 700 lent to Bob
+	// with the card, which is a dealing and a share of nothing.
+	e.confirm(e.recordExpense(usecase.RecordExpenseInput{
+		RecordDetails: usecase.RecordDetails{IdempotencyKey: "charges-dinner-01", OccurredOn: on(2026, time.October, 12)},
+		AccountID:     &e.card.ID, InstrumentID: e.twd.ID,
+		Lines:  []usecase.CategoryLine{{CategoryID: e.food.ID, Amount: dec("300")}},
+		Shares: []usecase.Share{{PartyID: bob, Amount: dec("200")}},
+	}))
+	loan, err := e.svc.RecordDealing(context.Background(), usecase.RecordDealingInput{
+		RecordDetails: usecase.RecordDetails{IdempotencyKey: "charges-loan-0001", OccurredOn: on(2026, time.October, 14)},
+		AccountID:     e.card.ID, PartyID: bob, InstrumentID: e.twd.ID, Amount: dec("700"), Direction: "paid_out",
+	})
+	if err != nil {
+		t.Fatalf("RecordDealing: %v", err)
+	}
+	e.confirm(loan.Transaction)
+
+	got := e.statement(new(on(2026, time.November, 5)))
+
+	want := "TWD: food 300 | shares 200 | other 700"
+	if lines := e.chargesLines(got); len(lines) != 1 || lines[0] != want {
+		t.Errorf("charges = %q, want %q", lines, want)
+	}
+	if len(got.Figures) != 1 || len(got.Charges) != 1 {
+		t.Fatalf("figures %+v and charges %+v, want one of each: the card was charged in one instrument", got.Figures, got.Charges)
+	}
+	if total := chargesAddUp(got.Charges[0]); !total.Equal(got.Figures[0].Charges) || !total.Equal(dec("1200")) {
+		t.Errorf("the charges add up to %s and the figures say %s, want both 1200", total, got.Figures[0].Charges)
+	}
+}
+
+func TestAFeeIsChargedToTheCardOnTheStatementOnlyWhenTheCardPaidIt(t *testing.T) {
+	tests := []struct {
+		name        string
+		record      func(e *env) usecase.RecordTransferInput
+		want        string
+		wantCharged string
+	}{
+		{
+			// 1,000 from the card to the bank: a fee of 10 that the card paid, and one of 15 that
+			// the bank paid, both of fees. The card was charged 1,010.
+			"a transfer out of the card with a fee that the bank paid",
+			func(e *env) usecase.RecordTransferInput {
+				return usecase.RecordTransferInput{
+					FromAccountID: e.card.ID, ToAccountID: e.bank.ID, InstrumentID: e.twd.ID, Amount: dec("1000"),
+					Fees: []usecase.Fee{
+						{AccountID: e.card.ID, InstrumentID: e.twd.ID, CategoryID: e.fees.ID, Amount: dec("10")},
+						{AccountID: e.bank.ID, InstrumentID: e.twd.ID, CategoryID: e.fees.ID, Amount: dec("15")},
+					},
+				}
+			},
+			"TWD: fees 10 | shares 0 | other 1000", "1010",
+		},
+		{
+			// A transfer between the bank and cash is on the statement for the fee that the card
+			// paid, and is nothing else of the card's.
+			"a transfer between other accounts with a fee that the card paid",
+			func(e *env) usecase.RecordTransferInput {
+				return usecase.RecordTransferInput{
+					FromAccountID: e.bank.ID, ToAccountID: e.cash.ID, InstrumentID: e.twd.ID, Amount: dec("1000"),
+					Fees: []usecase.Fee{
+						{AccountID: e.card.ID, InstrumentID: e.twd.ID, CategoryID: e.fees.ID, Amount: dec("15")},
+						{AccountID: e.bank.ID, InstrumentID: e.twd.ID, CategoryID: e.fees.ID, Amount: dec("10")},
+					},
+				}
+			},
+			"TWD: fees 15 | shares 0 | other 0", "15",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.at(on(2026, time.November, 14))
+			in := tt.record(e)
+			in.RecordDetails = usecase.RecordDetails{IdempotencyKey: "charges-transfer-01", OccurredOn: on(2026, time.October, 15)}
+			out, err := e.svc.RecordTransfer(context.Background(), in)
+			if err != nil {
+				t.Fatalf("RecordTransfer: %v", err)
+			}
+			e.confirm(out.Transaction)
+
+			got := e.statement(new(on(2026, time.November, 5)))
+
+			if lines := e.chargesLines(got); len(lines) != 1 || lines[0] != tt.want {
+				t.Errorf("charges = %q, want %q", lines, tt.want)
+			}
+			if len(got.Figures) != 1 || len(got.Charges) != 1 {
+				t.Fatalf("figures %+v and charges %+v, want one of each: the card was charged in one instrument", got.Figures, got.Charges)
+			}
+			if total := chargesAddUp(got.Charges[0]); !total.Equal(got.Figures[0].Charges) || !total.Equal(dec(tt.wantCharged)) {
+				t.Errorf("the charges add up to %s and the figures say %s, want both %s", total, got.Figures[0].Charges, tt.wantCharged)
+			}
+		})
+	}
+}

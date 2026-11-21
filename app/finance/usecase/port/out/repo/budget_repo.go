@@ -20,6 +20,9 @@ type SpendingFilter struct {
 	// ProjectID limits what is added up to the transactions of that project; nil
 	// leaves it open.
 	ProjectID *uuid.UUID
+	// InProject limits what is added up to the transactions that belong to a project:
+	// those that belong to none are left out. It is implied when ProjectID is set.
+	InProject bool
 }
 
 // BudgetRepo stores the budgets of areas and of projects with their allocations,

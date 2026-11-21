@@ -120,7 +120,9 @@ func (s *Service) GetProjectBudgets(ctx context.Context, in usecase.GetProjectBu
 		return usecase.GetProjectBudgetsOutput{}, fmt.Errorf("get the budgets of the projects: %w", err)
 	}
 	// The budget of a project is for all of it, so there is no first day: every day up to today.
-	rows, err := s.budgets.Spending(ctx, repo.SpendingFilter{To: s.today(), ProjectID: in.ProjectID})
+	// Only the expenses that belong to a project are asked for: the rows of those that
+	// belong to none would be read to be thrown away, and they are most of the ledger.
+	rows, err := s.budgets.Spending(ctx, repo.SpendingFilter{To: s.today(), ProjectID: in.ProjectID, InProject: true})
 	if err != nil {
 		return usecase.GetProjectBudgetsOutput{}, fmt.Errorf("get what the projects spent: %w", err)
 	}

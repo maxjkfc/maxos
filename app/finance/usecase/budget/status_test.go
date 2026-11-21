@@ -405,10 +405,10 @@ func TestProjectsAreAskedForEveryDayUpToTodayInTheTimezoneOfTheClockWhenTheyBega
 		now  time.Time
 		want string
 	}{
-		{time.Date(2026, 11, 14, 23, 59, 0, 0, taipei), "..2026-11-14"},
-		{time.Date(2026, 11, 15, 0, 30, 0, 0, taipei), "..2026-11-15"}, // the 14th in UTC still
-		{time.Date(2026, 12, 24, 12, 0, 0, 0, taipei), "..2026-12-24"},
-		{time.Date(2027, 12, 25, 12, 0, 0, 0, taipei), "..2027-12-25"},
+		{time.Date(2026, 11, 14, 23, 59, 0, 0, taipei), "..2026-11-14 in projects"},
+		{time.Date(2026, 11, 15, 0, 30, 0, 0, taipei), "..2026-11-15 in projects"}, // the 14th in UTC still
+		{time.Date(2026, 12, 24, 12, 0, 0, 0, taipei), "..2026-12-24 in projects"},
+		{time.Date(2027, 12, 25, 12, 0, 0, 0, taipei), "..2027-12-25 in projects"},
 	}
 	for _, tt := range tests {
 		e.clock.now = tt.now
@@ -416,7 +416,9 @@ func TestProjectsAreAskedForEveryDayUpToTodayInTheTimezoneOfTheClockWhenTheyBega
 
 		e.projects()
 
-		// No first day: a project's budget is for all of it, whenever it began. No project: all of them.
+		// No first day: a project's budget is for all of it, whenever it began. Only the expenses
+		// that belong to a project are asked for, whatever the clock says; the areas' reads (above,
+		// and GetSpending's) ask for no such limit, which their own lines say by not having it.
 		e.wantAsked(tt.want)
 	}
 }
@@ -525,7 +527,7 @@ func TestOneProjectIsAskedForWithoutListingAllTheOthers(t *testing.T) {
 	if e.catalog.listProjectsCalls != 0 {
 		t.Error("the catalog was asked for the list of projects, want the one project checked and nothing to put in order")
 	}
-	e.wantAsked("..2026-11-14 of 日本旅行")
+	e.wantAsked("..2026-11-14 in projects of 日本旅行")
 }
 
 func TestAProjectThatHasNothingIsNotListedAndOneTheCatalogDoesNotKnowIsNotFound(t *testing.T) {

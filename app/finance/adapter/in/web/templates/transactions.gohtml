@@ -3,6 +3,8 @@
 
 <form class="filters" method="get" action="/app/transactions">
 <input type="hidden" name="month" value="{{.Filters.Month}}">
+{{if .Filters.WithoutPeriods}}<input type="hidden" name="periods" value="none">
+{{end}}
 <label>帳戶
 <select name="account">{{range .Filters.Accounts}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
 </label>
@@ -15,6 +17,8 @@
 <button type="submit" class="button-primary">套用篩選</button>
 {{if .Filtered}}<a href="{{.Filters.Reset}}">清除篩選</a>{{end}}
 </form>
+{{if .Filters.WithoutPeriods}}<p class="muted small">這份清單只列分期計畫的起點，各期不另外列，筆數和草稿頁一樣。<a href="{{.Filters.WithPeriods}}">連各期一起列</a></p>
+{{end}}
 
 {{if .Rows}}<div class="table-wrap">
 <table class="transactions stack wide" role="table">

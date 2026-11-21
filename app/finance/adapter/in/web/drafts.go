@@ -27,6 +27,10 @@ type draftMonthView struct {
 	// OwnTransfers is how many of the drafts of the month only move money between my
 	// own accounts, which the amounts of the month do not count.
 	OwnTransfers int
+	// OwnTransferAmounts is the money they move, as it is taken out of the rows of the
+	// accounts, which have it twice (it leaves one and arrives in another), to make the
+	// amounts of the month: each of its amounts is written with a minus sign.
+	OwnTransferAmounts []draftAmount
 	// Amounts are what all the drafts of the month would change in the balances.
 	Amounts  []draftAmount
 	Accounts []draftAccountView
@@ -68,6 +72,9 @@ func buildDrafts(r *refs, s usecase.GetDraftSummaryOutput) draftsView {
 			Count:        m.Count,
 			OwnTransfers: m.OwnTransfers,
 		}
+		for _, a := range m.OwnTransferAmounts {
+			month.OwnTransferAmounts = append(month.OwnTransferAmounts, takenOutOf(r, a))
+		}
 		for _, a := range m.Amounts {
 			month.Amounts = append(month.Amounts, draftAmountOf(r, a))
 		}
@@ -91,8 +98,14 @@ func buildDrafts(r *refs, s usecase.GetDraftSummaryOutput) draftsView {
 }
 
 // draftsOf is the transactions page of the drafts of a month: of an account, or of
-// none (noAccount), when there is one to say; all of the month's otherwise.
+// none (noAccount), when there is one to say; all of the month's otherwise. It lists a
+// plan by its origin and leaves its periods out, which is how the page counts it.
 func draftsOf(month time.Time, account string) string {
-	q := url.Values{"month": {webserver.FormatMonth(month)}, "status": {string(model.StatusDraft)}, "account": {account}}
+	q := url.Values{
+		"month":   {webserver.FormatMonth(month)},
+		"status":  {string(model.StatusDraft)},
+		"account": {account},
+		"periods": {noPeriods},
+	}
 	return link("/app/transactions", q)
 }

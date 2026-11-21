@@ -27,7 +27,9 @@
 {{if .OwnTransfers}}<tr role="row">
 <th scope="row" role="rowheader">自己帳戶之間的轉帳</th>
 <td role="cell" data-label="筆數" class="num">{{.OwnTransfers}}</td>
-<td role="cell" data-label="" class="muted note-cell" colspan="3">錢只是從一個帳戶移到另一個，不計入合計的流出和流入</td>
+<td role="cell" data-label="流出" class="num">{{range .OwnTransferAmounts}}<span class="line">{{template "amount" .Outflow}}</span>{{end}}</td>
+<td role="cell" data-label="流入" class="num">{{range .OwnTransferAmounts}}<span class="line">{{template "amount" .Inflow}}</span>{{end}}</td>
+<td role="cell" data-label="淨額" class="num">{{range .OwnTransferAmounts}}<span class="line">{{template "amount" .Net}}</span>{{end}}</td>
 </tr>
 {{end}}<tr role="row">
 <th scope="row" role="rowheader">這個月合計</th>
@@ -38,7 +40,7 @@
 </tr></tfoot>
 </table>
 </div>
-<p class="muted small">帳戶的列包含轉帳進出這個帳戶的部分。一筆草稿動到兩個帳戶（例如轉帳）時，兩個帳戶各算一筆，合計只算一次。</p>
+<p class="muted small">帳戶的列包含轉帳進出這個帳戶的部分，所以一筆轉帳在轉出和轉入的兩個帳戶各算一次，合計只算一次。{{if .OwnTransfers}}「自己帳戶之間的轉帳」那一列把這些錢從合計扣掉（錢只是從一個帳戶移到另一個），所以每一欄的各列加上它，剛好是「這個月合計」。{{end}}</p>
 </section>
 {{end}}
 {{else}}<p class="empty">沒有等著確認的草稿。</p>

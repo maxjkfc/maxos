@@ -2,11 +2,14 @@ package web
 
 import (
 	"fmt"
+	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
@@ -263,6 +266,64 @@ func TestTheTransactionsOfNoAccountAreAskedForByTheFilterThatSaysSo(t *testing.T
 	}
 }
 
+// The status filter lists what has the status, the periods of a draft plan, which are
+// drafts, included: a month that shows a period as a draft has it in the list of the
+// drafts. The list that leaves the periods out is the one that the page of the drafts
+// links to, which counts a plan once, and it says so and has a link to the whole list.
+func TestThePeriodsOfPlansAreLeftOutOnlyByTheParameterThatSaysSo(t *testing.T) {
+	f := newFake()
+	s := f.site(t)
+
+	// The status draft alone does not leave them out.
+	page := s.page("/app/transactions?month=2026-12&status=draft")
+	if in := f.listedIn; in.Status != "draft" || in.ExcludePlanPeriods {
+		t.Errorf("asked %+v, want the drafts with their periods", in)
+	}
+	wantNotIn(t, page, "只列分期計畫的起點", `name="periods"`)
+
+	// The parameter does, and the page says what the list leaves out, keeps the choice in
+	// its form and in the links around it, and has the link to the list that has them.
+	page = s.page("/app/transactions?month=2026-12&status=draft&periods=none")
+	if in := f.listedIn; in.Status != "draft" || !in.ExcludePlanPeriods {
+		t.Errorf("asked %+v, want the drafts, the periods of plans left out", in)
+	}
+	wantIn(t, page,
+		"這份清單只列分期計畫的起點，各期不另外列，筆數和草稿頁一樣。",
+		`<a href="/app/transactions?month=2026-12&amp;status=draft">連各期一起列</a>`,
+		`<input type="hidden" name="periods" value="none">`,
+		`href="/app/transactions?month=2026-11&amp;periods=none&amp;status=draft" rel="prev"`,
+		`href="/app/transactions?month=2027-01&amp;periods=none&amp;status=draft"`,
+		// A filter that is set, which is cleared with the others.
+		`<a href="/app/transactions?month=2026-12">清除篩選</a>`,
+	)
+
+	// It is not an account or a status: it goes with any of them, and with none.
+	s.page("/app/transactions?month=2026-12&periods=none")
+	if in := f.listedIn; in.Status != "" || !in.ExcludePlanPeriods {
+		t.Errorf("asked %+v, want every status, the periods of plans left out", in)
+	}
+	s.page("/app/transactions?month=2026-12")
+	if in := f.listedIn; in.ExcludePlanPeriods {
+		t.Errorf("asked %+v, want the periods of plans listed", in)
+	}
+
+	// Anything but none is a 400 page that does not repeat it, and so is a second value.
+	for _, target := range []string{
+		"/app/transactions?month=2026-12&periods=all",
+		"/app/transactions?month=2026-12&periods=NONE",
+		"/app/transactions?month=2026-12&periods=none&periods=none",
+	} {
+		clear(f.calls)
+		res := s.get(target)
+		if res.Code != http.StatusBadRequest {
+			t.Errorf("GET %s = %d, want 400", target, res.Code)
+		}
+		if n := f.total(); n != 0 {
+			t.Errorf("GET %s asked the use cases %d times, want none: the request does not read", target, n)
+		}
+	}
+}
+
 func TestTheFiltersOfTheTransactions(t *testing.T) {
 	f := newFake()
 	s := f.site(t)
@@ -427,21 +488,56 @@ func TestAnInstalmentPlanAndItsOtherTransactions(t *testing.T) {
 	}
 }
 
+var (
+	// draftCell is a cell of a table of drafts that holds the amounts of one of the three
+	// columns, and draftAmountInCell an amount in it: the number, then the instrument.
+	draftCell         = regexp.MustCompile(`(?s)<td role="cell" data-label="(流出|流入|淨額)" class="num">(.*?)</td>`)
+	draftAmountInCell = regexp.MustCompile(`<span class="amt[^"]*">([^<]*)<span class="unit"> ([^<]*)</span></span>`)
+)
+
+// draftColumns adds up the amounts of the cells of the markup that are of the columns of
+// the amounts, for each column and each instrument ("流出 TWD"), as a reader adds up a
+// column of the table.
+func draftColumns(t *testing.T, markup string) map[string]decimal.Decimal {
+	t.Helper()
+	sums := map[string]decimal.Decimal{}
+	for _, cell := range draftCell.FindAllStringSubmatch(markup, -1) {
+		for _, a := range draftAmountInCell.FindAllStringSubmatch(cell[2], -1) {
+			text := strings.NewReplacer("−", "-", "&#43;", "", "+", "", ",", "").Replace(a[1])
+			n, err := decimal.NewFromString(text)
+			if err != nil {
+				t.Fatalf("the amount %q of the column %s is not a number: %v", a[1], cell[1], err)
+			}
+			key := cell[1] + " " + a[2]
+			sums[key] = sums[key].Add(n)
+		}
+	}
+	return sums
+}
+
 func TestTheDraftsByMonthAndAccount(t *testing.T) {
 	f := newFake()
 	noAccount := (*uuid.UUID)(nil)
 	// The month has 7 drafts, of which one moves money from the checking account to the cash
 	// (1,000): the legs are in the rows of the accounts, which are of their balances, and the
-	// month leaves them out, as the use case says. Nothing here is the sum of anything: the
-	// page writes the numbers it is given.
+	// month leaves them out, as the use case says, and has the money they move in a line of its
+	// own. Nothing here is the sum of anything: the page writes the numbers it is given.
 	f.drafts = usecase.GetDraftSummaryOutput{
-		Count:        9,
-		OwnTransfers: 1,
-		Amounts:      []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("200"), Inflow: dec("50000"), Net: dec("49800")}},
+		Count:              9,
+		OwnTransfers:       1,
+		OwnTransferAmounts: []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("1000"), Inflow: dec("1000"), Net: dec("0")}},
+		Amounts: []usecase.DraftAmount{
+			{InstrumentID: twd, Outflow: dec("205"), Inflow: dec("50000"), Net: dec("49795")},
+			{InstrumentID: usd, Outflow: dec("10"), Inflow: dec("0"), Net: dec("-10")},
+		},
 		Months: []usecase.DraftMonth{
 			{
 				Month: date(2026, time.November, 1), Count: 7, OwnTransfers: 1,
-				Amounts: []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("200"), Inflow: dec("50000"), Net: dec("49800")}},
+				OwnTransferAmounts: []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("1000"), Inflow: dec("1000"), Net: dec("0")}},
+				Amounts: []usecase.DraftAmount{
+					{InstrumentID: twd, Outflow: dec("200"), Inflow: dec("50000"), Net: dec("49800")},
+					{InstrumentID: usd, Outflow: dec("10"), Inflow: dec("0"), Net: dec("-10")},
+				},
 				Accounts: []usecase.DraftAccount{
 					{AccountID: &checking, Count: 4, Amounts: []usecase.DraftAmount{
 						{InstrumentID: twd, Outflow: dec("1000"), Inflow: dec("50000"), Net: dec("49000")},
@@ -453,6 +549,7 @@ func TestTheDraftsByMonthAndAccount(t *testing.T) {
 			},
 			{
 				Month: date(2026, time.October, 1), Count: 2,
+				Amounts:  []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("5"), Net: dec("-5")}},
 				Accounts: []usecase.DraftAccount{{AccountID: &cash, Count: 2, Amounts: []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("5"), Net: dec("-5")}}}},
 			},
 		},
@@ -471,11 +568,11 @@ func TestTheDraftsByMonthAndAccount(t *testing.T) {
 	})
 	t.Run("a month, and the links of its accounts, which list the drafts that are counted", func(t *testing.T) {
 		wantIn(t, page,
-			`<h2>2026-11 <span class="muted small">7 筆</span> <a class="small" href="/app/transactions?month=2026-11&amp;status=draft">查看這個月的草稿</a></h2>`,
-			`<a href="/app/transactions?account=`+checking.String()+`&amp;month=2026-11&amp;status=draft">活期戶頭</a>`,
+			`<h2>2026-11 <span class="muted small">7 筆</span> <a class="small" href="/app/transactions?month=2026-11&amp;periods=none&amp;status=draft">查看這個月的草稿</a></h2>`,
+			`<a href="/app/transactions?account=`+checking.String()+`&amp;month=2026-11&amp;periods=none&amp;status=draft">活期戶頭</a>`,
 			// The drafts that are of no account are listed by the filter that says so, not by
-			// all the drafts of the month.
-			`<a href="/app/transactions?account=none&amp;month=2026-11&amp;status=draft">沒有帳戶的草稿</a>`,
+			// all the drafts of the month; and a plan is listed by its origin, as it is counted.
+			`<a href="/app/transactions?account=none&amp;month=2026-11&amp;periods=none&amp;status=draft">沒有帳戶的草稿</a>`,
 			"<h2>2026-10 ",
 		)
 		if strings.Index(page, "2026-11 <span") > strings.Index(page, "2026-10 <span") {
@@ -496,13 +593,39 @@ func TestTheDraftsByMonthAndAccount(t *testing.T) {
 		// twice, as an outflow of 1,200 and an inflow of 51,000.
 		wantNotIn(t, november, amount("1,200.00", "TWD"), amount("51,000.00", "TWD"))
 	})
-	t.Run("the transfers between my own accounts are a line of their own, not in the amounts", func(t *testing.T) {
+	t.Run("the transfers between my own accounts are a line that takes them out of the rows", func(t *testing.T) {
 		wantIn(t, november,
 			`<th scope="row" role="rowheader">自己帳戶之間的轉帳</th>`,
 			`<td role="cell" data-label="筆數" class="num">1</td>`,
-			"錢只是從一個帳戶移到另一個，不計入合計的流出和流入",
+			// What the rows have twice, with a minus sign and not in the colour of a loss.
+			`<td role="cell" data-label="流出" class="num"><span class="line"><span class="amt">`+amount("−1,000.00", "TWD"),
+			`<td role="cell" data-label="流入" class="num"><span class="line"><span class="amt">`+amount("−1,000.00", "TWD"),
+			"所以每一欄的各列加上它，剛好是「這個月合計」",
 		)
 		wantNotIn(t, october, "自己帳戶之間的轉帳")
+	})
+	// What the page says is what it adds up to: in each column, for each instrument, the rows
+	// of the accounts and the line of the transfers between them are the total of the month.
+	// A reader does that sum, and a page that has it come out wrong has told the reader that
+	// it is wrong.
+	t.Run("the rows and the line of the transfers add up to the total of the month", func(t *testing.T) {
+		tbody := between(november, "<tbody", "</tbody>")
+		ownRow, totalRow, _ := strings.Cut(between(november, "<tfoot", "</tfoot>"), "這個月合計")
+		rows, own, total := draftColumns(t, tbody), draftColumns(t, ownRow), draftColumns(t, totalRow)
+		if len(rows) == 0 || len(own) == 0 || len(total) == 0 {
+			t.Fatalf("the sums are of nothing: %v of the rows, %v of the line, %v of the total", rows, own, total)
+		}
+		keys := map[string]bool{}
+		for _, sums := range []map[string]decimal.Decimal{rows, own, total} {
+			for key := range sums {
+				keys[key] = true
+			}
+		}
+		for key := range keys {
+			if got := rows[key].Add(own[key]); !got.Equal(total[key]) {
+				t.Errorf("%s: the rows %s and the transfers between my own accounts %s make %s, and the total of the month is %s", key, rows[key], own[key], got, total[key])
+			}
+		}
 	})
 }
 

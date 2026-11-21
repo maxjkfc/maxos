@@ -267,11 +267,12 @@ func (w *draftsWorld) summaryLines(out usecase.GetDraftSummaryOutput) []string {
 }
 
 // listedDrafts lists the drafts of the month, of the account when one is given, of none when
-// none is true, and of all the accounts otherwise; with no month, of every month. It fails the
-// test when it cannot, or when the page is not all there is.
+// none is true, and of all the accounts otherwise; with no month, of every month. It leaves the
+// periods of plans out, as the summary counts a plan once, by its origin. It fails the test when
+// it cannot, or when the page is not all there is.
 func (w *draftsWorld) listedDrafts(month *time.Time, account *uuid.UUID, none bool) []usecase.Transaction {
 	w.t.Helper()
-	in := usecase.ListTransactionsInput{Status: "draft", AccountID: account, WithoutAccount: none, Limit: usecase.MaxListLimit}
+	in := usecase.ListTransactionsInput{Status: "draft", ExcludePlanPeriods: true, AccountID: account, WithoutAccount: none, Limit: usecase.MaxListLimit}
 	if month != nil {
 		last := model.LastDayOf(*month)
 		in.From, in.To = month, &last
@@ -458,10 +459,11 @@ func TestEveryCountOfTheSummaryIsTheNumberOfDraftsTheListFindsThroughTheRealUseC
 	}
 }
 
-// A plan is its origin in the list of the drafts, as it is in the summary; the list of the plan
-// has its periods too, with the status draft or without. A list is of an account or of no
+// A plan is its origin in the list of the drafts, as it is in the summary, when the list is
+// asked to leave the periods of plans out; the status draft alone lists them too, which are
+// drafts, each on its own day, and so does the list of the plan. A list is of an account or of no
 // account, not both.
-func TestTheListOfDraftsHasThePlanAsItsOriginAndTheListOfThePlanHasItsPeriodsThroughTheRealUseCases(t *testing.T) {
+func TestAListOfDraftsHasAPlanAsItsOriginOnlyWhenAskedToLeaveThePeriodsOutThroughTheRealUseCases(t *testing.T) {
 	ctx := context.Background()
 	w := newDraftsWorld(t)
 	periods := make([]time.Time, 12)
@@ -484,10 +486,34 @@ func TestTheListOfDraftsHasThePlanAsItsOriginAndTheListOfThePlanHasItsPeriodsThr
 		slices.SortFunc(ids, func(a, b uuid.UUID) int { return slices.Compare(a[:], b[:]) })
 		return ids
 	}
+	december := func(in usecase.ListTransactionsInput) usecase.ListTransactionsInput {
+		in.From, in.To = new(dateOn(2026, time.December, 1)), new(dateOn(2026, time.December, 31))
+		return in
+	}
 
-	drafts := list(usecase.ListTransactionsInput{Status: "draft"})
+	// Asked to leave the periods out, the list of the drafts is what the summary counts: the plan by
+	// its origin, and the lunch.
+	drafts := list(usecase.ListTransactionsInput{Status: "draft", ExcludePlanPeriods: true})
 	if !slices.Equal(sorted(drafts...), sorted(origin.ID, lunch.ID)) {
-		t.Errorf("the drafts = %d transactions, want the origin of the plan and the lunch: a plan is one draft", len(drafts))
+		t.Errorf("the drafts, periods left out = %d transactions, want the origin of the plan and the lunch: a plan is one draft", len(drafts))
+	}
+	if got := list(usecase.ListTransactionsInput{ExcludePlanPeriods: true}); len(got) != 2 {
+		t.Errorf("the transactions, periods left out = %d, want the origin of the plan and the lunch", len(got))
+	}
+	if got := list(usecase.ListTransactionsInput{PlanID: &origin.ID, ExcludePlanPeriods: true}); !slices.Equal(got, []uuid.UUID{origin.ID}) {
+		t.Errorf("the transactions of the plan, periods left out = %v, want its origin", got)
+	}
+	if got := list(december(usecase.ListTransactionsInput{Status: "draft", ExcludePlanPeriods: true})); len(got) != 0 {
+		t.Errorf("the drafts of December, periods left out = %d, want none: the origin of the plan is of November", len(got))
+	}
+
+	// The status draft alone does not leave them out: a period of a draft plan is a draft of its
+	// day, and the list says so, in the month it falls due in.
+	if got := list(usecase.ListTransactionsInput{Status: "draft"}); len(got) != 14 {
+		t.Errorf("the drafts = %d transactions, want the origin of the plan, its 12 periods and the lunch", len(got))
+	}
+	if got := list(december(usecase.ListTransactionsInput{Status: "draft"})); len(got) != 1 {
+		t.Errorf("the drafts of December = %d transactions, want the first period of the plan, which falls due on the 5th", len(got))
 	}
 	if got := list(usecase.ListTransactionsInput{Status: "draft", PlanID: &origin.ID}); len(got) != 13 {
 		t.Errorf("the drafts of the plan = %d transactions, want its origin and its 12 periods", len(got))
@@ -498,12 +524,16 @@ func TestTheListOfDraftsHasThePlanAsItsOriginAndTheListOfThePlanHasItsPeriodsThr
 	if got := list(usecase.ListTransactionsInput{}); len(got) != 14 {
 		t.Errorf("the transactions = %d, want all 14: the periods are transactions like the others", len(got))
 	}
-	// The origin of the plan has a posting to the card, of the instalment book, so it is listed
-	// for the card, and the lunch, paid from the cash, is not listed for it, nor for no account.
-	if got := list(usecase.ListTransactionsInput{Status: "draft", AccountID: &w.card}); !slices.Equal(got, []uuid.UUID{origin.ID}) {
-		t.Errorf("the drafts of the card = %v, want the origin of the plan", got)
+	// The origin of the plan has a posting to the card, of the instalment book, and so has each
+	// period, so the card has them all; the lunch, paid from the cash, is not listed for it, nor
+	// for no account.
+	if got := list(usecase.ListTransactionsInput{Status: "draft", AccountID: &w.card}); len(got) != 13 {
+		t.Errorf("the drafts of the card = %d, want the origin of the plan and its 12 periods", len(got))
 	}
-	if got := list(usecase.ListTransactionsInput{Status: "draft", WithoutAccount: true}); len(got) != 0 {
+	if got := list(usecase.ListTransactionsInput{Status: "draft", AccountID: &w.card, ExcludePlanPeriods: true}); !slices.Equal(got, []uuid.UUID{origin.ID}) {
+		t.Errorf("the drafts of the card, periods left out = %v, want the origin of the plan", got)
+	}
+	if got := list(usecase.ListTransactionsInput{Status: "draft", WithoutAccount: true, ExcludePlanPeriods: true}); len(got) != 0 {
 		t.Errorf("the drafts of no account = %v, want none", got)
 	}
 

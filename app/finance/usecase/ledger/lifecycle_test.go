@@ -365,10 +365,12 @@ func TestListTransactionsRefusesWhatCannotBeRight(t *testing.T) {
 	}
 }
 
-// The drafts that are listed are the ones GetDraftSummary counts: of an instalment
-// plan, its origin, whose periods are drafts only as part of it. The use case says
-// so to the repo when the status is draft, unless the plan itself is asked for.
-func TestListTransactionsOfDraftsLeavesTheirPeriodsToTheListOfThePlan(t *testing.T) {
+// The periods of an instalment plan are transactions of their own, and the list has
+// them with the status they have: the status draft lists the periods of a draft plan,
+// which are drafts, and a page that is to list the drafts as GetDraftSummary counts
+// them, a plan by its origin, says so with ExcludePlanPeriods. Nothing else leaves
+// the periods out, whatever the status is.
+func TestListTransactionsLeavesThePeriodsOfPlansOutOnlyWhenAskedTo(t *testing.T) {
 	e := newEnv(t)
 	plan := uuid.Must(uuid.NewV7())
 	tests := []struct {
@@ -376,13 +378,17 @@ func TestListTransactionsOfDraftsLeavesTheirPeriodsToTheListOfThePlan(t *testing
 		in              usecase.ListTransactionsInput
 		wantWithoutPlan bool
 	}{
-		{"the drafts", usecase.ListTransactionsInput{Status: "draft"}, true},
-		{"the drafts of an account", usecase.ListTransactionsInput{Status: "draft", AccountID: &e.card.ID}, true},
-		{"the drafts of no account", usecase.ListTransactionsInput{Status: "draft", WithoutAccount: true}, true},
-		{"the drafts of a plan, whose periods are the point", usecase.ListTransactionsInput{Status: "draft", PlanID: &plan}, false},
-		{"every status: the periods are transactions like the others", usecase.ListTransactionsInput{}, false},
+		{"the drafts: their periods are drafts too", usecase.ListTransactionsInput{Status: "draft"}, false},
+		{"the drafts of an account", usecase.ListTransactionsInput{Status: "draft", AccountID: &e.card.ID}, false},
+		{"the drafts of no account", usecase.ListTransactionsInput{Status: "draft", WithoutAccount: true}, false},
+		{"the drafts of a plan", usecase.ListTransactionsInput{Status: "draft", PlanID: &plan}, false},
+		{"every status", usecase.ListTransactionsInput{}, false},
 		{"the confirmed ones", usecase.ListTransactionsInput{Status: "confirmed"}, false},
 		{"the void ones", usecase.ListTransactionsInput{Status: "void"}, false},
+		{"asked to leave the periods out, with the status draft", usecase.ListTransactionsInput{Status: "draft", ExcludePlanPeriods: true}, true},
+		{"asked to leave the periods out, of an account", usecase.ListTransactionsInput{Status: "draft", AccountID: &e.card.ID, ExcludePlanPeriods: true}, true},
+		{"asked to leave the periods out, with no status", usecase.ListTransactionsInput{ExcludePlanPeriods: true}, true},
+		{"asked to leave the periods out of a plan: its origin", usecase.ListTransactionsInput{PlanID: &plan, ExcludePlanPeriods: true}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

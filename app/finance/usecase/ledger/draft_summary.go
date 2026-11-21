@@ -27,10 +27,11 @@ func (s *Service) GetDraftSummary(ctx context.Context, _ usecase.GetDraftSummary
 	}
 
 	out := usecase.GetDraftSummaryOutput{
-		Count:        summary.Count,
-		OwnTransfers: summary.OwnTransfers,
-		Amounts:      toDraftAmounts(summary.Amounts),
-		Months:       make([]usecase.DraftMonth, len(summary.Months)),
+		Count:              summary.Count,
+		OwnTransfers:       summary.OwnTransfers,
+		OwnTransferAmounts: toDraftAmounts(summary.OwnTransferAmounts),
+		Amounts:            toDraftAmounts(summary.Amounts),
+		Months:             make([]usecase.DraftMonth, len(summary.Months)),
 	}
 	for i, month := range summary.Months {
 		accounts := make([]usecase.DraftAccount, len(month.Accounts))
@@ -38,11 +39,12 @@ func (s *Service) GetDraftSummary(ctx context.Context, _ usecase.GetDraftSummary
 			accounts[j] = usecase.DraftAccount{AccountID: account.AccountID, Count: account.Count, Amounts: toDraftAmounts(account.Amounts)}
 		}
 		out.Months[i] = usecase.DraftMonth{
-			Month:        month.Month,
-			Count:        month.Count,
-			OwnTransfers: month.OwnTransfers,
-			Amounts:      toDraftAmounts(month.Amounts),
-			Accounts:     accounts,
+			Month:              month.Month,
+			Count:              month.Count,
+			OwnTransfers:       month.OwnTransfers,
+			OwnTransferAmounts: toDraftAmounts(month.OwnTransferAmounts),
+			Amounts:            toDraftAmounts(month.Amounts),
+			Accounts:           accounts,
 		}
 	}
 	return out, nil

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -678,4 +679,172 @@ func TestAPeriodWhoseOriginIsNotAmongTheDraftsIsMalformed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ownTransferAmounts writes the money that moves between my own accounts as "TWD 1000",
+// one for each instrument, in the order they come. What leaves one account is what
+// arrives in another, so an amount of it whose outflow and inflow differ, or whose net
+// is not zero, fails the test.
+func ownTransferAmounts(t *testing.T, amounts []model.DraftAmount) string {
+	t.Helper()
+	parts := make([]string, len(amounts))
+	for i, a := range amounts {
+		if !a.Outflow.Equal(a.Inflow) || !a.Net().IsZero() {
+			t.Errorf("the money that moves between my own accounts, %+v, is not the same outflow and inflow", a)
+		}
+		parts[i] = fmt.Sprintf("%s %s", a.InstrumentCode, a.Outflow)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func TestTheMoneyThatMovesBetweenOwnAccountsIsInTheOwnTransferAmountsAndNothingElseIs(t *testing.T) {
+	twd, usd := newDraftInstrument("TWD"), newDraftInstrument("USD")
+	bank, wallet, card := newDraftAccount("bank"), newDraftAccount("wallet"), newDraftAccount("card")
+	november := on(2026, time.November, 6)
+	tests := []struct {
+		name string
+		txn  model.DraftTransaction
+		want string
+	}{
+		{"a transfer", draftOf(model.KindTransfer, november, accountBook(bank, twd, "-1000"), accountBook(wallet, twd, "1000")), "TWD 1000"},
+		{
+			"a transfer with a fee paid from the account the money leaves: the fee is not what moves",
+			draftOf(model.KindTransfer, november, accountBook(bank, twd, "-1000"), accountBook(wallet, twd, "1000"), accountBook(bank, twd, "-15")),
+			"TWD 1000",
+		},
+		{
+			"a transfer with a fee paid from the account the money arrives at",
+			draftOf(model.KindTransfer, november, accountBook(bank, twd, "-1000"), accountBook(wallet, twd, "1000"), accountBook(wallet, twd, "-15")),
+			"TWD 1000",
+		},
+		{
+			"a transfer with a fee paid from a third account and one in another instrument",
+			draftOf(model.KindTransfer, november, accountBook(bank, twd, "-1000"), accountBook(wallet, twd, "1000"), accountBook(card, twd, "-15"), accountBook(card, usd, "-1")),
+			"TWD 1000",
+		},
+		{"an income, with a fee", draftOf(model.KindIncome, november, accountBook(bank, twd, "50000"), accountBook(bank, twd, "-30")), ""},
+		{"an expense", draftOf(model.KindExpense, november, accountBook(card, twd, "-120")), ""},
+		{
+			"an exchange: two instruments, each one way",
+			draftOf(model.KindExchange, november, accountBook(bank, twd, "-3000"), accountBook(wallet, usd, "100")),
+			"",
+		},
+		{"a transfer that is not due", draftOf(model.KindTransfer, on(2026, time.November, 15), accountBook(bank, twd, "-1000"), accountBook(wallet, twd, "1000")), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := summarize(t, on(2026, time.November, 14), tt.txn)
+
+			if own := ownTransferAmounts(t, got.OwnTransferAmounts); own != tt.want {
+				t.Errorf("the money between my own accounts, of all the drafts = %q, want %q", own, tt.want)
+			}
+			if own := ownTransferAmounts(t, got.Months[0].OwnTransferAmounts); own != tt.want {
+				t.Errorf("the money between my own accounts, of the month = %q, want %q", own, tt.want)
+			}
+		})
+	}
+}
+
+func TestTheOwnTransferAmountsAreThoseOfEachTransferAddedUpInTheMonthAndInAll(t *testing.T) {
+	twd, usd := newDraftInstrument("TWD"), newDraftInstrument("USD")
+	cash, bank, broker := newDraftAccount("cash"), newDraftAccount("bank"), newDraftAccount("broker")
+
+	got := summarize(t, on(2026, time.December, 31),
+		draftOf(model.KindTransfer, on(2026, time.November, 17), accountBook(bank, twd, "-3000"), accountBook(cash, twd, "3000")),
+		draftOf(model.KindTransfer, on(2026, time.November, 15), accountBook(bank, twd, "-20000"), accountBook(broker, twd, "20000"), accountBook(bank, twd, "-15")),
+		draftOf(model.KindTransfer, on(2026, time.November, 16), accountBook(bank, usd, "-100"), accountBook(broker, usd, "100")),
+		draftOf(model.KindTransfer, on(2026, time.December, 2), accountBook(cash, twd, "-500"), accountBook(bank, twd, "500")),
+		draftOf(model.KindExpense, on(2026, time.December, 3), accountBook(cash, twd, "-80")),
+	)
+
+	if own := ownTransferAmounts(t, got.OwnTransferAmounts); own != "TWD 23500, USD 100" {
+		t.Errorf("the money between my own accounts, of all the drafts = %q, want %q", own, "TWD 23500, USD 100")
+	}
+	months := map[string]string{}
+	for _, m := range got.Months {
+		months[m.Month.Format("2006-01")] = ownTransferAmounts(t, m.OwnTransferAmounts)
+	}
+	if want := map[string]string{"2026-11": "TWD 23000, USD 100", "2026-12": "TWD 500"}; !maps.Equal(months, want) {
+		t.Errorf("the money between my own accounts, by month = %v, want %v", months, want)
+	}
+	if got.OwnTransfers != 4 {
+		t.Errorf("own transfers = %d, want 4", got.OwnTransfers)
+	}
+}
+
+// A column of the accounts of a month adds up to the column of the month once the money
+// that moves between my own accounts is taken out of it, for each instrument, and so
+// do the months to all the drafts: the page that shows the accounts, a line for the
+// transfers and the month does not have to explain why the rows do not add up.
+func TestTheAccountsLessTheOwnTransfersAreTheMonthInEachColumnAndEachInstrument(t *testing.T) {
+	twd, usd := newDraftInstrument("TWD"), newDraftInstrument("USD")
+	cash, bank, broker, card := newDraftAccount("cash"), newDraftAccount("bank"), newDraftAccount("broker"), newDraftAccount("card")
+	txns := []model.DraftTransaction{
+		draftOf(model.KindExpense, on(2026, time.November, 5), accountBook(cash, twd, "-95")),
+		draftOf(model.KindExpense, on(2026, time.November, 9), accountBook(bank, twd, "-800")),
+		draftOf(model.KindIncome, on(2026, time.November, 10), accountBook(bank, twd, "6700"), accountBook(bank, twd, "-20")),
+		draftOf(model.KindTransfer, on(2026, time.November, 12), accountBook(bank, twd, "-3000"), accountBook(cash, twd, "3000")),
+		draftOf(model.KindTransfer, on(2026, time.November, 13), accountBook(bank, twd, "-20000"), accountBook(broker, twd, "20000"), accountBook(bank, twd, "-15")),
+		draftOf(model.KindTransfer, on(2026, time.November, 14), accountBook(bank, usd, "-100"), accountBook(broker, usd, "100"), accountBook(card, twd, "-10")),
+		draftOf(model.KindExchange, on(2026, time.November, 14), accountBook(bank, twd, "-3000"), accountBook(broker, usd, "95")),
+		draftOf(model.KindTransfer, on(2026, time.November, 20), accountBook(cash, twd, "-700"), accountBook(bank, twd, "700")), // not due
+		draftOf(model.KindTransfer, on(2026, time.December, 2), accountBook(cash, twd, "-500"), accountBook(bank, twd, "500")),
+	}
+	txns = append(txns, draftPlan(card, twd, on(2026, time.November, 3), 3000, on(2026, time.November, 5), on(2026, time.December, 5), on(2027, time.January, 5))...)
+	got := summarize(t, on(2026, time.November, 14), txns...)
+
+	type column struct {
+		instrument uuid.UUID
+		inflow     bool
+	}
+	// sum adds up a column of a set of amounts; it is the same for every instrument.
+	sum := func(amounts []model.DraftAmount) map[column]string {
+		out := map[column]string{}
+		for _, a := range amounts {
+			out[column{a.InstrumentID, false}] = a.Outflow.String()
+			out[column{a.InstrumentID, true}] = a.Inflow.String()
+		}
+		return out
+	}
+	for _, m := range got.Months {
+		rows := map[column]string{}
+		for _, account := range m.Accounts {
+			for c, v := range sum(account.Amounts) {
+				rows[c] = dec(or0(rows[c])).Add(dec(v)).String()
+			}
+		}
+		for c, v := range sum(m.OwnTransferAmounts) {
+			rows[c] = dec(or0(rows[c])).Sub(dec(v)).String()
+		}
+		for c, v := range sum(m.Amounts) {
+			if want := dec(or0(rows[c])); !dec(v).Equal(want) {
+				t.Errorf("%s: a column of the month is %s, the accounts less the transfers between them are %s", m.Month.Format("2006-01"), v, want)
+			}
+			delete(rows, c)
+		}
+		for _, v := range rows {
+			if !dec(v).IsZero() {
+				t.Errorf("%s: the accounts less the transfers between them are %s of what the month does not have", m.Month.Format("2006-01"), v)
+			}
+		}
+	}
+	all := map[column]string{}
+	for _, m := range got.Months {
+		for c, v := range sum(m.OwnTransferAmounts) {
+			all[c] = dec(or0(all[c])).Add(dec(v)).String()
+		}
+	}
+	for c, v := range sum(got.OwnTransferAmounts) {
+		if !dec(v).Equal(dec(or0(all[c]))) {
+			t.Errorf("the money between my own accounts, of all the drafts, is %s, the months have %s", v, or0(all[c]))
+		}
+	}
+}
+
+// or0 reads "" as zero.
+func or0(s string) string {
+	if s == "" {
+		return "0"
+	}
+	return s
 }

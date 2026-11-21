@@ -170,7 +170,7 @@ adapter  →  usecase  →  domain
 
 ## 11. 輸入端 adapter：MCP 與網頁
 
-兩種輸入端 adapter 用同一個做法：共用的註冊表放在 `pkg/`，不認識任何 context；每個 context 在自己的 `adapter/in/<種類>` 登記自己的工具或頁面；`cmd/` 把各 context 的登記函式放進 Fx 的 value group，組成註冊表，掛在 `serve` 的 HTTP server 上。`serve` 的 handler 最外面是安全標頭與 Cloudflare Access 的 verifier，包住整個 mux：mux 自己回的轉址（`//app`、`/app/./x`）與 404（`/`、`/APP/`）也在它們後面，沒有 token 的請求只會得到 401，且每個回應（401 也是）都帶標頭。
+兩種輸入端 adapter 用同一個做法：共用的註冊表放在 `pkg/`，不認識任何 context；每個 context 在自己的 `adapter/in/<種類>` 登記自己的工具或頁面；`cmd/` 把各 context 的登記函式放進 Fx 的 value group，組成註冊表，掛在 `serve` 的 HTTP server 上。`serve` 的 handler 最外面是安全標頭與 Cloudflare Access 的 verifier，包住整個 mux：mux 自己回的轉址（`//app`、`/app/./x`）與 404（`/`、`/APP/`）也在它們後面，沒有 token 的請求只會得到 401，且每個回應（401 也是）都帶標頭。`/mcp` 的 `Cache-Control` 是 `no-store, no-transform`（`webserver.NoStore`：MCP SDK 會把它改成 `no-cache`）；`OPTIONS *` 也由 handler 回答，不是 `net/http` 先回 200（server 設了 `DisableGeneralOptionsHandler`，由 `cmd.NewHTTPServer` 建）；被拒絕的路徑與原因在日誌裡最多 200 個字元。
 
 | | MCP | 網頁 |
 |---|---|---|
@@ -180,16 +180,16 @@ adapter  →  usecase  →  domain
 | 路徑 | `/mcp` | `/app/` 底下 |
 | 守門 | `verifier.Middleware`（在 `newHTTPHandler` 最外面） | 同一個 verifier；它同時是 `webserver.Registry.Pages` 必填的參數，沒有 guard 就建不出頁面 |
 
-網頁 adapter 可以 import 的，由 depguard 的 `finance-adapter-in-web`（一份 strict 的白名單，測試檔另有 `finance-adapter-in-web-tests`，多一個 `internal/webtest` 與 `pkg/cfaccess`）檢查，只有這些：標準函式庫、`uuid` 與 decimal；自己 context 的 `usecase/port/in/`（use case 的 in-port）與 `usecase/port/out/clock`（時鐘；不是 repo，也不是 `tx`）；`domain/model`（它的名稱常數：種類、帳簿、狀態、帳戶種類，它的錯誤，與取月份和日期的純函式；頁面用常數，不寫字串）；別的 context 的 `usecase/port/in/`（例如 catalog 的名稱清單）；`pkg/webserver`、`pkg/svgchart`。其餘一律不行：use case 實作、`adapter/out`、別種輸入端 adapter（包括名字只是長得像的，如 `adapter/in/webhook`）、`pgx`、`pkg/postgres`、`pkg/mcpserver`、MCP SDK、Fx。`finance-adapter-in-others` 另外擋別種輸入端 adapter 反過來 import 網頁；之後有別種輸入端 adapter 時，各加一條對應的白名單。
+網頁 adapter 可以 import 的，由 depguard 的 `finance-adapter-in-web`（一份 strict 的白名單，單一 package 的項目以 `$` 結尾，連名字只是長得像的 `pkg/webserverx` 也擋；測試檔另有 `finance-adapter-in-web-tests`，多一個 `internal/webtest` 與 `pkg/cfaccess`）檢查，只有這些：標準函式庫、`uuid` 與 decimal；自己 context 的 `usecase/port/in/`（use case 的 in-port）與 `usecase/port/out/clock`（時鐘；不是 repo，也不是 `tx`）；`domain/model`（它的名稱常數：種類、帳簿、狀態、帳戶種類，它的錯誤，與取月份和日期的純函式；頁面用常數，不寫字串）；別的 context 的 `usecase/port/in/`（例如 catalog 的名稱清單）；`pkg/webserver`、`pkg/svgchart`。其餘一律不行：use case 實作、`adapter/out`、別種輸入端 adapter（包括名字只是長得像的，如 `adapter/in/webhook`）、`pgx`、`pkg/postgres`、`pkg/mcpserver`、MCP SDK、Fx。`finance-adapter-in-others` 另外擋別種輸入端 adapter 反過來 import 網頁；之後有別種輸入端 adapter 時，各加一條對應的白名單。
 
 網頁 adapter 另外遵守：
 
 - **只讀。** 只服務 GET 與 HEAD，其他方法回 405。之後要加寫入的動作，在 `webserver` 加 `Post` 與一個檢查來源（`Origin`、`Sec-Fetch-Site`）與 token 的 middleware，頁面的 handler 不必動；做法寫在 `docs/design/web-readonly.md`。
 - **一頁的 use case 呼叫數固定，不隨列數增加。** 列出來的東西（交易、草稿、帳單……）一次取得，名稱用的參考清單（帳戶、類別、領域……）每種一次；不在迴圈裡呼叫 use case。要的資料 use case 給不出來時，加 use case，不在 adapter 裡逐筆查。唯一隨數量增減的是信用卡帳單總覽：每張設了結帳日的卡一次 `ListCardStatements`（帳單的日子是各卡自己的），那是卡的張數，不是帳本的筆數。
-- **頁面只排版：不加總，不分攤，不判斷。** 頁面做的是：金額的小數位數與千分位、日期、把代碼換成用語、列的順序（照 use case 給的；把它給的幾列併進同一個表時照金額排）、某個數字占它的總額的百分比、同一個回答裡兩個數字的差（預算與已花之間的「還剩」與「超支多少」）。這些不是頁面的：把幾筆加起來（一張帳單的消費依頂層類別、一個類別連同子類別的合計、草稿的流出與流入）、把一個數字分到各項、判斷一個狀態（超支、超過分配）、決定什麼算一筆草稿。缺的時候加 use case：這些現在分別在 `GetCardStatement` 的 `Charges`、`GetSpending` 的 `TopLevel`、預算的 `Over`（領域、專案與每一個分配）、`GetDraftSummary`。
+- **頁面只排版：不加總，不分攤，不判斷。** 頁面做的是：金額的小數位數、千分位與正負號（一個 use case 給的數寫成「從合計扣掉」時前面的負號也是格式，如草稿頁「自己帳戶之間的轉帳」那一列）、日期、把代碼換成用語、列的順序（照 use case 給的；把它給的幾列併進同一個表時照金額排）、某個數字占它的總額的百分比、同一個回答裡兩個數字的差（預算與已花之間的「還剩」與「超支多少」）。這些不是頁面的：把幾筆加起來（一張帳單的消費依頂層類別、一個類別連同子類別的合計、草稿的流出與流入）、把一個數字分到各項、判斷一個狀態（超支、超過分配）、決定什麼算一筆草稿。缺的時候加 use case：這些現在分別在 `GetCardStatement` 的 `Charges`、`GetSpending` 的 `TopLevel`、預算的 `Over`（領域、專案與每一個分配）、`GetDraftSummary`（含 `OwnTransferAmounts`，讓表上每一欄加得起來）。
 - **「今天」只來自時鐘 port**，時區是 `MAXOS_TIMEZONE`。交易的日期是帳本裡的日曆日，原樣顯示、不轉時區；建立、確認、作廢與發生的時刻（有時分的）才轉成這個時區顯示。
 - **查詢參數要讀得出來，讀不出來是 400。** 查詢字串用 `url.ParseQuery` 讀，壞的跳脫與分號是 400，一頁收的參數給了不只一次也是 400（各頁共用一個 `queryOf`），不能像 `URL.Query()` 那樣悄悄丟掉讀不懂的，讓一個壞的月份看起來像本月。400 的頁面說參數該是什麼，不重複收到的值。
 - **沒有外部資源。** 模板與唯一的一份樣式表以 `go:embed` 內嵌，圖表是伺服器產生的 inline SVG，沒有 JavaScript；每個回應帶 `Content-Security-Policy: default-src 'self'` 等標頭（`webserver.Secure`）。
 - 畫面上的用語照 `CONTEXT.md`：測試從 `CONTEXT.md` 讀出每個 `_Avoid_` 的詞（名字是別的詞條、或是種類的名字的除外），每個測試取得的每一頁（`site.page`）都對照它，不另外維護一份詞表。
 
-測試：用 `internal/webtest` 的 Access 替身（自簽金鑰、信任它的 verifier、簽好的 token）透過真的 mux 發請求，檢查拒絕、405、404 與 400 的頁面、標頭與 HTML；圖表是純函式，單獨測；`cmd/` 的測試用真的模組與 PostgreSQL 走一遍，另有一個不需要資料庫的測試走過 mux 自己回答的路徑，檢查沒有 token 時只會得到 401。
+測試：用 `internal/webtest` 的 Access 替身（自簽金鑰、信任它的 verifier、簽好的 token）透過真的 mux 發請求，檢查拒絕、405、404 與 400 的頁面、標頭與 HTML；圖表是純函式，單獨測；`cmd/` 的測試用真的模組與 PostgreSQL 走一遍，另有一個不需要資料庫的測試走過 mux 自己回答的路徑，檢查沒有 token 時只會得到 401；`OPTIONS *` 走真的 socket、用與 `serve` 同一份 server 設定，`/mcp` 以真的 `capture` 呼叫驗證標頭與結果。

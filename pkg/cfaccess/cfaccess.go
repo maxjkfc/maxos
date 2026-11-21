@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -97,13 +98,51 @@ func (v *Verifier) Middleware(next http.Handler) http.Handler {
 		id, err := v.identify(r)
 		if err != nil {
 			// The reason is logged server-side only; neither the token nor the
-			// verification detail is returned to the client.
-			v.logger.Warn("access: request rejected", "reason", err.Error(), "path", r.URL.Path)
+			// verification detail is returned to the client. The reason and the path
+			// are what the client chose, a megabyte of it if it likes, so the record
+			// carries only the start of them.
+			v.logger.Warn("access: request rejected",
+				slices.Concat(clipped("reason", err.Error()), clipped("path", r.URL.Path))...)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, id)))
 	})
+}
+
+// maxLoggedRunes is how many characters of something that the client chose a record
+// of the log carries. A server takes a megabyte of headers, so the path of a request
+// and the reason its token is rejected for (go-jose repeats in it the algorithm that
+// the token names) are as long as the client likes.
+const maxLoggedRunes = 200
+
+// clipped is the attributes of a record of the log for something that the client
+// chose: value under key, as it is, or, when it has more than maxLoggedRunes
+// characters, the start of it and an ellipsis, and the length that it had, in bytes,
+// under key+"_bytes".
+func clipped(key, value string) []any {
+	shown, cut := clip(value, maxLoggedRunes)
+	if !cut {
+		return []any{key, value}
+	}
+	return []any{key, shown, key + "_bytes", len(value)}
+}
+
+// clip returns the first limit characters (runes) of s and an ellipsis, and true,
+// when s has more than limit of them; otherwise it returns s and false. It cuts
+// between two characters and reads no more of s than it keeps.
+func clip(s string, limit int) (string, bool) {
+	if len(s) <= limit { // a character takes at least one byte
+		return s, false
+	}
+	n := 0
+	for i := range s { // i is where a character starts
+		if n == limit {
+			return s[:i] + "…", true
+		}
+		n++
+	}
+	return s, false
 }
 
 func (v *Verifier) identify(r *http.Request) (Identity, error) {

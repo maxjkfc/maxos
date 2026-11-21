@@ -336,14 +336,17 @@ func TestThePagesShowTheLedgerThroughTheRealWiring(t *testing.T) {
 			// other, and the cash the lunch of 450.
 			money("3,000.00", "TWD"), money("450.00", "TWD"), money("−450.00", "TWD"),
 			// The withdrawal moves money between two of my own accounts: it is a line of its
-			// own, and the month has only what the lunch changes.
-			"自己帳戶之間的轉帳", "不計入合計的流出和流入",
+			// own, which takes the 3,000 out of the rows of the two accounts, in the column of
+			// what leaves and in the one of what arrives, and the month has only what the lunch
+			// changes.
+			"自己帳戶之間的轉帳", `<td role="cell" data-label="流出" class="num"><span class="line"><span class="amt">`+money("−3,000.00", "TWD"),
+			`<td role="cell" data-label="流入" class="num"><span class="line"><span class="amt">`+money("−3,000.00", "TWD"),
 		)
-		wantIn("the link of an account", body, `href="/app/transactions?account=`+cash.String()+`&amp;month=2026-11&amp;status=draft"`)
+		wantIn("the link of an account", body, `href="/app/transactions?account=`+cash.String()+`&amp;month=2026-11&amp;periods=none&amp;status=draft"`)
 		// The link lists the drafts that the row counts: the lunch and the withdrawal, which
 		// is a draft of the cash too.
-		linked := page("/app/transactions?account=" + cash.String() + "&month=2026-11&status=draft")
-		wantIn("the drafts of the cash", linked, "草稿午餐", "提款")
+		linked := page("/app/transactions?account=" + cash.String() + "&month=2026-11&periods=none&status=draft")
+		wantIn("the drafts of the cash", linked, "草稿午餐", "提款", "這份清單只列分期計畫的起點")
 	})
 
 	t.Run("the statements of the card", func(t *testing.T) {

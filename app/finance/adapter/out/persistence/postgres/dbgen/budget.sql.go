@@ -166,6 +166,7 @@ WHERE t.status = 'confirmed' AND p.book = 'expense'
   AND ($1::date IS NULL OR t.occurred_on >= $1)
   AND t.occurred_on <= $2
   AND ($3::uuid IS NULL OR t.project_id = $3)
+  AND (NOT $4::bool OR t.project_id IS NOT NULL)
 GROUP BY date_trunc('month', t.occurred_on::timestamp), t.area_id, t.project_id, p.category_id, c.parent_id
 `
 
@@ -173,6 +174,7 @@ type ListSpendingParams struct {
 	FromDay   *time.Time
 	ToDay     time.Time
 	ProjectID uuid.NullUUID
+	InProject bool
 }
 
 type ListSpendingRow struct {
@@ -188,7 +190,8 @@ type ListSpendingRow struct {
 // confirmed transactions that happened on the days from from_day (any day up to
 // to_day when it is NULL) to to_day, both days included, added up for each month (the
 // first day of the month the transaction happened in), area, project and category,
-// and only for the transactions of the project when project_id is given. A transaction
+// and only for the transactions of the project when project_id is given, and only for
+// the transactions that belong to a project when in_project is true. A transaction
 // that has no area or no project has a row with NULL in its place: it counts as well,
 // so that a month adds up to what the areas spent in it, projects included, and the
 // expenses that have none. What an area, a project or a month has spent is for the
@@ -202,7 +205,12 @@ type ListSpendingRow struct {
 // which is for the model to say. The month is cut from a timestamp, so that no time
 // zone is in it. The rows come in no order that matters.
 func (q *Queries) ListSpending(ctx context.Context, arg ListSpendingParams) ([]ListSpendingRow, error) {
-	rows, err := q.db.Query(ctx, listSpending, arg.FromDay, arg.ToDay, arg.ProjectID)
+	rows, err := q.db.Query(ctx, listSpending,
+		arg.FromDay,
+		arg.ToDay,
+		arg.ProjectID,
+		arg.InProject,
+	)
 	if err != nil {
 		return nil, err
 	}

@@ -111,7 +111,9 @@ func (s *Service) cardWithStatements(ctx context.Context, id uuid.UUID) (model.A
 // which reads the figures, the transactions and the drafts in one snapshot. A
 // statement is closed when its closing date is before today. What the card was
 // charged for is divided up from the transactions of the statement
-// (model.ChargesOfCard), by the top-level category of each expense line.
+// (model.ChargesOfCard): by the top-level category of each expense line that the
+// card paid for, to Shares for what was paid for others in an expense, and to Other
+// for the rest.
 func (s *Service) GetCardStatement(ctx context.Context, in usecase.GetCardStatementInput) (usecase.CardStatement, error) {
 	card, err := s.cardWithStatements(ctx, in.AccountID)
 	if err != nil {

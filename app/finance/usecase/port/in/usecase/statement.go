@@ -135,12 +135,15 @@ type CardStatement struct {
 
 // StatementCharges is what a card was charged in one instrument on a statement, and
 // what it was charged for. What each transaction charged goes to what it was for, in
-// the order of its postings, and no more than what it charged: the expense lines to
-// their top-level category, the lines of what I paid for others to Shares, and what
-// is left, such as a transfer out of the card or the principal of an instalment
-// period, to Other. A fee, or the interest of an instalment period, is an expense
-// line like another, so it is under its own category here as it is in GetSpending.
-// The categories, Shares and Other add up to the Charges of the figures of the
+// the order of its postings, and no more than what it charged: the expense lines that
+// the card paid for to their top-level category, the lines of what I paid for others
+// in an expense to Shares, and what is left, such as a transfer out of the card, a
+// payment to a party (a dealing) or the principal of an instalment period, to Other.
+// A fee, or the interest of an instalment period, is an expense line like another,
+// so it is under its own category here as it is in GetSpending; but a fee is the
+// card's only when the card paid it. The fee that a bank paid for a transfer out of
+// the card is spent, and is in GetSpending, and is not charged to the card. The
+// categories, Shares and Other add up to the Charges of the figures of the
 // instrument.
 type StatementCharges struct {
 	InstrumentID uuid.UUID
@@ -148,11 +151,12 @@ type StatementCharges struct {
 	// amount first and, for the same amount, by category id. A category that nothing
 	// was charged for is not in it.
 	Categories []CategoryCharge
-	// Shares is what was charged for others: the lines of what I paid for them, which
-	// they owe me.
+	// Shares is what was charged for others in an expense: the lines of what I paid
+	// for them in it, which they owe me. What the card paid to a party in a dealing,
+	// such as a loan, is no share: it is Other.
 	Shares decimal.Decimal
-	// Other is what no expense line explains: a transfer or a payment out of the
-	// card, the principal of an instalment period.
+	// Other is what no expense line or share explains: a transfer out of the card, a
+	// payment to a party, the principal of an instalment period.
 	Other decimal.Decimal
 }
 

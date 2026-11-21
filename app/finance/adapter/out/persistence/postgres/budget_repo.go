@@ -166,7 +166,7 @@ func (r *BudgetRepo) ProjectBudgets(ctx context.Context, projectID *uuid.UUID) (
 // has spent is for the model to make of its rows.
 func (r *BudgetRepo) Spending(ctx context.Context, filter repo.SpendingFilter) ([]model.SpendingRow, error) {
 	rows, err := r.q.ListSpending(ctx, dbgen.ListSpendingParams{
-		FromDay: filter.From, ToDay: filter.To, ProjectID: nullUUID(filter.ProjectID),
+		FromDay: filter.From, ToDay: filter.To, ProjectID: nullUUID(filter.ProjectID), InProject: filter.InProject,
 	})
 	if err != nil {
 		return nil, err

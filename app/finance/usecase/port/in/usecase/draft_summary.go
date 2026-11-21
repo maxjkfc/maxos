@@ -99,6 +99,13 @@ type DraftMonth struct {
 	// OwnTransfers is how many of them move money between my own accounts, which the
 	// Amounts do not count.
 	OwnTransfers int
+	// OwnTransferAmounts is the money that they move between my own accounts, by
+	// instrument code: of each instrument, Outflow and Inflow are both what moves, and
+	// the Net is zero. It is in the Amounts of each account that it moves (it leaves
+	// one and arrives in another) and not in the Amounts of the month: of each
+	// instrument, the Outflow of the Amounts of the Accounts added up, less this
+	// Outflow, is the Outflow of the Amounts of the month, and so is the Inflow.
+	OwnTransferAmounts []DraftAmount
 	// Amounts are what the drafts of the month would change in the balances of all
 	// the accounts together, by instrument code: what moves between my own accounts
 	// is not in them, so they are not the Amounts of Accounts added up.
@@ -114,6 +121,9 @@ type GetDraftSummaryOutput struct {
 	Count int
 	// OwnTransfers is how many of them move money between my own accounts.
 	OwnTransfers int
+	// OwnTransferAmounts is the money that they move between my own accounts, by
+	// instrument code: the OwnTransferAmounts of Months added up.
+	OwnTransferAmounts []DraftAmount
 	// Amounts are what all the drafts would change in the balances of all the
 	// accounts together, by instrument code: the Amounts of Months added up.
 	Amounts []DraftAmount

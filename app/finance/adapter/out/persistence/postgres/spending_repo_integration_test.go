@@ -463,6 +463,52 @@ func TestSpendingCanBeLimitedToOneProject(t *testing.T) {
 	wantLines(t, "the trip, up to a day before its expenses", e.rowLines(ofProject(upTo(on(2025, time.February, 28)), e.trip)))
 }
 
+func TestSpendingInProjectsLeavesOutWhatBelongsToNoProjectAndChangesNoProjectTotal(t *testing.T) {
+	e := newBudgetEnv(t)
+	e.spend(on(2025, time.March, 1), nil, &e.trip, e.food, "1")
+	e.spend(nov(2), &e.work, &e.trip, e.food, "10")
+	e.spend(nov(3), &e.home, &e.trip, e.lunch, "100")
+	e.spend(nov(3), nil, &e.move, e.food, "1000")
+	e.spend(nov(3), &e.work, nil, e.food, "9999") // in an area, in no project
+	e.spend(nov(4), nil, nil, e.food, "99999")    // in neither
+
+	inProjects := func(filter repo.SpendingFilter) repo.SpendingFilter {
+		filter.InProject = true
+		return filter
+	}
+
+	wantLines(t, "in projects", e.rowLines(inProjects(upTo(nov(30)))),
+		"2025-03 - trip food 1",
+		"2026-11 work trip food 10",
+		"2026-11 home trip lunch 100 (under food)",
+		"2026-11 - move food 1000",
+	)
+	wantLines(t, "not limited to projects, as before", e.rowLines(upTo(nov(30))),
+		"2025-03 - trip food 1",
+		"2026-11 work trip food 10",
+		"2026-11 home trip lunch 100 (under food)",
+		"2026-11 - move food 1000",
+		"2026-11 work - food 9999",
+		"2026-11 - - food 99999",
+	)
+	wantLines(t, "in projects, in November", e.rowLines(inProjects(between(nov(1), nov(30)))),
+		"2026-11 work trip food 10",
+		"2026-11 home trip lunch 100 (under food)",
+		"2026-11 - move food 1000",
+	)
+	wantLines(t, "in projects and of the trip", e.rowLines(inProjects(ofProject(upTo(nov(30)), e.trip))),
+		"2025-03 - trip food 1", "2026-11 work trip food 10", "2026-11 home trip lunch 100 (under food)")
+	wantLines(t, "in projects and of a project with no expense", e.rowLines(inProjects(ofProject(upTo(nov(30)), uuid.Must(uuid.NewV7())))))
+
+	// What the projects spent is the same whether or not the rows of the expenses of no project were read.
+	wantLines(t, "the projects' totals from the rows in projects", e.projectLines(e.spending(inProjects(upTo(nov(30))))),
+		"trip food 11", "trip lunch 100 (under food)", "move food 1000")
+	wantLines(t, "the projects' totals from every row", e.projectLines(e.spending(upTo(nov(30)))),
+		"trip food 11", "trip lunch 100 (under food)", "move food 1000")
+	wantLines(t, "the trip's totals from the rows in projects", e.projectLines(e.spending(inProjects(ofProject(upTo(nov(30)), e.trip)))),
+		e.projectLines(e.spending(ofProject(upTo(nov(30)), e.trip)))...)
+}
+
 func TestSpendingOfALedgerWithNoExpenseIsNothingAndNotAnError(t *testing.T) {
 	e := newBudgetEnv(t)
 	if rows := e.spending(between(nov(1), nov(30))); len(rows) != 0 {
