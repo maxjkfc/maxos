@@ -12,7 +12,7 @@ import (
 )
 
 const archiveAccount = `-- name: ArchiveAccount :one
-UPDATE fin_account SET archived_at = COALESCE(archived_at, now()) WHERE id = $1 RETURNING id, name, institution_id, kind, created_at, archived_at
+UPDATE fin_account SET archived_at = COALESCE(archived_at, now()) WHERE id = $1 RETURNING id, name, institution_id, kind, created_at, archived_at, closing_day, payment_due_day
 `
 
 // An account that is already archived keeps the time it was first archived.
@@ -26,12 +26,14 @@ func (q *Queries) ArchiveAccount(ctx context.Context, id uuid.UUID) (FinAccount,
 		&i.Kind,
 		&i.CreatedAt,
 		&i.ArchivedAt,
+		&i.ClosingDay,
+		&i.PaymentDueDay,
 	)
 	return i, err
 }
 
 const getAccount = `-- name: GetAccount :one
-SELECT id, name, institution_id, kind, created_at, archived_at FROM fin_account WHERE id = $1
+SELECT id, name, institution_id, kind, created_at, archived_at, closing_day, payment_due_day FROM fin_account WHERE id = $1
 `
 
 func (q *Queries) GetAccount(ctx context.Context, id uuid.UUID) (FinAccount, error) {
@@ -44,14 +46,16 @@ func (q *Queries) GetAccount(ctx context.Context, id uuid.UUID) (FinAccount, err
 		&i.Kind,
 		&i.CreatedAt,
 		&i.ArchivedAt,
+		&i.ClosingDay,
+		&i.PaymentDueDay,
 	)
 	return i, err
 }
 
 const insertAccount = `-- name: InsertAccount :one
-INSERT INTO fin_account (id, name, institution_id, kind)
-VALUES ($1, $2, $3, $4)
-RETURNING id, name, institution_id, kind, created_at, archived_at
+INSERT INTO fin_account (id, name, institution_id, kind, closing_day, payment_due_day)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, name, institution_id, kind, created_at, archived_at, closing_day, payment_due_day
 `
 
 type InsertAccountParams struct {
@@ -59,16 +63,21 @@ type InsertAccountParams struct {
 	Name          string
 	InstitutionID uuid.NullUUID
 	Kind          string
+	ClosingDay    *int16
+	PaymentDueDay *int16
 }
 
-// Fails with a unique violation when the name is taken, and with a foreign key
-// violation when the institution does not exist.
+// Fails with a unique violation when the name is taken, with a foreign key
+// violation when the institution does not exist, and with a check violation when
+// the closing day or the payment due day breaks a rule of fin_account's checks.
 func (q *Queries) InsertAccount(ctx context.Context, arg InsertAccountParams) (FinAccount, error) {
 	row := q.db.QueryRow(ctx, insertAccount,
 		arg.ID,
 		arg.Name,
 		arg.InstitutionID,
 		arg.Kind,
+		arg.ClosingDay,
+		arg.PaymentDueDay,
 	)
 	var i FinAccount
 	err := row.Scan(
@@ -78,12 +87,14 @@ func (q *Queries) InsertAccount(ctx context.Context, arg InsertAccountParams) (F
 		&i.Kind,
 		&i.CreatedAt,
 		&i.ArchivedAt,
+		&i.ClosingDay,
+		&i.PaymentDueDay,
 	)
 	return i, err
 }
 
 const listAccounts = `-- name: ListAccounts :many
-SELECT id, name, institution_id, kind, created_at, archived_at FROM fin_account
+SELECT id, name, institution_id, kind, created_at, archived_at, closing_day, payment_due_day FROM fin_account
 WHERE $1::boolean OR archived_at IS NULL
 ORDER BY name, id
 `
@@ -104,6 +115,8 @@ func (q *Queries) ListAccounts(ctx context.Context, includeArchived bool) ([]Fin
 			&i.Kind,
 			&i.CreatedAt,
 			&i.ArchivedAt,
+			&i.ClosingDay,
+			&i.PaymentDueDay,
 		); err != nil {
 			return nil, err
 		}
@@ -129,4 +142,34 @@ func (q *Queries) LockAccount(ctx context.Context, id uuid.UUID) (uuid.UUID, err
 	var id_2 uuid.UUID
 	err := row.Scan(&id_2)
 	return id_2, err
+}
+
+const setAccountStatementDays = `-- name: SetAccountStatementDays :one
+UPDATE fin_account SET closing_day = $2, payment_due_day = $3 WHERE id = $1 RETURNING id, name, institution_id, kind, created_at, archived_at, closing_day, payment_due_day
+`
+
+type SetAccountStatementDaysParams struct {
+	ID            uuid.UUID
+	ClosingDay    *int16
+	PaymentDueDay *int16
+}
+
+// Replaces the closing day and the payment due day, NULL clearing one. Returns no
+// row when there is no such account, and fails with a check violation when the
+// days break a rule of fin_account's checks (a card only, a due day needs a closing
+// day, 1 to 31).
+func (q *Queries) SetAccountStatementDays(ctx context.Context, arg SetAccountStatementDaysParams) (FinAccount, error) {
+	row := q.db.QueryRow(ctx, setAccountStatementDays, arg.ID, arg.ClosingDay, arg.PaymentDueDay)
+	var i FinAccount
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.InstitutionID,
+		&i.Kind,
+		&i.CreatedAt,
+		&i.ArchivedAt,
+		&i.ClosingDay,
+		&i.PaymentDueDay,
+	)
+	return i, err
 }

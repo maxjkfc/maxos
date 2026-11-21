@@ -2,8 +2,9 @@
 // parts paid for others, and paid in instalments), incomes, transfers, exchanges,
 // trades, dealings, rewards, opening balances and bill instalments as drafts, and
 // reconciling accounts; confirming, discarding and voiding the drafts, an
-// instalment plan as a whole; and reading transactions, instalment plans,
-// balances and dealings.
+// instalment plan as a whole; setting the posting date of a transaction; and
+// reading transactions, instalment plans, balances, dealings and the statements of
+// cards.
 package ledger
 
 import (
@@ -25,8 +26,9 @@ import (
 // Service implements usecase.RecordExpense, RecordIncome, RecordTransfer,
 // RecordExchange, RecordTrade, RecordDealing, RecordReward, RecordBillInstalment,
 // SetOpeningBalance, Reconcile, ConfirmTransactions, DiscardDraft,
-// VoidTransaction, GetTransaction, ListTransactions, GetInstalmentPlan,
-// ListInstalmentPlans, GetBalances and GetDealings.
+// VoidTransaction, SetPostingDate, GetTransaction, ListTransactions,
+// GetInstalmentPlan, ListInstalmentPlans, GetBalances, GetDealings,
+// GetCardStatement and ListCardStatements.
 //
 // Every use case that writes does all of it, the reads that check the request
 // included, in one database transaction. What today is, for the reads that count
@@ -64,6 +66,9 @@ var (
 	_ usecase.ListInstalmentPlans  = (*Service)(nil)
 	_ usecase.GetBalances          = (*Service)(nil)
 	_ usecase.GetDealings          = (*Service)(nil)
+	_ usecase.SetPostingDate       = (*Service)(nil)
+	_ usecase.GetCardStatement     = (*Service)(nil)
+	_ usecase.ListCardStatements   = (*Service)(nil)
 )
 
 // record is what the use cases that record a transaction have in common. build

@@ -25,15 +25,18 @@ func NewAccountRepo(pool *pgxpool.Pool) *AccountRepo {
 	return &AccountRepo{q: dbgen.New(pkgpostgres.NewDB(pool))}
 }
 
-// Insert stores account. The table's CHECK constraint is the last guard of the
-// kind and its foreign key the last guard of the institution: a value that
-// breaks one comes back as an error from the database.
+// Insert stores account. The table's CHECK constraints are the last guard of the
+// kind and of the closing day and payment due day, and its foreign key the last
+// guard of the institution: a value that breaks one comes back as an error from
+// the database.
 func (r *AccountRepo) Insert(ctx context.Context, account model.Account) (model.Account, error) {
 	row, err := r.q.InsertAccount(ctx, dbgen.InsertAccountParams{
 		ID:            account.ID,
 		Name:          account.Name,
 		InstitutionID: nullUUID(account.InstitutionID),
 		Kind:          string(account.Kind),
+		ClosingDay:    dayOfMonthColumn(account.ClosingDay),
+		PaymentDueDay: dayOfMonthColumn(account.PaymentDueDay),
 	})
 	if err != nil {
 		return model.Account{}, mapError(err)
@@ -82,6 +85,20 @@ func (r *AccountRepo) Archive(ctx context.Context, id uuid.UUID) (model.Account,
 	return toAccount(row), nil
 }
 
+// SetStatementDays replaces the closing day and the payment due day of the
+// account. The table's CHECK constraints are the last guard of what they may be.
+func (r *AccountRepo) SetStatementDays(ctx context.Context, id uuid.UUID, closingDay, paymentDueDay *int) (model.Account, error) {
+	row, err := r.q.SetAccountStatementDays(ctx, dbgen.SetAccountStatementDaysParams{
+		ID:            id,
+		ClosingDay:    dayOfMonthColumn(closingDay),
+		PaymentDueDay: dayOfMonthColumn(paymentDueDay),
+	})
+	if err != nil {
+		return model.Account{}, mapError(err)
+	}
+	return toAccount(row), nil
+}
+
 func toAccount(row dbgen.FinAccount) model.Account {
 	return model.Account{
 		ID:            row.ID,
@@ -90,7 +107,26 @@ func toAccount(row dbgen.FinAccount) model.Account {
 		Kind:          model.AccountKind(row.Kind),
 		CreatedAt:     row.CreatedAt,
 		ArchivedAt:    row.ArchivedAt,
+		ClosingDay:    dayOfMonth(row.ClosingDay),
+		PaymentDueDay: dayOfMonth(row.PaymentDueDay),
 	}
+}
+
+// dayOfMonthColumn returns the column value of an optional day of the month, which
+// the table keeps in a smallint.
+func dayOfMonthColumn(day *int) *int16 {
+	if day == nil {
+		return nil
+	}
+	return new(int16(*day))
+}
+
+// dayOfMonth returns the day of the month a column holds, nil for NULL.
+func dayOfMonth(column *int16) *int {
+	if column == nil {
+		return nil
+	}
+	return new(int(*column))
 }
 
 // nullUUID returns the column value of an optional id.

@@ -180,6 +180,12 @@ type ExpenseParams struct {
 	// Shares are the parts that I paid for others, if any, in the instrument of
 	// the expense.
 	Shares []Share
+	// PostedOn, when set, is the posting date of the expense: the day the card's
+	// institution put it on a statement, which is not before the day it happened.
+	// Only an expense paid from an account that is a card has one
+	// (ErrNoCardPosting), and not one that is paid in instalments (ErrPartOfPlan:
+	// the origin of a plan has no posting date). See Transaction.WithPostedOn.
+	PostedOn *time.Time
 }
 
 // NewExpense returns the draft of an expense: money spent on one or more
@@ -194,12 +200,22 @@ type ExpenseParams struct {
 //
 //	dealing   -(sum of the lines)
 //	expense   +line, base amount, discount     (one per line)
+//
+// With a PostedOn it has the posting date, as Transaction.WithPostedOn gives it.
 func NewExpense(p ExpenseParams) (Transaction, error) {
 	h, postings, _, err := expensePostings(p, BookAccount)
 	if err != nil {
 		return Transaction{}, err
 	}
-	return newTransaction(KindExpense, h, postings)
+	txn, err := newTransaction(KindExpense, h, postings)
+	if err != nil || p.PostedOn == nil {
+		return txn, err
+	}
+	var accounts []Account
+	if p.Account != nil {
+		accounts = []Account{*p.Account}
+	}
+	return txn.WithPostedOn(p.PostedOn, accounts)
 }
 
 // expensePostings checks the expense and returns its header as a transaction

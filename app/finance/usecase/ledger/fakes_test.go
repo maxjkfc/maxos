@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
@@ -119,6 +120,12 @@ type fakeTransactions struct {
 	// "look up the key" for GetByIdempotencyKey, "count the drafts" for
 	// PendingDrafts and "read the balance" for Balances.
 	log *callLog
+	// postedOnSet lists the ids SetPostedOn was called for, in order. statementsAsked
+	// lists the filters Statement was called with, and figuresAsked what
+	// StatementFigures was asked for. readErr is what both of them return too.
+	postedOnSet     []uuid.UUID
+	statementsAsked []repo.StatementFilter
+	figuresAsked    []figuresAsk
 }
 
 func newFakeTransactions() *fakeTransactions {
@@ -349,6 +356,148 @@ func (f *fakeTransactions) InstalmentPlans(_ context.Context, accountID *uuid.UU
 	return f.planRows, nil
 }
 
+// SetPostedOn stores the posting date in a database transaction, as the repo
+// does, and refuses what the table's CHECK refuses: a date before the day the
+// transaction happened.
+func (f *fakeTransactions) SetPostedOn(ctx context.Context, id uuid.UUID, postedOn *time.Time) (model.Transaction, error) {
+	if !inTx(ctx) {
+		return model.Transaction{}, errNotInTx
+	}
+	txn, ok := f.byID[id]
+	if !ok {
+		return model.Transaction{}, model.ErrNotFound
+	}
+	txn.PostedOn = nil
+	if postedOn != nil {
+		if postedOn.Before(txn.OccurredOn) {
+			return model.Transaction{}, errors.New("fin_transaction_posted_on_check")
+		}
+		txn.PostedOn = new(*postedOn)
+	}
+	f.byID[id] = txn
+	f.postedOnSet = append(f.postedOnSet, id)
+	return txn, nil
+}
+
+// figuresAsk is what StatementFigures was asked for.
+type figuresAsk struct {
+	account uuid.UUID
+	periods []model.StatementPeriod
+	today   time.Time
+}
+
+// earlier returns the earlier of two days.
+func earlier(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
+}
+
+// postsTo reports whether the transaction has an account posting to the account.
+func postsTo(txn model.Transaction, accountID uuid.UUID) bool {
+	for _, p := range txn.Postings {
+		if p.Book == model.BookAccount && p.AccountID != nil && *p.AccountID == accountID {
+			return true
+		}
+	}
+	return false
+}
+
+// figures adds up, as the repo does, what each instrument did on the statement: the
+// account postings to the account of the confirmed transactions whose statement
+// date is not after the day the statement closes or today, whichever is earlier.
+// The ones before the statement are the previous, and the ones on it are charges
+// when they are negative and credits when they are not. An instrument that did
+// nothing on the statement and carries nothing in is not listed. By instrument id,
+// which is as much of the order of the repo as the fake has the names for.
+func (f *fakeTransactions) figures(accountID uuid.UUID, p model.StatementPeriod, today time.Time) []model.StatementFigures {
+	type sums struct {
+		previous, charges, credits decimal.Decimal
+		posted                     bool
+	}
+	byInstrument := map[uuid.UUID]*sums{}
+	countedTo := earlier(p.ClosingOn, today)
+	for _, txn := range f.byID {
+		if txn.Status != model.StatusConfirmed || txn.StatementDate().After(countedTo) {
+			continue
+		}
+		for _, post := range txn.Postings {
+			if post.Book != model.BookAccount || post.AccountID == nil || *post.AccountID != accountID {
+				continue
+			}
+			s, found := byInstrument[post.InstrumentID]
+			if !found {
+				s = &sums{}
+				byInstrument[post.InstrumentID] = s
+			}
+			switch {
+			case txn.StatementDate().Before(p.From):
+				s.previous = s.previous.Add(post.Quantity)
+			case post.Quantity.IsNegative():
+				s.charges, s.posted = s.charges.Add(post.Quantity.Neg()), true
+			default:
+				s.credits, s.posted = s.credits.Add(post.Quantity), true
+			}
+		}
+	}
+	var out []model.StatementFigures
+	for instrument, s := range byInstrument {
+		if s.posted || !s.previous.IsZero() {
+			out = append(out, model.NewStatementFigures(instrument, s.previous, s.charges, s.credits))
+		}
+	}
+	slices.SortFunc(out, func(a, b model.StatementFigures) int { return bytes.Compare(a.InstrumentID[:], b.InstrumentID[:]) })
+	return out
+}
+
+// StatementFigures is what figures says of each of the periods.
+func (f *fakeTransactions) StatementFigures(_ context.Context, accountID uuid.UUID, periods []model.StatementPeriod, today time.Time) ([][]model.StatementFigures, error) {
+	f.figuresAsked = append(f.figuresAsked, figuresAsk{account: accountID, periods: periods, today: today})
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	out := make([][]model.StatementFigures, len(periods))
+	for i, p := range periods {
+		out[i] = f.figures(accountID, p, today)
+	}
+	return out, nil
+}
+
+// Statement reads a statement as the repo does: its figures, the confirmed
+// transactions on it, which are those with an account posting to the account whose
+// statement date is on it and not after today, by statement date, then the day they
+// happened, then the id, newest first, and the drafts that are on it by their
+// statement date, today or not.
+func (f *fakeTransactions) Statement(_ context.Context, q repo.StatementFilter) (repo.StatementContent, error) {
+	f.statementsAsked = append(f.statementsAsked, q)
+	if f.readErr != nil {
+		return repo.StatementContent{}, f.readErr
+	}
+	content := repo.StatementContent{Figures: f.figures(q.AccountID, q.Period, q.Today)}
+	countedTo := earlier(q.Period.ClosingOn, q.Today)
+	for _, txn := range f.byID {
+		if !postsTo(txn, q.AccountID) {
+			continue
+		}
+		on := txn.StatementDate()
+		switch {
+		case txn.Status == model.StatusConfirmed && !on.Before(q.Period.From) && !on.After(countedTo):
+			content.Transactions = append(content.Transactions, txn)
+		case txn.Status == model.StatusDraft && q.Period.Contains(on):
+			content.Drafts++
+		}
+	}
+	slices.SortFunc(content.Transactions, func(a, b model.Transaction) int {
+		return cmp.Or(
+			b.StatementDate().Compare(a.StatementDate()),
+			b.OccurredOn.Compare(a.OccurredOn),
+			bytes.Compare(b.ID[:], a.ID[:]),
+		)
+	})
+	return content, nil
+}
+
 // fakeAccounts is an in-memory repo.AccountRepo of which only Get and Lock are
 // used.
 type fakeAccounts struct {
@@ -368,6 +517,14 @@ func newFakeAccounts() *fakeAccounts {
 
 func (f *fakeAccounts) add(name string) model.Account {
 	a := model.Account{ID: uuid.Must(uuid.NewV7()), Name: name, Kind: model.AccountKindCash}
+	f.accounts[a.ID] = a
+	return a
+}
+
+// addCard adds a card that closes its statement on the closing day and has it paid
+// by the due day, either of which may be nil.
+func (f *fakeAccounts) addCard(name string, closingDay, dueDay *int) model.Account {
+	a := model.Account{ID: uuid.Must(uuid.NewV7()), Name: name, Kind: model.AccountKindCard, ClosingDay: closingDay, PaymentDueDay: dueDay}
 	f.accounts[a.ID] = a
 	return a
 }

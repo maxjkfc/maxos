@@ -236,7 +236,15 @@ type Transaction struct {
 	// OccurredOn is the day it happened, as a date at midnight UTC (see DateOf).
 	OccurredOn time.Time
 	// OccurredAt is the moment it happened, when it is known.
-	OccurredAt  *time.Time
+	OccurredAt *time.Time
+	// PostedOn is the posting date (入帳日): the day the institution put the
+	// transaction on a statement, as a date at midnight UTC, when that is not the day
+	// it happened. nil means the day it happened. It decides which statement of a
+	// card the transaction is on (StatementDate) and nothing else: balances, budgets
+	// and dealings go by OccurredOn. Only a transaction with an account posting to a
+	// card has one, and not one that is part of an instalment plan; it is never
+	// before OccurredOn.
+	PostedOn    *time.Time
 	Description string
 	Merchant    string
 	// ProjectID and AreaID are ids of catalog entries. Whether they exist and are
@@ -277,6 +285,10 @@ type Transaction struct {
 //     paid in instalments is as the origin of its plan; the plan id and the
 //     position are both set or both left out, and the origin, which is the position
 //     0, is the transaction the plan id names (ErrMalformedPlan);
+//   - the posting date, if there is one, is not before the day it happened
+//     (ErrPostedBeforeOccurred) and is not on a transaction of a plan
+//     (ErrPartOfPlan); that it is on a transaction that posts to a card needs the
+//     kinds of the accounts, which WithPostedOn is given;
 //   - the postings are the ones the kind is made of (ErrWrongPostings,
 //     ErrSameAccount, ErrDuplicateParty): an expense is one account posting and
 //     one or more expense postings, and a dealing posting for each party it was
@@ -323,6 +335,9 @@ func (t Transaction) Validate() error {
 		}
 	}
 	if err := t.checkPlan(); err != nil {
+		return err
+	}
+	if err := t.checkPostedOn(); err != nil {
 		return err
 	}
 	if err := t.checkKind(); err != nil {

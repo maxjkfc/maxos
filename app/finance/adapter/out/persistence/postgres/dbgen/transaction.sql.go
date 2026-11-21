@@ -37,6 +37,34 @@ func (q *Queries) CountPendingDrafts(ctx context.Context, arg CountPendingDrafts
 	return count, err
 }
 
+const countStatementDrafts = `-- name: CountStatementDrafts :one
+SELECT count(*)
+FROM fin_transaction t
+WHERE t.status = 'draft'
+  AND COALESCE(t.posted_on, t.occurred_on) BETWEEN $1::date AND $2::date
+  AND EXISTS (
+      SELECT 1 FROM fin_posting p
+      WHERE p.transaction_id = t.id AND p.book = 'account' AND p.account_id = $3)
+`
+
+type CountStatementDraftsParams struct {
+	FromDay    time.Time
+	ClosingDay time.Time
+	AccountID  uuid.NullUUID
+}
+
+// How many drafts with an account posting to the account have a statement date from
+// from_day to closing_day, both ends included: the drafts that would be on the
+// statement once confirmed, which the figures of the statement do not count. A draft
+// counts once, however many postings it has to the account. It does not stop at
+// today: a draft that is dated after it would be on the statement from its day.
+func (q *Queries) CountStatementDrafts(ctx context.Context, arg CountStatementDraftsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countStatementDrafts, arg.FromDay, arg.ClosingDay, arg.AccountID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteTransaction = `-- name: DeleteTransaction :execrows
 DELETE FROM fin_transaction WHERE id = $1
 `
@@ -51,7 +79,7 @@ func (q *Queries) DeleteTransaction(ctx context.Context, id uuid.UUID) (int64, e
 }
 
 const getTransaction = `-- name: GetTransaction :one
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq FROM fin_transaction WHERE id = $1
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq, posted_on FROM fin_transaction WHERE id = $1
 `
 
 func (q *Queries) GetTransaction(ctx context.Context, id uuid.UUID) (FinTransaction, error) {
@@ -73,12 +101,13 @@ func (q *Queries) GetTransaction(ctx context.Context, id uuid.UUID) (FinTransact
 		&i.VoidedAt,
 		&i.PlanID,
 		&i.PlanSeq,
+		&i.PostedOn,
 	)
 	return i, err
 }
 
 const getTransactionByIdempotencyKey = `-- name: GetTransactionByIdempotencyKey :one
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq FROM fin_transaction WHERE idempotency_key = $1
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq, posted_on FROM fin_transaction WHERE idempotency_key = $1
 `
 
 func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, idempotencyKey string) (FinTransaction, error) {
@@ -100,12 +129,13 @@ func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, idempotenc
 		&i.VoidedAt,
 		&i.PlanID,
 		&i.PlanSeq,
+		&i.PostedOn,
 	)
 	return i, err
 }
 
 const getTransactionForUpdate = `-- name: GetTransactionForUpdate :one
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq FROM fin_transaction WHERE id = $1 FOR UPDATE
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq, posted_on FROM fin_transaction WHERE id = $1 FOR UPDATE
 `
 
 // Locks the row until the database transaction ends: whoever changes or deletes
@@ -129,12 +159,13 @@ func (q *Queries) GetTransactionForUpdate(ctx context.Context, id uuid.UUID) (Fi
 		&i.VoidedAt,
 		&i.PlanID,
 		&i.PlanSeq,
+		&i.PostedOn,
 	)
 	return i, err
 }
 
 const getTransactionsByIDs = `-- name: GetTransactionsByIDs :many
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq FROM fin_transaction WHERE id = ANY($1::uuid[])
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq, posted_on FROM fin_transaction WHERE id = ANY($1::uuid[])
 `
 
 // In no particular order.
@@ -163,6 +194,7 @@ func (q *Queries) GetTransactionsByIDs(ctx context.Context, ids []uuid.UUID) ([]
 			&i.VoidedAt,
 			&i.PlanID,
 			&i.PlanSeq,
+			&i.PostedOn,
 		); err != nil {
 			return nil, err
 		}
@@ -215,14 +247,14 @@ func (q *Queries) InsertPosting(ctx context.Context, arg InsertPostingParams) er
 const insertTransaction = `-- name: InsertTransaction :one
 INSERT INTO fin_transaction (
     id, kind, status, occurred_on, occurred_at, description, merchant,
-    project_id, area_id, idempotency_key, plan_id, plan_seq
+    project_id, area_id, idempotency_key, plan_id, plan_seq, posted_on
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7,
-    $8, $9, $10, $11, $12
+    $8, $9, $10, $11, $12, $13
 )
 ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq
+RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq, posted_on
 `
 
 type InsertTransactionParams struct {
@@ -238,6 +270,7 @@ type InsertTransactionParams struct {
 	IdempotencyKey string
 	PlanID         uuid.NullUUID
 	PlanSeq        *int32
+	PostedOn       *time.Time
 }
 
 // Returns no row (pgx.ErrNoRows) when the idempotency key is already stored: the
@@ -247,7 +280,9 @@ type InsertTransactionParams struct {
 // status. The postings follow in the same database transaction: the deferred
 // balance trigger checks them at its commit. plan_id and plan_seq are both NULL
 // for a transaction that is in no instalment plan. The origin of a plan is
-// inserted before its periods, which refer to it.
+// inserted before its periods, which refer to it. posted_on is NULL unless the
+// transaction was recorded with a posting date, which the table's CHECK keeps
+// from being before occurred_on.
 func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionParams) (FinTransaction, error) {
 	row := q.db.QueryRow(ctx, insertTransaction,
 		arg.ID,
@@ -262,6 +297,7 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 		arg.IdempotencyKey,
 		arg.PlanID,
 		arg.PlanSeq,
+		arg.PostedOn,
 	)
 	var i FinTransaction
 	err := row.Scan(
@@ -280,6 +316,7 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 		&i.VoidedAt,
 		&i.PlanID,
 		&i.PlanSeq,
+		&i.PostedOn,
 	)
 	return i, err
 }
@@ -480,7 +517,7 @@ func (q *Queries) ListInstalmentPlans(ctx context.Context, arg ListInstalmentPla
 }
 
 const listPlanTransactions = `-- name: ListPlanTransactions :many
-SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq FROM fin_transaction WHERE plan_id = $1 ORDER BY plan_seq
+SELECT id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq, posted_on FROM fin_transaction WHERE plan_id = $1 ORDER BY plan_seq
 `
 
 // The transactions of an instalment plan: its origin, which has plan_seq 0, and
@@ -510,6 +547,7 @@ func (q *Queries) ListPlanTransactions(ctx context.Context, planID uuid.NullUUID
 			&i.VoidedAt,
 			&i.PlanID,
 			&i.PlanSeq,
+			&i.PostedOn,
 		); err != nil {
 			return nil, err
 		}
@@ -560,6 +598,141 @@ func (q *Queries) ListPostings(ctx context.Context, transactionIds []uuid.UUID) 
 	return items, nil
 }
 
+const listStatementFigures = `-- name: ListStatementFigures :many
+WITH statements AS (
+    SELECT f.idx, f.from_day, LEAST(c.closing_day, $1::date) AS counted_to
+    FROM unnest($2::date[]) WITH ORDINALITY AS f(from_day, idx)
+    JOIN unnest($3::date[]) WITH ORDINALITY AS c(closing_day, idx) ON c.idx = f.idx
+), postings AS (
+    SELECT p.instrument_id, p.quantity, COALESCE(t.posted_on, t.occurred_on) AS statement_on
+    FROM fin_posting p
+    JOIN fin_transaction t ON t.id = p.transaction_id
+    WHERE t.status = 'confirmed' AND p.book = 'account' AND p.account_id = $4
+)
+SELECT s.idx::int AS idx, p.instrument_id,
+       COALESCE(sum(p.quantity) FILTER (WHERE p.statement_on < s.from_day), 0)::numeric AS previous,
+       COALESCE(-sum(p.quantity) FILTER (WHERE p.statement_on >= s.from_day AND p.quantity < 0), 0)::numeric AS charges,
+       COALESCE(sum(p.quantity) FILTER (WHERE p.statement_on >= s.from_day AND p.quantity > 0), 0)::numeric AS credits
+FROM statements s
+JOIN postings p ON p.statement_on <= s.counted_to
+JOIN fin_instrument i ON i.id = p.instrument_id
+GROUP BY s.idx, p.instrument_id, i.code
+HAVING count(*) FILTER (WHERE p.statement_on >= s.from_day) > 0
+    OR COALESCE(sum(p.quantity) FILTER (WHERE p.statement_on < s.from_day), 0) <> 0
+ORDER BY s.idx, i.code, p.instrument_id
+`
+
+type ListStatementFiguresParams struct {
+	Today       time.Time
+	FromDays    []time.Time
+	ClosingDays []time.Time
+	AccountID   uuid.NullUUID
+}
+
+type ListStatementFiguresRow struct {
+	Idx          int32
+	InstrumentID uuid.UUID
+	Previous     decimal.Decimal
+	Charges      decimal.Decimal
+	Credits      decimal.Decimal
+}
+
+// What each instrument did on each of several statements of one account. A
+// statement is a range of days, both ends included, given as the day it starts and
+// the day it closes: the two arrays are the statements, in the same order, and idx
+// is the position of one in them, from 1. Which days a statement has follows the
+// closing day of the account, which is the model's to work out.
+//
+// A posting counts when it is an account posting to the account, of a confirmed
+// transaction, and on the statement date of that transaction: the day it was posted
+// when it has a posting date, otherwise the day it happened. Only the postings with
+// a statement date on or before the day the statement closes or today, whichever is
+// earlier, count: what is dated after today counts from its day, as it does in
+// ListBalances. previous is what the postings before the statement add up to,
+// charges the negative postings of the statement as a positive number, and credits
+// its positive postings. Closing, which is previous - charges + credits, is the
+// model's to work out. It is all one statement of SQL, so that previous and what
+// the statements did are of one snapshot.
+//
+// An instrument is listed for a statement when something was posted to it on the
+// statement or the statement starts with a previous that is not zero; one that did
+// nothing and carries nothing has nothing to say. By statement, then instrument
+// code.
+func (q *Queries) ListStatementFigures(ctx context.Context, arg ListStatementFiguresParams) ([]ListStatementFiguresRow, error) {
+	rows, err := q.db.Query(ctx, listStatementFigures,
+		arg.Today,
+		arg.FromDays,
+		arg.ClosingDays,
+		arg.AccountID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStatementFiguresRow
+	for rows.Next() {
+		var i ListStatementFiguresRow
+		if err := rows.Scan(
+			&i.Idx,
+			&i.InstrumentID,
+			&i.Previous,
+			&i.Charges,
+			&i.Credits,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStatementTransactionIDs = `-- name: ListStatementTransactionIDs :many
+SELECT t.id
+FROM fin_transaction t
+WHERE t.status = 'confirmed'
+  AND COALESCE(t.posted_on, t.occurred_on) BETWEEN $1::date AND $2::date
+  AND EXISTS (
+      SELECT 1 FROM fin_posting p
+      WHERE p.transaction_id = t.id AND p.book = 'account' AND p.account_id = $3)
+ORDER BY COALESCE(t.posted_on, t.occurred_on) DESC, t.occurred_on DESC, t.id DESC
+`
+
+type ListStatementTransactionIDsParams struct {
+	FromDay   time.Time
+	ToDay     time.Time
+	AccountID uuid.NullUUID
+}
+
+// The transactions on a statement of one account: the confirmed ones with an
+// account posting to the account whose statement date, the day it was posted when
+// it has a posting date and otherwise the day it happened, is from from_day to
+// to_day, both ends included. The caller gives as to_day the day the statement
+// closes, or today when that is earlier, as ListStatementFigures counts. Newest
+// statement date first, then as ListTransactions orders them: the day it happened,
+// newest first, and for the same day the latest made first (the ids are UUIDv7).
+func (q *Queries) ListStatementTransactionIDs(ctx context.Context, arg ListStatementTransactionIDsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listStatementTransactionIDs, arg.FromDay, arg.ToDay, arg.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTransactionTags = `-- name: ListTransactionTags :many
 SELECT transaction_id, tag_id FROM fin_transaction_tag
 WHERE transaction_id = ANY($1::uuid[])
@@ -586,13 +759,50 @@ func (q *Queries) ListTransactionTags(ctx context.Context, transactionIds []uuid
 	return items, nil
 }
 
+const setTransactionPostedOn = `-- name: SetTransactionPostedOn :one
+UPDATE fin_transaction SET posted_on = $1 WHERE id = $2 RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq, posted_on
+`
+
+type SetTransactionPostedOnParams struct {
+	PostedOn *time.Time
+	ID       uuid.UUID
+}
+
+// Sets the posting date of the transaction, or clears it with NULL. The table's
+// CHECK refuses a date before the day the transaction happened. Whether the
+// transaction may have one is the model's to say: the use case locks the row and
+// asks the model first.
+func (q *Queries) SetTransactionPostedOn(ctx context.Context, arg SetTransactionPostedOnParams) (FinTransaction, error) {
+	row := q.db.QueryRow(ctx, setTransactionPostedOn, arg.PostedOn, arg.ID)
+	var i FinTransaction
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.Status,
+		&i.OccurredOn,
+		&i.OccurredAt,
+		&i.Description,
+		&i.Merchant,
+		&i.ProjectID,
+		&i.AreaID,
+		&i.IdempotencyKey,
+		&i.CreatedAt,
+		&i.ConfirmedAt,
+		&i.VoidedAt,
+		&i.PlanID,
+		&i.PlanSeq,
+		&i.PostedOn,
+	)
+	return i, err
+}
+
 const setTransactionStatus = `-- name: SetTransactionStatus :one
 UPDATE fin_transaction
 SET status = $1::text,
     confirmed_at = CASE WHEN $1::text = 'confirmed' THEN now() ELSE confirmed_at END,
     voided_at = CASE WHEN $1::text = 'void' THEN now() ELSE voided_at END
 WHERE id = $2
-RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq
+RETURNING id, kind, status, occurred_on, occurred_at, description, merchant, project_id, area_id, idempotency_key, created_at, confirmed_at, voided_at, plan_id, plan_seq, posted_on
 `
 
 type SetTransactionStatusParams struct {
@@ -621,6 +831,7 @@ func (q *Queries) SetTransactionStatus(ctx context.Context, arg SetTransactionSt
 		&i.VoidedAt,
 		&i.PlanID,
 		&i.PlanSeq,
+		&i.PostedOn,
 	)
 	return i, err
 }

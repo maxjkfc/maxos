@@ -47,7 +47,7 @@ type env struct {
 	clock       *fakeClock
 	svc         *ledger.Service
 
-	cash, bank                              model.Account
+	cash, bank, card                        model.Account
 	twd, usd, btc                           model.Instrument
 	food, household, fees, interest, salary model.Category
 }
@@ -67,6 +67,7 @@ func newEnv(t *testing.T) *env {
 	}
 	e.cash = e.accounts.add("cash")
 	e.bank = e.accounts.add("bank")
+	e.card = e.accounts.addCard("card", new(5), new(20))
 	e.twd = e.instruments.add(model.Instrument{ID: model.BaseCurrencyID, Code: "TWD", Name: "TWD", Kind: model.InstrumentKindFiat, IsCurrency: true, Decimals: 2})
 	e.usd = e.instruments.add(model.Instrument{ID: uuid.Must(uuid.NewV7()), Code: "USD", Name: "USD", Kind: model.InstrumentKindFiat, IsCurrency: true, Decimals: 2})
 	e.btc = e.instruments.add(model.Instrument{ID: uuid.Must(uuid.NewV7()), Code: "BTC", Name: "BTC", Kind: model.InstrumentKindCrypto, Decimals: 8})
@@ -89,7 +90,7 @@ func newEnv(t *testing.T) *env {
 // names says what to call each id the tests write postings with.
 func (e *env) names() map[uuid.UUID]string {
 	names := map[uuid.UUID]string{
-		e.cash.ID: "cash", e.bank.ID: "bank", e.twd.ID: "TWD", e.usd.ID: "USD", e.btc.ID: "BTC",
+		e.cash.ID: "cash", e.bank.ID: "bank", e.card.ID: "card", e.twd.ID: "TWD", e.usd.ID: "USD", e.btc.ID: "BTC",
 		e.food.ID: "food", e.household.ID: "household", e.fees.ID: "fees", e.interest.ID: "interest", e.salary.ID: "salary",
 		model.UnrecordedExpenseCategoryID: "未記錄", model.UnrecordedIncomeCategoryID: "未記錄",
 	}

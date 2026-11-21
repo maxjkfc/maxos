@@ -6,14 +6,16 @@
 -- status. The postings follow in the same database transaction: the deferred
 -- balance trigger checks them at its commit. plan_id and plan_seq are both NULL
 -- for a transaction that is in no instalment plan. The origin of a plan is
--- inserted before its periods, which refer to it.
+-- inserted before its periods, which refer to it. posted_on is NULL unless the
+-- transaction was recorded with a posting date, which the table's CHECK keeps
+-- from being before occurred_on.
 INSERT INTO fin_transaction (
     id, kind, status, occurred_on, occurred_at, description, merchant,
-    project_id, area_id, idempotency_key, plan_id, plan_seq
+    project_id, area_id, idempotency_key, plan_id, plan_seq, posted_on
 )
 VALUES (
     @id, @kind, @status, @occurred_on, @occurred_at, @description, @merchant,
-    @project_id, @area_id, @idempotency_key, @plan_id, @plan_seq
+    @project_id, @area_id, @idempotency_key, @plan_id, @plan_seq, @posted_on
 )
 ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING *;
@@ -146,3 +148,85 @@ WHERE o.status = 'confirmed' AND o.plan_seq = 0 AND o.occurred_on <= @day
   AND (sqlc.narg('account_id')::uuid IS NULL OR op.account_id = sqlc.narg('account_id'))
 GROUP BY o.id, o.occurred_on, op.account_id, op.instrument_id, op.quantity
 ORDER BY o.occurred_on DESC, o.id DESC;
+
+-- name: SetTransactionPostedOn :one
+-- Sets the posting date of the transaction, or clears it with NULL. The table's
+-- CHECK refuses a date before the day the transaction happened. Whether the
+-- transaction may have one is the model's to say: the use case locks the row and
+-- asks the model first.
+UPDATE fin_transaction SET posted_on = @posted_on WHERE id = @id RETURNING *;
+
+-- name: ListStatementFigures :many
+-- What each instrument did on each of several statements of one account. A
+-- statement is a range of days, both ends included, given as the day it starts and
+-- the day it closes: the two arrays are the statements, in the same order, and idx
+-- is the position of one in them, from 1. Which days a statement has follows the
+-- closing day of the account, which is the model's to work out.
+--
+-- A posting counts when it is an account posting to the account, of a confirmed
+-- transaction, and on the statement date of that transaction: the day it was posted
+-- when it has a posting date, otherwise the day it happened. Only the postings with
+-- a statement date on or before the day the statement closes or today, whichever is
+-- earlier, count: what is dated after today counts from its day, as it does in
+-- ListBalances. previous is what the postings before the statement add up to,
+-- charges the negative postings of the statement as a positive number, and credits
+-- its positive postings. Closing, which is previous - charges + credits, is the
+-- model's to work out. It is all one statement of SQL, so that previous and what
+-- the statements did are of one snapshot.
+--
+-- An instrument is listed for a statement when something was posted to it on the
+-- statement or the statement starts with a previous that is not zero; one that did
+-- nothing and carries nothing has nothing to say. By statement, then instrument
+-- code.
+WITH statements AS (
+    SELECT f.idx, f.from_day, LEAST(c.closing_day, @today::date) AS counted_to
+    FROM unnest(@from_days::date[]) WITH ORDINALITY AS f(from_day, idx)
+    JOIN unnest(@closing_days::date[]) WITH ORDINALITY AS c(closing_day, idx) ON c.idx = f.idx
+), postings AS (
+    SELECT p.instrument_id, p.quantity, COALESCE(t.posted_on, t.occurred_on) AS statement_on
+    FROM fin_posting p
+    JOIN fin_transaction t ON t.id = p.transaction_id
+    WHERE t.status = 'confirmed' AND p.book = 'account' AND p.account_id = @account_id
+)
+SELECT s.idx::int AS idx, p.instrument_id,
+       COALESCE(sum(p.quantity) FILTER (WHERE p.statement_on < s.from_day), 0)::numeric AS previous,
+       COALESCE(-sum(p.quantity) FILTER (WHERE p.statement_on >= s.from_day AND p.quantity < 0), 0)::numeric AS charges,
+       COALESCE(sum(p.quantity) FILTER (WHERE p.statement_on >= s.from_day AND p.quantity > 0), 0)::numeric AS credits
+FROM statements s
+JOIN postings p ON p.statement_on <= s.counted_to
+JOIN fin_instrument i ON i.id = p.instrument_id
+GROUP BY s.idx, p.instrument_id, i.code
+HAVING count(*) FILTER (WHERE p.statement_on >= s.from_day) > 0
+    OR COALESCE(sum(p.quantity) FILTER (WHERE p.statement_on < s.from_day), 0) <> 0
+ORDER BY s.idx, i.code, p.instrument_id;
+
+-- name: ListStatementTransactionIDs :many
+-- The transactions on a statement of one account: the confirmed ones with an
+-- account posting to the account whose statement date, the day it was posted when
+-- it has a posting date and otherwise the day it happened, is from from_day to
+-- to_day, both ends included. The caller gives as to_day the day the statement
+-- closes, or today when that is earlier, as ListStatementFigures counts. Newest
+-- statement date first, then as ListTransactions orders them: the day it happened,
+-- newest first, and for the same day the latest made first (the ids are UUIDv7).
+SELECT t.id
+FROM fin_transaction t
+WHERE t.status = 'confirmed'
+  AND COALESCE(t.posted_on, t.occurred_on) BETWEEN @from_day::date AND @to_day::date
+  AND EXISTS (
+      SELECT 1 FROM fin_posting p
+      WHERE p.transaction_id = t.id AND p.book = 'account' AND p.account_id = @account_id)
+ORDER BY COALESCE(t.posted_on, t.occurred_on) DESC, t.occurred_on DESC, t.id DESC;
+
+-- name: CountStatementDrafts :one
+-- How many drafts with an account posting to the account have a statement date from
+-- from_day to closing_day, both ends included: the drafts that would be on the
+-- statement once confirmed, which the figures of the statement do not count. A draft
+-- counts once, however many postings it has to the account. It does not stop at
+-- today: a draft that is dated after it would be on the statement from its day.
+SELECT count(*)
+FROM fin_transaction t
+WHERE t.status = 'draft'
+  AND COALESCE(t.posted_on, t.occurred_on) BETWEEN @from_day::date AND @closing_day::date
+  AND EXISTS (
+      SELECT 1 FROM fin_posting p
+      WHERE p.transaction_id = t.id AND p.book = 'account' AND p.account_id = @account_id);

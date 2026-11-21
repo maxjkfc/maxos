@@ -70,6 +70,7 @@ func (r *TransactionRepo) Insert(ctx context.Context, txn model.Transaction) (mo
 		IdempotencyKey: txn.IdempotencyKey,
 		PlanID:         nullUUID(txn.PlanID),
 		PlanSeq:        planSeqColumn(txn.PlanSeq),
+		PostedOn:       txn.PostedOn,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Transaction{}, repo.ErrDuplicateKey
@@ -178,6 +179,17 @@ func (r *TransactionRepo) SetStatus(ctx context.Context, id uuid.UUID, status mo
 	return r.loadOne(ctx, row)
 }
 
+// SetPostedOn sets the posting date of the transaction, or clears it with nil. The
+// table's CHECK constraint is the last guard of the date: one before the day the
+// transaction happened comes back as an error from the database.
+func (r *TransactionRepo) SetPostedOn(ctx context.Context, id uuid.UUID, postedOn *time.Time) (model.Transaction, error) {
+	row, err := r.q.SetTransactionPostedOn(ctx, dbgen.SetTransactionPostedOnParams{ID: id, PostedOn: postedOn})
+	if err != nil {
+		return model.Transaction{}, mapError(err)
+	}
+	return r.loadOne(ctx, row)
+}
+
 // Delete deletes the transaction; its postings and tags go with it.
 func (r *TransactionRepo) Delete(ctx context.Context, id uuid.UUID) error {
 	deleted, err := r.q.DeleteTransaction(ctx, id)
@@ -206,36 +218,43 @@ func (r *TransactionRepo) List(ctx context.Context, filter repo.TransactionFilte
 		if err != nil {
 			return fmt.Errorf("list transaction ids: %w", err)
 		}
-		if len(ids) == 0 {
-			return nil
-		}
-		rows, err := r.q.GetTransactionsByIDs(ctx, ids)
-		if err != nil {
-			return fmt.Errorf("get transactions: %w", err)
-		}
-
-		byID := make(map[uuid.UUID]dbgen.FinTransaction, len(rows))
-		for _, row := range rows {
-			byID[row.ID] = row
-		}
-		ordered := make([]dbgen.FinTransaction, len(ids))
-		for i, id := range ids {
-			row, ok := byID[id]
-			if !ok {
-				// Impossible in one snapshot. It is what a list read outside one,
-				// in a transaction that is not REPEATABLE READ, can come to, and
-				// a page that quietly lacks a transaction is wrong.
-				return fmt.Errorf("transaction %s was listed and is gone: the list was not read in one snapshot", id)
-			}
-			ordered[i] = row
-		}
-		txns, err = r.load(ctx, ordered)
+		txns, err = r.loadByIDs(ctx, ids)
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return txns, nil
+}
+
+// loadByIDs returns the transactions of the ids, in the order of the ids, each
+// with its postings and tags. It must be called in the snapshot the ids were read
+// in: there are as many transactions as ids.
+func (r *TransactionRepo) loadByIDs(ctx context.Context, ids []uuid.UUID) ([]model.Transaction, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := r.q.GetTransactionsByIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("get transactions: %w", err)
+	}
+
+	byID := make(map[uuid.UUID]dbgen.FinTransaction, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	ordered := make([]dbgen.FinTransaction, len(ids))
+	for i, id := range ids {
+		row, ok := byID[id]
+		if !ok {
+			// Impossible in one snapshot. It is what a list read outside one,
+			// in a transaction that is not REPEATABLE READ, can come to, and
+			// a page that quietly lacks a transaction is wrong.
+			return nil, fmt.Errorf("transaction %s was listed and is gone: the list was not read in one snapshot", id)
+		}
+		ordered[i] = row
+	}
+	return r.load(ctx, ordered)
 }
 
 // Balances adds up the quantities of the postings to accounts, of the confirmed
@@ -316,6 +335,86 @@ func (r *TransactionRepo) InstalmentPlans(ctx context.Context, accountID *uuid.U
 	return plans, nil
 }
 
+// StatementFigures adds up what each instrument did on each of the statements of
+// the account: one statement of SQL for all of them (ListStatementFigures), which
+// is what keeps the Closing of one statement the Previous of the next. The figures
+// of a period are those with its position, in the order of the instrument codes.
+func (r *TransactionRepo) StatementFigures(ctx context.Context, accountID uuid.UUID, periods []model.StatementPeriod, today time.Time) ([][]model.StatementFigures, error) {
+	if len(periods) == 0 {
+		return nil, nil
+	}
+	froms := make([]time.Time, len(periods))
+	closings := make([]time.Time, len(periods))
+	for i, p := range periods {
+		froms[i], closings[i] = p.From, p.ClosingOn
+	}
+	rows, err := r.q.ListStatementFigures(ctx, dbgen.ListStatementFiguresParams{
+		Today:       today,
+		FromDays:    froms,
+		ClosingDays: closings,
+		AccountID:   nullUUID(&accountID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	figures := make([][]model.StatementFigures, len(periods))
+	for _, row := range rows {
+		i := int(row.Idx) - 1
+		if i < 0 || i >= len(figures) {
+			return nil, fmt.Errorf("figures of statement %d, and only %d were asked for", row.Idx, len(periods))
+		}
+		figures[i] = append(figures[i], model.NewStatementFigures(row.InstrumentID, row.Previous, row.Charges, row.Credits))
+	}
+	return figures, nil
+}
+
+// Statement reads one statement: the figures, the transactions on it and the
+// drafts waiting for it, in one snapshot (see WithinSnapshot in pkg/postgres), so
+// that the transactions listed are those the figures add up. What the statement
+// counts stops at the day it closes or today, whichever is earlier; the drafts do
+// not stop at today.
+func (r *TransactionRepo) Statement(ctx context.Context, f repo.StatementFilter) (repo.StatementContent, error) {
+	var content repo.StatementContent
+	err := r.db.WithinSnapshot(ctx, func(ctx context.Context) error {
+		figures, err := r.StatementFigures(ctx, f.AccountID, []model.StatementPeriod{f.Period}, f.Today)
+		if err != nil {
+			return fmt.Errorf("read the figures of the statement: %w", err)
+		}
+		content.Figures = figures[0]
+
+		countedTo := f.Period.ClosingOn
+		if f.Today.Before(countedTo) {
+			countedTo = f.Today
+		}
+		ids, err := r.q.ListStatementTransactionIDs(ctx, dbgen.ListStatementTransactionIDsParams{
+			FromDay:   f.Period.From,
+			ToDay:     countedTo,
+			AccountID: nullUUID(&f.AccountID),
+		})
+		if err != nil {
+			return fmt.Errorf("list the transactions of the statement: %w", err)
+		}
+		if content.Transactions, err = r.loadByIDs(ctx, ids); err != nil {
+			return err
+		}
+
+		drafts, err := r.q.CountStatementDrafts(ctx, dbgen.CountStatementDraftsParams{
+			FromDay:    f.Period.From,
+			ClosingDay: f.Period.ClosingOn,
+			AccountID:  nullUUID(&f.AccountID),
+		})
+		if err != nil {
+			return fmt.Errorf("count the drafts of the statement: %w", err)
+		}
+		content.Drafts = int(drafts)
+		return nil
+	})
+	if err != nil {
+		return repo.StatementContent{}, err
+	}
+	return content, nil
+}
+
 // loadOne returns the transaction a row holds, with its postings and tags.
 func (r *TransactionRepo) loadOne(ctx context.Context, row dbgen.FinTransaction) (model.Transaction, error) {
 	txns, err := r.load(ctx, []dbgen.FinTransaction{row})
@@ -377,6 +476,7 @@ func toTransaction(row dbgen.FinTransaction) model.Transaction {
 		IdempotencyKey: row.IdempotencyKey,
 		PlanID:         optionalUUID(row.PlanID),
 		PlanSeq:        planSeq(row.PlanSeq),
+		PostedOn:       row.PostedOn,
 		CreatedAt:      row.CreatedAt,
 		ConfirmedAt:    row.ConfirmedAt,
 		VoidedAt:       row.VoidedAt,
