@@ -220,7 +220,10 @@ var (
 
 	// ErrPartOfPlan is returned for confirming, discarding or voiding a period of an
 	// instalment plan by itself: a plan is acted on as a whole, through its origin.
-	ErrPartOfPlan = errors.New("the transaction is a period of an instalment plan")
+	// It is also what giving a transaction of a plan a posting date comes to, the
+	// origin as much as a period: the day of a period is the day the institution
+	// bills it already.
+	ErrPartOfPlan = errors.New("the transaction is part of an instalment plan")
 
 	// ErrInstalmentsWithPaidBy is returned for an expense that a party paid and that
 	// is to be paid in instalments: a plan is of the account that is charged, which
@@ -292,6 +295,50 @@ var (
 	// ErrAllocationsExceedBudget is returned for a budget whose allocations add up
 	// to more than the budget.
 	ErrAllocationsExceedBudget = errors.New("the allocations add up to more than the budget")
+)
+
+// The errors of card statements: what the days of a card and the posting date of
+// a transaction can be refused for, and what asking for statements can be refused
+// for.
+var (
+	// ErrNotACard is returned for giving an account that is not a card a closing day
+	// or a payment due day: only a card has statements.
+	ErrNotACard = errors.New("only a card has a closing day and a payment due day")
+
+	// ErrDayOutOfRange is returned for a closing day or a payment due day that is
+	// not from 1 to 31.
+	ErrDayOutOfRange = errors.New("a day of the month is from 1 to 31")
+
+	// ErrDueDayWithoutClosingDay is returned for a payment due day on an account that
+	// has no closing day: a statement is paid by a day counted from the day it
+	// closes.
+	ErrDueDayWithoutClosingDay = errors.New("a payment due day needs a closing day")
+
+	// ErrNoStatements is returned for asking for the statements of an account that
+	// has none: one that is not a card, or a card that has no closing day.
+	ErrNoStatements = errors.New("the account has no statements: it is not a card with a closing day")
+
+	// ErrDateRangeRequired is returned for asking for the statements closing in a
+	// range of days without giving both of its ends.
+	ErrDateRangeRequired = errors.New("both ends of the range of days are required")
+
+	// ErrStatementRangeTooWide is returned for asking for the statements closing in
+	// a range of days that is longer than a list of statements can be.
+	ErrStatementRangeTooWide = errors.New("the range of days is too wide to list the statements of")
+
+	// ErrNoCardPosting is returned for giving a transaction a posting date when it
+	// has no posting to an account that is a card: the day the institution put a
+	// transaction on a statement is what a card statement is made of.
+	ErrNoCardPosting = errors.New("a posting date is for a transaction that posts to a card")
+
+	// ErrPostedBeforeOccurred is returned for a posting date before the day the
+	// transaction happened: the institution cannot post what has not happened yet.
+	ErrPostedBeforeOccurred = errors.New("the posting date cannot be before the day the transaction happened")
+
+	// ErrTransactionVoid is returned for giving a transaction that is void a posting
+	// date, or taking one away: it is a record of what was wrong, and counts on no
+	// statement.
+	ErrTransactionVoid = errors.New("the transaction is void")
 )
 
 // PendingDraftsError is what reconciling an account returns while drafts that

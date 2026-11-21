@@ -143,7 +143,7 @@ func wantSameSchema(t *testing.T, name string, got, want []string) {
 // latestVersion is the version of the newest migration, which the test database is
 // at. The tests of an older migration begin at its version, by rolling the newer
 // ones back, which an empty database lets them do.
-const latestVersion = 7
+const latestVersion = 8
 
 // atVersion returns a database that has the migrations up to the version applied:
 // the template has them all, so the newer ones are rolled back.
@@ -779,5 +779,161 @@ func TestMigration0007GoesDownOverWhatTheEarlierMigrationsHold(t *testing.T) {
 	}
 	if transactions != 2 || postings != 4 {
 		t.Errorf("%d transactions and %d postings left, want them kept: 2 and 4", transactions, postings)
+	}
+}
+
+func TestMigration0008GoesDownToTheSchemaOf0007AndUpAgain(t *testing.T) {
+	ctx := context.Background()
+	pool, provider := atVersion(t, 8)
+	atEight := schema(t, pool)
+
+	// What the migrations up to 0007 make, on their own: taken by going all the way
+	// down and up again, so that it is a database where 0008 never was.
+	if _, err := provider.DownTo(ctx, 0); err != nil {
+		t.Fatalf("down to the start: %v", err)
+	}
+	if _, err := provider.UpTo(ctx, 7); err != nil {
+		t.Fatalf("up to 0007: %v", err)
+	}
+	atSeven := schema(t, pool)
+	if slices.Equal(atSeven, atEight) {
+		t.Fatal("the schema at 0007 is the schema at 0008: the test sees nothing of the migration")
+	}
+
+	if _, err := provider.UpTo(ctx, 8); err != nil {
+		t.Fatalf("up to 0008: %v", err)
+	}
+	wantSameSchema(t, "the schema after up", schema(t, pool), atEight)
+
+	if _, err := provider.DownTo(ctx, 7); err != nil {
+		t.Fatalf("down to 0007: %v", err)
+	}
+	if v := version(t, provider); v != 7 {
+		t.Fatalf("version after down = %d, want 7", v)
+	}
+	wantSameSchema(t, "the schema after down", schema(t, pool), atSeven)
+
+	if _, err := provider.UpTo(ctx, 8); err != nil {
+		t.Fatalf("up to 0008 again: %v", err)
+	}
+	wantSameSchema(t, "the schema after up again", schema(t, pool), atEight)
+}
+
+// statementsHeld counts what 0008 added that a database holds: the accounts that
+// have a closing day or a payment due day, and the transactions that have a
+// posting date.
+func statementsHeld(t *testing.T, pool *pgxpool.Pool) (accounts, transactions int) {
+	t.Helper()
+	err := pool.QueryRow(context.Background(), `SELECT
+		(SELECT count(*) FROM fin_account WHERE closing_day IS NOT NULL OR payment_due_day IS NOT NULL),
+		(SELECT count(*) FROM fin_transaction WHERE posted_on IS NOT NULL)`).Scan(&accounts, &transactions)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	return accounts, transactions
+}
+
+func TestMigration0008RefusesToGoDownWhileTheDatabaseHoldsClosingDaysDueDaysOrPostingDatesAndLeavesThemAlone(t *testing.T) {
+	ctx := context.Background()
+	exec := func(t *testing.T, pool *pgxpool.Pool, query string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	// A case for each thing the migration added that the guard has to look at, and
+	// what takes it away again. A guard that looks at the closing day only lets the
+	// posting dates go, and the other way round.
+	tests := []struct {
+		name  string
+		seed  func(t *testing.T, pool *pgxpool.Pool)
+		clear string
+	}{
+		{"a closing day", func(t *testing.T, pool *pgxpool.Pool) {
+			t.Helper()
+			exec(t, pool, `INSERT INTO fin_account (id, name, kind, closing_day) VALUES ($1, 'card', 'card', 5)`, uuid.New())
+		}, `UPDATE fin_account SET closing_day = NULL`},
+		{"a closing day and a payment due day", func(t *testing.T, pool *pgxpool.Pool) {
+			t.Helper()
+			exec(t, pool, `INSERT INTO fin_account (id, name, kind, closing_day, payment_due_day) VALUES ($1, 'card', 'card', 5, 20)`, uuid.New())
+		}, `UPDATE fin_account SET closing_day = NULL, payment_due_day = NULL`},
+		// The check that a due day needs a closing day has to be dropped to put one
+		// here, and is put back without a look at the rows, so that the database is what
+		// Down finds when it was added by hand. The guard still has to stop on it.
+		{"a payment due day that no closing day goes with", func(t *testing.T, pool *pgxpool.Pool) {
+			t.Helper()
+			exec(t, pool, `ALTER TABLE fin_account DROP CONSTRAINT fin_account_payment_due_day_closing_day_check`)
+			exec(t, pool, `INSERT INTO fin_account (id, name, kind, payment_due_day) VALUES ($1, 'card', 'card', 20)`, uuid.New())
+			exec(t, pool, `ALTER TABLE fin_account ADD CONSTRAINT fin_account_payment_due_day_closing_day_check
+				CHECK (payment_due_day IS NULL OR closing_day IS NOT NULL) NOT VALID`)
+		}, `UPDATE fin_account SET payment_due_day = NULL`},
+		{"a posting date", func(t *testing.T, pool *pgxpool.Pool) {
+			t.Helper()
+			seedLedger(t, pool, "expense",
+				posting{book: "account", account: "cash", quantity: "-120"},
+				posting{book: "expense", category: "food", quantity: "120", baseAmount: "120"},
+			)
+			exec(t, pool, `UPDATE fin_transaction SET posted_on = '2026-11-20'`)
+		}, `UPDATE fin_transaction SET posted_on = NULL`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool, provider := atVersion(t, 8)
+			tt.seed(t, pool)
+			before := schema(t, pool)
+			accounts, transactions := statementsHeld(t, pool)
+			if accounts+transactions == 0 {
+				t.Fatal("the case holds nothing of what 0008 added: it tests nothing")
+			}
+
+			_, err := provider.Down(ctx)
+
+			pgErr := pgError(t, err)
+			if pgErr.Code != "P0001" || !strings.Contains(pgErr.Message, "cannot roll back 0008_fin_card_statements") || pgErr.Hint == "" {
+				t.Fatalf("err = %v, hint = %q, want the migration to refuse, say which migration, and say what to do", err, pgErr.Hint)
+			}
+			if v := version(t, provider); v != 8 {
+				t.Errorf("version = %d after the refused Down, want 8", v)
+			}
+			wantSameSchema(t, "the schema after the refused Down", schema(t, pool), before)
+			if a, tx := statementsHeld(t, pool); a != accounts || tx != transactions {
+				t.Errorf("%d accounts and %d transactions hold them after the refused Down, want them untouched: %d and %d", a, tx, accounts, transactions)
+			}
+
+			// Once nothing holds them, it goes down.
+			exec(t, pool, tt.clear)
+			if _, err := provider.Down(ctx); err != nil {
+				t.Fatalf("Down of a database that holds none of them: %v", err)
+			}
+			if v := version(t, provider); v != 7 {
+				t.Errorf("version = %d, want 7", v)
+			}
+		})
+	}
+}
+
+func TestMigration0008GoesDownOverWhatTheEarlierMigrationsHold(t *testing.T) {
+	ctx := context.Background()
+	pool, provider := atVersion(t, 8)
+	// A card with no closing day, and a ledger with no posting date: what 0007 could
+	// hold, which the migration must not mistake for its own.
+	if _, err := pool.Exec(ctx, `INSERT INTO fin_account (id, name, kind) VALUES ($1, 'card', 'card')`, uuid.New()); err != nil {
+		t.Fatalf("insert the card: %v", err)
+	}
+	seedLedger(t, pool, "expense",
+		posting{book: "account", account: "cash", quantity: "-120"},
+		posting{book: "expense", category: "food", quantity: "120", baseAmount: "120"},
+	)
+
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("Down: %v, want it to go down: a card with no days and a transaction with no posting date are not what 0008 added", err)
+	}
+
+	var accounts, transactions int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM fin_account), (SELECT count(*) FROM fin_transaction)`).Scan(&accounts, &transactions); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if accounts != 2 || transactions != 1 {
+		t.Errorf("%d accounts and %d transactions left, want them kept: 2 and 1", accounts, transactions)
 	}
 }

@@ -18,6 +18,8 @@ type FinAccount struct {
 	Kind          string
 	CreatedAt     time.Time
 	ArchivedAt    *time.Time
+	ClosingDay    *int16
+	PaymentDueDay *int16
 }
 
 type FinBudget struct {
@@ -90,6 +92,7 @@ type FinTransaction struct {
 	VoidedAt       *time.Time
 	PlanID         uuid.NullUUID
 	PlanSeq        *int32
+	PostedOn       *time.Time
 }
 
 type FinTransactionTag struct {

@@ -1,5 +1,5 @@
-// Package account implements the account use cases: create, archive, list and
-// get.
+// Package account implements the account use cases: create, archive, list, get and
+// set the closing day and payment due day of a card.
 package account
 
 import (
@@ -13,18 +13,19 @@ import (
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
 )
 
-// Service implements usecase.CreateAccount, ArchiveAccount, ListAccounts and
-// GetAccount.
+// Service implements usecase.CreateAccount, ArchiveAccount, ListAccounts,
+// GetAccount and SetAccountStatementDays.
 type Service struct {
 	accounts     repo.AccountRepo
 	institutions repo.InstitutionRepo
 }
 
 var (
-	_ usecase.CreateAccount  = (*Service)(nil)
-	_ usecase.ArchiveAccount = (*Service)(nil)
-	_ usecase.ListAccounts   = (*Service)(nil)
-	_ usecase.GetAccount     = (*Service)(nil)
+	_ usecase.CreateAccount           = (*Service)(nil)
+	_ usecase.ArchiveAccount          = (*Service)(nil)
+	_ usecase.ListAccounts            = (*Service)(nil)
+	_ usecase.GetAccount              = (*Service)(nil)
+	_ usecase.SetAccountStatementDays = (*Service)(nil)
 )
 
 // CreateAccount validates the account, checks that its institution exists and is
@@ -39,6 +40,8 @@ func (s *Service) CreateAccount(ctx context.Context, in usecase.CreateAccountInp
 		Name:          in.Name,
 		InstitutionID: in.InstitutionID,
 		Kind:          model.AccountKind(in.Kind),
+		ClosingDay:    in.ClosingDay,
+		PaymentDueDay: in.PaymentDueDay,
 	})
 	if err != nil {
 		return usecase.Account{}, err
@@ -91,12 +94,35 @@ func (s *Service) GetAccount(ctx context.Context, id uuid.UUID) (usecase.Account
 	return toAccount(account), nil
 }
 
+// SetAccountStatementDays replaces the closing day and the payment due day of the
+// account with those of the input, a nil clearing the day it stands for. The model
+// checks them against the kind of the account: only a card has them. It is one
+// statement, which the table's checks guard too, so it needs no database
+// transaction. The account may be archived.
+func (s *Service) SetAccountStatementDays(ctx context.Context, in usecase.SetAccountStatementDaysInput) (usecase.Account, error) {
+	account, err := s.accounts.Get(ctx, in.ID)
+	if err != nil {
+		return usecase.Account{}, fmt.Errorf("account %s: %w", in.ID, err)
+	}
+	next, err := account.WithStatementDays(in.ClosingDay, in.PaymentDueDay)
+	if err != nil {
+		return usecase.Account{}, fmt.Errorf("account %q: %w", account.Name, err)
+	}
+	stored, err := s.accounts.SetStatementDays(ctx, next.ID, next.ClosingDay, next.PaymentDueDay)
+	if err != nil {
+		return usecase.Account{}, fmt.Errorf("set the days of account %q: %w", account.Name, err)
+	}
+	return toAccount(stored), nil
+}
+
 func toAccount(a model.Account) usecase.Account {
 	return usecase.Account{
 		ID:            a.ID,
 		Name:          a.Name,
 		InstitutionID: a.InstitutionID,
 		Kind:          string(a.Kind),
+		ClosingDay:    a.ClosingDay,
+		PaymentDueDay: a.PaymentDueDay,
 		CreatedAt:     a.CreatedAt,
 		ArchivedAt:    a.ArchivedAt,
 	}

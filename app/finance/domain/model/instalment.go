@@ -428,7 +428,9 @@ func (p InstalmentPlan) Reschedule(r RescheduleParams) (InstalmentPlan, error) {
 // and each period is what InstalmentSchedule.periods says. The principal that a
 // period charges is never an expense, and the interest is one on the day it is
 // charged. A party cannot pay in instalments (ErrInstalmentsWithPaidBy), and the
-// instrument must be a currency (ErrNotCurrency).
+// instrument must be a currency (ErrNotCurrency). The origin of a plan has no
+// posting date, nor has a period, whose day is the day the institution bills it
+// already: a PostedOn is ErrPartOfPlan.
 func NewInstalmentExpense(p ExpenseParams, s InstalmentSchedule) (InstalmentPlan, error) {
 	switch {
 	case p.PaidBy != nil:
@@ -437,6 +439,9 @@ func NewInstalmentExpense(p ExpenseParams, s InstalmentSchedule) (InstalmentPlan
 		return InstalmentPlan{}, ErrNoPayer
 	case !p.Instrument.IsCurrency:
 		return InstalmentPlan{}, fmt.Errorf("%w: an instalment plan is counted in a currency, and %s is not one", ErrNotCurrency, p.Instrument.Code)
+	case p.PostedOn != nil:
+		return InstalmentPlan{}, fmt.Errorf("%w: an expense paid in instalments has no posting date: the origin of a plan has none, and the days of the periods are the days the institution bills them",
+			ErrPartOfPlan)
 	}
 	h, postings, total, err := expensePostings(p, BookInstalment)
 	if err != nil {

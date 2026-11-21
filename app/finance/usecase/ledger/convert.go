@@ -17,6 +17,7 @@ func toTransaction(t model.Transaction) usecase.Transaction {
 		Status:         string(t.Status),
 		OccurredOn:     t.OccurredOn,
 		OccurredAt:     clone(t.OccurredAt),
+		PostedOn:       clone(t.PostedOn),
 		Description:    t.Description,
 		Merchant:       t.Merchant,
 		ProjectID:      clone(t.ProjectID),

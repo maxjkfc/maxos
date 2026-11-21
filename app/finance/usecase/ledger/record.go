@@ -83,6 +83,7 @@ func (s *Service) expense(ctx context.Context, h model.Header, in usecase.Record
 		BaseCurrency: base,
 		Lines:        lines,
 		Shares:       shares,
+		PostedOn:     in.PostedOn,
 	}, nil
 }
 

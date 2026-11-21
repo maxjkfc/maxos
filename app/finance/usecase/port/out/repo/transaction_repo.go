@@ -50,6 +50,37 @@ type BalanceFilter struct {
 	Day time.Time
 }
 
+// StatementFilter selects the statement TransactionRepo.Statement reads.
+type StatementFilter struct {
+	// AccountID is the card the statement is of.
+	AccountID uuid.UUID
+	// Period is the days of the statement, both ends included: the days after the
+	// previous closing date up to its closing date. It is the model's to work out
+	// from the closing day of the card.
+	Period model.StatementPeriod
+	// Today is the day the statement is counted up to, which is in it: what has a
+	// statement date after it counts from that day, and is not on the statement yet.
+	// It is a date as model.DateOf makes it.
+	Today time.Time
+}
+
+// StatementContent is what one statement holds, as TransactionRepo.Statement reads
+// it.
+type StatementContent struct {
+	// Figures are the figures of each instrument that was posted to on the
+	// statement or carried a balance into it, by instrument code.
+	Figures []model.StatementFigures
+	// Transactions are the confirmed transactions on the statement, with their
+	// postings and tags: those with an account posting to the card whose statement
+	// date is on the statement and not after today. By statement date, oldest first,
+	// then the day they happened, oldest first, then the one made first.
+	Transactions []model.Transaction
+	// Drafts is how many drafts with an account posting to the card have a statement
+	// date on the statement. They are not in Figures nor in Transactions, and today
+	// does not limit them.
+	Drafts int
+}
+
 // TransactionRepo stores transactions with their postings and tags, and works out
 // balances from them.
 //
@@ -58,7 +89,7 @@ type BalanceFilter struct {
 // transaction in several statements and relies on the database to check, when
 // its transaction commits, that the postings add up to zero; and GetForUpdate,
 // whose lock lasts until its transaction ends. The only transaction a repo opens
-// is the read-only snapshot of List.
+// is the read-only snapshot of List and of Statement.
 type TransactionRepo interface {
 	// Insert stores the transaction, a draft, with its postings and tags, and
 	// returns it as stored, including the fields the store assigns (CreatedAt). A
@@ -142,4 +173,31 @@ type TransactionRepo interface {
 	// every plan's otherwise, and the finished ones too. A draft plan and a void one
 	// are not in it. day is a date as model.DateOf makes it.
 	InstalmentPlans(ctx context.Context, accountID *uuid.UUID, day time.Time) ([]model.InstalmentPlanSummary, error)
+	// SetPostedOn sets the posting date of the transaction, or clears it with nil,
+	// and returns the transaction, or returns model.ErrNotFound. It checks nothing
+	// that the model checks: whether the transaction may have one is for the model.
+	// The table refuses a date before the day the transaction happened, and any date
+	// on a transaction of an instalment plan. The use case calls it with the
+	// transaction locked by GetForUpdate, in the database transaction it holds the
+	// lock in.
+	SetPostedOn(ctx context.Context, id uuid.UUID, postedOn *time.Time) (model.Transaction, error)
+	// StatementFigures returns what each instrument did on each of the statements of
+	// the account, one list for each of the periods, in the order the periods are
+	// given: the figures of the instruments, by instrument code. A transaction counts
+	// on the statement whose days include its statement date, the posting date when
+	// it has one and otherwise the day it happened, when it is a confirmed one with an
+	// account posting to the account; Previous is what the postings with a statement
+	// date before the statement add up to. What has a statement date after today is
+	// not counted, nor is what is after the day a statement closes. An instrument is
+	// listed for a statement when it was posted to on it or has a Previous that is not
+	// zero. It is one statement of SQL, so every figure of every statement comes from
+	// one snapshot: the Closing of one statement is the Previous of the next. today is
+	// a date as model.DateOf makes it.
+	StatementFigures(ctx context.Context, accountID uuid.UUID, periods []model.StatementPeriod, today time.Time) ([][]model.StatementFigures, error)
+	// Statement returns what one statement holds: its figures, as StatementFigures
+	// reads them, the transactions on it and how many drafts are waiting for it. It
+	// reads all of it in one snapshot, so that the transactions are those that the
+	// figures add up. Call it outside a database transaction, or inside one that is
+	// REPEATABLE READ or stricter, as for List.
+	Statement(ctx context.Context, f StatementFilter) (StatementContent, error)
 }

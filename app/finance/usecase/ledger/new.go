@@ -45,9 +45,10 @@ func New(
 // Module provides the use cases to the Fx graph as usecase.RecordExpense,
 // RecordIncome, RecordTransfer, RecordExchange, RecordTrade, RecordDealing,
 // RecordReward, RecordBillInstalment, SetOpeningBalance, Reconcile,
-// ConfirmTransactions, DiscardDraft, VoidTransaction, GetTransaction,
-// ListTransactions, GetInstalmentPlan, ListInstalmentPlans, GetBalances and
-// GetDealings, all backed by one Service. It needs a tx.Transactor, a
+// ConfirmTransactions, DiscardDraft, VoidTransaction, RescheduleInstalment,
+// SetPostingDate, GetTransaction, ListTransactions, GetInstalmentPlan,
+// ListInstalmentPlans, GetBalances, GetDealings, GetCardStatement and
+// ListCardStatements, all backed by one Service. It needs a tx.Transactor, a
 // repo.TransactionRepo, a repo.AccountRepo, a repo.InstrumentRepo, a
 // repo.CategoryRepo, a clock.Clock, and the catalog's usecase.VerifyReferences,
 // usecase.ResolveProjectDefaults, usecase.ResolveProjectArea and
@@ -74,5 +75,8 @@ func Module() fx.Option {
 		fx.As(new(usecase.ListInstalmentPlans)),
 		fx.As(new(usecase.GetBalances)),
 		fx.As(new(usecase.GetDealings)),
+		fx.As(new(usecase.SetPostingDate)),
+		fx.As(new(usecase.GetCardStatement)),
+		fx.As(new(usecase.ListCardStatements)),
 	))
 }

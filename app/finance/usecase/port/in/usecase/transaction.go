@@ -22,7 +22,13 @@ type Transaction struct {
 	// OccurredOn is the day it happened, at midnight UTC.
 	OccurredOn time.Time
 	// OccurredAt is the moment it happened, when that is known.
-	OccurredAt  *time.Time
+	OccurredAt *time.Time
+	// PostedOn is the posting date (入帳日): the day the institution put the
+	// transaction on a statement, at midnight UTC, when that is not the day it
+	// happened; nil means the day it happened. Only a transaction with a posting to a
+	// card has one. It decides which statement of the card the transaction is on and
+	// nothing else: balances, budgets and dealings go by OccurredOn.
+	PostedOn    *time.Time
 	Description string
 	Merchant    string
 	// ProjectID and AreaID are the project and the area it belongs to, when it has
@@ -229,6 +235,14 @@ type RecordExpenseInput struct {
 	// with PaidByPartyID (ErrInstalmentsWithPaidBy): a party paying on my behalf has
 	// no account to charge.
 	Instalments *InstalmentSchedule
+	// PostedOn, when set, is the posting date of the expense: the day the card's
+	// institution put it on a statement, when that is not the day it happened. Only
+	// the day it falls on counts, as its own location reads it, and it is not
+	// before OccurredOn (ErrPostedBeforeOccurred). It needs AccountID to be an
+	// account that is a card (ErrNoCardPosting) and is refused with Instalments
+	// (ErrPartOfPlan: a plan has no posting date). It can be set, changed and
+	// cleared later with SetPostingDate, also once the expense is confirmed.
+	PostedOn *time.Time
 }
 
 // RecordIncome records money earned: into an account, from one or more

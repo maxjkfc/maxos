@@ -13,13 +13,14 @@ func New(accounts repo.AccountRepo, institutions repo.InstitutionRepo) *Service 
 }
 
 // Module provides the use cases to the Fx graph as usecase.CreateAccount,
-// ArchiveAccount, ListAccounts and GetAccount, all backed by one Service. It
-// needs a repo.AccountRepo and a repo.InstitutionRepo.
+// ArchiveAccount, ListAccounts, GetAccount and SetAccountStatementDays, all backed
+// by one Service. It needs a repo.AccountRepo and a repo.InstitutionRepo.
 func Module() fx.Option {
 	return fx.Provide(fx.Annotate(New,
 		fx.As(new(usecase.CreateAccount)),
 		fx.As(new(usecase.ArchiveAccount)),
 		fx.As(new(usecase.ListAccounts)),
 		fx.As(new(usecase.GetAccount)),
+		fx.As(new(usecase.SetAccountStatementDays)),
 	))
 }

@@ -265,7 +265,7 @@ func sameTime(a, b *time.Time) bool {
 func (e *ledgerEnv) wantSame(name string, got, want model.Transaction) {
 	e.t.Helper()
 	if got.ID != want.ID || got.Kind != want.Kind || got.Status != want.Status ||
-		!got.OccurredOn.Equal(want.OccurredOn) || !sameTime(got.OccurredAt, want.OccurredAt) ||
+		!got.OccurredOn.Equal(want.OccurredOn) || !sameTime(got.OccurredAt, want.OccurredAt) || !sameTime(got.PostedOn, want.PostedOn) ||
 		got.Description != want.Description || got.Merchant != want.Merchant || got.IdempotencyKey != want.IdempotencyKey ||
 		!samePtr(got.ProjectID, want.ProjectID) || !samePtr(got.AreaID, want.AreaID) ||
 		!samePtr(got.PlanID, want.PlanID) || !sameInt(got.PlanSeq, want.PlanSeq) ||

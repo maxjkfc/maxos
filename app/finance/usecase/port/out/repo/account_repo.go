@@ -23,6 +23,11 @@ type AccountRepo interface {
 	// account that is already archived is returned as it is: the time it was
 	// archived does not change.
 	Archive(ctx context.Context, id uuid.UUID) (model.Account, error)
+	// SetStatementDays replaces the closing day and the payment due day of the
+	// account, a nil clearing the day it stands for, and returns the account, or
+	// returns model.ErrNotFound. It does not check them: the model does, and the
+	// table's CHECK constraints are the last guard.
+	SetStatementDays(ctx context.Context, id uuid.UUID, closingDay, paymentDueDay *int) (model.Account, error)
 	// Lock locks the account's row until the database transaction the context
 	// carries ends: another transaction that locks the same account waits for it,
 	// and then sees what it committed. It is how use cases that read about an
