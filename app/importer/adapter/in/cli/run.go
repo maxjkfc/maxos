@@ -181,7 +181,16 @@ func writeUnit(w *strings.Builder, u model.Unit, lines []int) {
 // account they move and how much, and the key they were recorded under, which is what
 // the user finds them by.
 func writeOrphans(w *strings.Builder, orphans []usecase.Orphan) {
-	for _, o := range orphans {
+	writeTransactions(w, orphans, false)
+}
+
+// statusText says whether a transaction of the import is a draft or confirmed.
+var statusText = map[string]string{"draft": "（草稿）", "confirmed": "（已確認）"}
+
+// writeTransactions says them so, and with whether each is a draft or confirmed when the
+// user is to do one thing with the drafts and another with the confirmed ones.
+func writeTransactions(w *strings.Builder, ts []usecase.Orphan, withStatus bool) {
+	for _, o := range ts {
 		kind := ledgerKindText[o.Kind]
 		if kind == "" {
 			kind = o.Kind
@@ -189,6 +198,9 @@ func writeOrphans(w *strings.Builder, orphans []usecase.Orphan) {
 		fmt.Fprintf(w, "  %s %s %s %s %s", o.Date.Format(time.DateOnly), kind, o.Account, o.Instrument, signedQuantity(o.Amount))
 		if o.Description != "" {
 			fmt.Fprintf(w, "「%s」", clip(o.Description, 24))
+		}
+		if withStatus {
+			fmt.Fprint(w, statusText[o.Status])
 		}
 		fmt.Fprintf(w, "\n    鍵：%s\n", o.Key)
 	}
@@ -386,7 +398,7 @@ func verifyText(w *strings.Builder, out usecase.VerifyOutput) {
 func RenderStatus(w io.Writer, out usecase.StatusOutput) error {
 	var b strings.Builder
 	if out.LaterStart != nil {
-		fmt.Fprintf(&b, "注意：%s\n", laterStartText(*out.LaterStart))
+		writeLaterStart(&b, *out.LaterStart, "注意：")
 		return flush(w, &b)
 	}
 	for _, warning := range out.Warnings {
@@ -424,7 +436,9 @@ func Refusal(w io.Writer, err error) error {
 	var out error
 	switch {
 	case errors.As(err, &later):
-		return errors.New(laterStartText(later.LaterStart))
+		writeLaterStart(&b, later.LaterStart, "")
+		out = fmt.Errorf("這份匯出從 %s 開始，帳本裡的匯入從 %s 開始，什麼都沒有動",
+			later.From.Format(time.DateOnly), later.LedgerFrom.Format(time.DateOnly))
 	case errors.As(err, &blocked):
 		blockedText(&b, blocked)
 		out = errors.New("對照檔還有要處理的項目，什麼都沒有寫入")
@@ -463,12 +477,26 @@ func Refusal(w io.Writer, err error) error {
 	return out
 }
 
-// laterStartText says, as the refusal and as the warning of status, that the export
-// begins after the import in the ledger does, and what is to be done about it: the
-// whole export is needed, and what the ledger has is right, so it is not to be voided.
-func laterStartText(l usecase.LaterStart) string {
-	return fmt.Sprintf("這份匯出從 %s 開始，帳本裡的匯入從 %s 開始。匯入需要完整的匯出，請改用完整的匯出；不要作廢帳本裡的交易",
-		l.From.Format(time.DateOnly), l.LedgerFrom.Format(time.DateOnly))
+// laterStartListLimit is how many of the transactions that are before an export are said.
+const laterStartListLimit = 20
+
+// writeLaterStart says, as the refusal and as the warning of status, that the export
+// begins after the import in the ledger does, with the transactions of the import that
+// are before it, the first of them, and the two things it can be: the export is not the
+// whole one, which the user replaces; or the user deleted or changed its first rows in
+// MOZE, and voids (discards, for drafts) the transactions that were made of them. The
+// opening balances are not among them, and nothing was changed.
+func writeLaterStart(w *strings.Builder, l usecase.LaterStart, prefix string) {
+	fmt.Fprintf(w, "%s這份匯出從 %s 開始，帳本裡的匯入從 %s 開始，而且帳本裡有 %d 筆匯入的交易，日期早於這份匯出的第一列：\n",
+		prefix, l.From.Format(time.DateOnly), l.LedgerFrom.Format(time.DateOnly), len(l.Before))
+	writeTransactions(w, l.Before[:min(len(l.Before), laterStartListLimit)], true)
+	if more := len(l.Before) - laterStartListLimit; more > 0 {
+		fmt.Fprintf(w, "  …另有 %d 筆\n", more)
+	}
+	fmt.Fprintln(w, "有兩種可能：")
+	fmt.Fprintln(w, "  這份匯出的開頭比較晚：請改用完整的匯出")
+	fmt.Fprintln(w, "  你在 MOZE 刪掉或改了最前面的列：請作廢（草稿則捨棄）上面這幾筆，再執行一次")
+	fmt.Fprintln(w, "什麼都沒有動")
 }
 
 // partialText says of the month that the export stops in that it is compared only up to

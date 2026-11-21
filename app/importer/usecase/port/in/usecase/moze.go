@@ -188,7 +188,8 @@ type VoidedUnit struct {
 
 // Orphan is a transaction the import recorded that no unit of the plan accounts for
 // any more: the row it came of was edited (an edited row is another row, with another
-// key), or deleted, or is left out now.
+// key), or deleted, or is left out now. It is also how a transaction of the import is
+// named where the user is to find it in the ledger (see LaterStart).
 type Orphan struct {
 	// Key is the idempotency key it was recorded under.
 	Key string
@@ -227,14 +228,22 @@ type Uncovered struct {
 
 // LaterStart says that an export begins after the import in the ledger does: the
 // ledger has transactions of the import dated before the first day of the export, the
-// opening balances apart, which are dated from the first row of their account. The
-// export is then a part of the history and not the whole of it, and what it says of
-// the ledger is not meant for it: the import works on the whole export only, and what
-// the ledger has is correct, so it is not to be voided.
+// opening balances apart, which are dated from the first row of their account. There are
+// two ways that can be. The export is a part of the history and not the whole of it: what
+// it says of the ledger is not meant for it, the import works on the whole export only,
+// and what the ledger has is correct, so it is not to be voided. Or the user deleted or
+// changed the first rows in MOZE, so that the export begins later than it did: the
+// transactions that were made of them are what is before the export, and the user voids
+// them (discards them, for drafts) to go on. The import cannot tell which it is, and
+// names both, with the transactions.
 type LaterStart struct {
 	// From is the first day of the export, and LedgerFrom the first day that the
 	// ledger has anything of the import.
 	From, LedgerFrom time.Time
+	// Before are the transactions of the import, drafts and confirmed ones, not void and
+	// not opening balances, that are dated before the first day of the export, the oldest
+	// first.
+	Before []Orphan
 }
 
 // ProjectDifference is a project that the ledger had already, whose default area is
@@ -483,8 +492,8 @@ type LaterStartError struct {
 }
 
 func (e *LaterStartError) Error() string {
-	return fmt.Sprintf("%v: the export begins on %s, the import in the ledger on %s; the import needs the whole export, and nothing is to be voided",
-		ErrLaterStart, e.From.Format(time.DateOnly), e.LedgerFrom.Format(time.DateOnly))
+	return fmt.Sprintf("%v: the export begins on %s, the import in the ledger on %s, and the ledger has %d transactions of the import before the export; nothing was made or changed",
+		ErrLaterStart, e.From.Format(time.DateOnly), e.LedgerFrom.Format(time.DateOnly), len(e.Before))
 }
 
 // Is tells ErrLaterStart.

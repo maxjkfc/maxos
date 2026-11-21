@@ -2,7 +2,6 @@ package moze
 
 import (
 	"slices"
-	"sort"
 
 	finance "github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
@@ -28,12 +27,7 @@ func (st *state) unaccounted() []finance.Transaction {
 		}
 		out = append(out, t)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].OccurredOn.Equal(out[j].OccurredOn) {
-			return out[i].OccurredOn.Before(out[j].OccurredOn)
-		}
-		return out[i].IdempotencyKey < out[j].IdempotencyKey
-	})
+	oldestFirst(out)
 	return out
 }
 
@@ -72,8 +66,13 @@ func (st *state) uncovered() usecase.Uncovered {
 
 // orphanViews are the orphans as the use cases report them.
 func (st *state) orphanViews() []usecase.Orphan {
+	return st.viewsOf(st.orphans())
+}
+
+// viewsOf are transactions of the import as the use cases report them.
+func (st *state) viewsOf(ts []finance.Transaction) []usecase.Orphan {
 	var out []usecase.Orphan
-	for _, t := range st.orphans() {
+	for _, t := range ts {
 		out = append(out, st.orphanOf(t))
 	}
 	return out

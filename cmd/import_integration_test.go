@@ -217,6 +217,7 @@ type ledger struct {
 	ConfirmTransactions usecase.ConfirmTransactions
 	ListCategories      usecase.ListCategories
 	VoidTransaction     usecase.VoidTransaction
+	DiscardDraft        usecase.DiscardDraft
 	ListProjects        catalog.ListProjects
 }
 

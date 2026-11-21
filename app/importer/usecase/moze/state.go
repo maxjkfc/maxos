@@ -53,12 +53,12 @@ type state struct {
 	// of (see cuts).
 	instalmentUnits map[string]string
 	plansGone       []planGone
-	// lastPeriod is the day of the last period of each plan of instalments the ledger has,
-	// by the id of its origin; cuts are the plans of the import that the plan does not have
-	// and whose periods run past the last day of the export, by the id of their origin: the
-	// export has a part of them (see findCuts).
-	lastPeriod map[uuid.UUID]time.Time
-	cuts       map[uuid.UUID]cutPlan
+	// periods are the days each plan of instalments the ledger has is charged, by the id of
+	// its origin; cuts are the plans of the import that the plan does not have and whose
+	// periods run past the last day of the export, by the id of their origin: the export has
+	// a part of them (see findCuts).
+	periods map[uuid.UUID][]time.Time
+	cuts    map[uuid.UUID]cutPlan
 	// first and last are the first and the last day that the export covers, and covers
 	// says whether it covers any: the days of its rows, and of its units that are of
 	// rows with none (an opening balance is dated from the first row of its account).
@@ -90,7 +90,8 @@ type planGone struct {
 // openState reads the transactions of the ledger that the import recorded, and nothing
 // else, and refuses the export that begins after the import in the ledger does (a
 // *usecase.LaterStartError, with the state, whose transactions it has read): that is
-// before anything is made or changed.
+// before anything is made or changed. The refusal names the transactions that are before
+// the export, and for that it reads the accounts and the instruments too.
 func (a *Importer) openState(ctx context.Context, plan model.Plan) (*state, error) {
 	st := &state{
 		accountIDs:      map[string]uuid.UUID{},
@@ -98,7 +99,7 @@ func (a *Importer) openState(ctx context.Context, plan model.Plan) (*state, erro
 		instrumentIDs:   map[string]uuid.UUID{},
 		instrumentCodes: map[uuid.UUID]string{},
 		byKey:           map[string]finance.Transaction{},
-		lastPeriod:      map[uuid.UUID]time.Time{},
+		periods:         map[uuid.UUID][]time.Time{},
 		cuts:            map[uuid.UUID]cutPlan{},
 		refs:            newRefs(),
 		discarded:       map[uuid.UUID]bool{},
@@ -106,10 +107,18 @@ func (a *Importer) openState(ctx context.Context, plan model.Plan) (*state, erro
 	if err := st.readTransactions(ctx, a); err != nil {
 		return nil, err
 	}
-	if later := st.laterStart(plan); later != nil {
-		return st, &usecase.LaterStartError{LaterStart: *later}
+	later, before := st.laterStart(plan)
+	if len(before) == 0 {
+		return st, nil
 	}
-	return st, nil
+	if err := st.readAccounts(ctx, a); err != nil {
+		return st, err
+	}
+	if err := st.readInstruments(ctx, a); err != nil {
+		return st, err
+	}
+	later.Before = st.viewsOf(before)
+	return st, &usecase.LaterStartError{LaterStart: later}
 }
 
 // complete reads the accounts, the instruments and the catalog by the names the plan
@@ -117,21 +126,11 @@ func (a *Importer) openState(ctx context.Context, plan model.Plan) (*state, erro
 // as the ledger has it where the export has only a part of a plan of instalments (see
 // adopt), which is the plan the use cases go on with.
 func (st *state) complete(ctx context.Context, a *Importer, plan model.Plan) (model.Plan, error) {
-	accounts, err := a.ledger.ListAccounts.ListAccounts(ctx, finance.ListAccountsInput{IncludeArchived: true})
-	if err != nil {
-		return plan, usecase.StepFailure(usecase.VerbList, usecase.ThingAccount, "", err)
+	if err := st.readAccounts(ctx, a); err != nil {
+		return plan, err
 	}
-	for _, acc := range accounts.Accounts {
-		st.accountIDs[acc.Name] = acc.ID
-		st.accountNames[acc.ID] = acc.Name
-	}
-	instruments, err := a.ledger.ListInstruments.ListInstruments(ctx, finance.ListInstrumentsInput{IncludeArchived: true})
-	if err != nil {
-		return plan, usecase.StepFailure(usecase.VerbList, usecase.ThingInstrument, "", err)
-	}
-	for _, in := range instruments.Instruments {
-		st.instrumentIDs[in.Code] = in.ID
-		st.instrumentCodes[in.ID] = in.Code
+	if err := st.readInstruments(ctx, a); err != nil {
+		return plan, err
 	}
 	if err := st.readCatalog(ctx, a); err != nil {
 		return plan, err
@@ -142,8 +141,34 @@ func (st *state) complete(ctx context.Context, a *Importer, plan model.Plan) (mo
 	return plan, nil
 }
 
+// readAccounts reads the accounts of the ledger, archived ones too, by name and by id.
+func (st *state) readAccounts(ctx context.Context, a *Importer) error {
+	accounts, err := a.ledger.ListAccounts.ListAccounts(ctx, finance.ListAccountsInput{IncludeArchived: true})
+	if err != nil {
+		return usecase.StepFailure(usecase.VerbList, usecase.ThingAccount, "", err)
+	}
+	for _, acc := range accounts.Accounts {
+		st.accountIDs[acc.Name] = acc.ID
+		st.accountNames[acc.ID] = acc.Name
+	}
+	return nil
+}
+
+// readInstruments reads the instruments of the ledger, archived ones too, by code and by id.
+func (st *state) readInstruments(ctx context.Context, a *Importer) error {
+	instruments, err := a.ledger.ListInstruments.ListInstruments(ctx, finance.ListInstrumentsInput{IncludeArchived: true})
+	if err != nil {
+		return usecase.StepFailure(usecase.VerbList, usecase.ThingInstrument, "", err)
+	}
+	for _, in := range instruments.Instruments {
+		st.instrumentIDs[in.Code] = in.ID
+		st.instrumentCodes[in.ID] = in.Code
+	}
+	return nil
+}
+
 // readTransactions lists every transaction of the ledger, a page at a time, and keeps
-// the ones the import recorded, and the day each plan of instalments is charged last.
+// the ones the import recorded, and the days the periods of each plan of instalments fall due.
 func (st *state) readTransactions(ctx context.Context, a *Importer) error {
 	for offset := 0; ; {
 		page, err := a.ledger.ListTransactions.ListTransactions(ctx, finance.ListTransactionsInput{Limit: finance.MaxListLimit, Offset: offset})
@@ -161,13 +186,13 @@ func (st *state) readTransactions(ctx context.Context, a *Importer) error {
 }
 
 // note keeps a transaction of the ledger that the import recorded, by its key, and the day
-// of a period of a plan of instalments, which is the last of the plan when it is the latest.
+// of a period of a plan of instalments, by the plan.
 func (st *state) note(t finance.Transaction) {
 	if strings.HasPrefix(t.IdempotencyKey, model.KeyPrefix) {
 		st.byKey[t.IdempotencyKey] = t
 	}
-	if t.PlanID != nil && t.PlanSeq != nil && *t.PlanSeq > 0 && t.OccurredOn.After(st.lastPeriod[*t.PlanID]) {
-		st.lastPeriod[*t.PlanID] = t.OccurredOn
+	if t.PlanID != nil && t.PlanSeq != nil && *t.PlanSeq > 0 {
+		st.periods[*t.PlanID] = append(st.periods[*t.PlanID], t.OccurredOn)
 	}
 }
 

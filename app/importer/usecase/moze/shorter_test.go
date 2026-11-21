@@ -2,6 +2,7 @@ package moze_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -166,9 +167,9 @@ func TestAPlanOfInstalmentsWhosePeriodsAllFellDueByTheEndOfTheExportIsStillAnOrp
 }
 
 // An export with no opening balance in it has nothing to say of the ones the ledger has,
-// which are not orphans for it: the days of an opening balance are not what it covers. The
-// balances it says are compared with the ledger's including them, the accounts having
-// started from them, so that the months agree.
+// which are not orphans for it, nor left out of what it covers: the openings are part of
+// the history it describes, which the accounts started from. The balances it says are
+// compared with the ledger's including them, so that the months agree.
 func TestAnExportWithNoOpeningBalanceDoesNotMakeOrphansOfTheOnesTheLedgerHas(t *testing.T) {
 	w := confirmedThrough(t, "2026-03")
 	w.export(within(fixture(), "", "2026-03-15", false))
@@ -178,8 +179,8 @@ func TestAnExportWithNoOpeningBalanceDoesNotMakeOrphansOfTheOnesTheLedgerHas(t *
 		t.Errorf("apply = orphans %d, removed %d, stale %d, want none: it is an export with no opening balance, not one that has deleted them",
 			len(out.Orphans), len(out.Removed), len(out.Stale))
 	}
-	if n, _, _ := w.ledger.importedOutside(func(d time.Time) bool { return d.Before(day("2026-01-06")) }); out.Uncovered.Count < n {
-		t.Errorf("uncovered = %+v, want the %d opening balances dated before the first row told with the rest", out.Uncovered, n)
+	if out.Uncovered.Count != 1 {
+		t.Errorf("uncovered = %+v, want only the plan of instalments that the export ends in the middle of: the opening balances are part of what it describes", out.Uncovered)
 	}
 	v, err := w.imp.Verify(context.Background(), usecase.VerifyInput{Files: w.files})
 	if err != nil || v.Unexplained != 0 || len(v.Months) != 3 || len(v.Orphans)+len(v.Stale) != 0 {
@@ -217,5 +218,89 @@ func TestTheOpeningBalanceOfAnAccountThatTheExportEndsBeforeIsLeftAlone(t *testi
 	}
 	if got := w.ledger.snapshot(); got != before {
 		t.Errorf("the ledger changed:\nbefore %s\nafter  %s", before, got)
+	}
+}
+
+// The rows that a plan the export ends in the middle of is made of are those of its
+// conversion, of its payments on the days its periods fall due, and the interest of those
+// days. An interest of the same account on another day is not its own: it is a unit, as it
+// is without the plan, and the ledger has it, so that it is not an orphan.
+func TestAnInterestRowThatIsNotThePlansIsNotClaimedByAPlanTheExportEndsInTheMiddleOf(t *testing.T) {
+	rows := fixture()
+	at := slices.IndexFunc(rows, func(r model.Row) bool { return r.Date.Equal(day("2026-04-15")) })
+	rows = slices.Insert(rows, at, row("2026-03-20 10:00", model.TypeInterest, "Card instalments", "TWD", "-3", cat("利息支出", "利息支出")))
+	w := newWorld(t, rows, fixtureMapping()).reviewed()
+	if out := w.apply(); len(out.Failed) != 0 {
+		t.Fatalf("apply failed: %+v", out.Failed)
+	}
+	for _, m := range []string{"2026-01", "2026-02", "2026-03"} {
+		w.mustConfirm(m)
+	}
+	before := w.ledger.snapshot()
+	w.export(within(rows, "", "2026-03-25", true))
+
+	out := w.apply()
+	if len(out.Orphans)+len(out.Removed)+len(out.Stale)+len(out.Blocked)+len(out.Failed) != 0 || sum(out.New)+sum(out.Updated)+sum(out.Revived) != 0 {
+		t.Errorf("apply = orphans %d, removed %d, stale %d, blocked %d, new %v, updated %v, want the interest of the 20th left as the expense it is",
+			len(out.Orphans), len(out.Removed), len(out.Stale), len(out.Blocked), out.New, out.Updated)
+	}
+	v, err := w.imp.Verify(context.Background(), usecase.VerifyInput{Files: w.files})
+	if err != nil || v.Unexplained != 0 || len(v.Orphans)+len(v.Stale)+len(v.Blocked) != 0 {
+		t.Errorf("verify = %d unexplained, orphans %d, stale %d, blocked %d, %v, want the months to agree", v.Unexplained, len(v.Orphans), len(v.Stale), len(v.Blocked), err)
+	}
+	if got := w.ledger.snapshot(); got != before {
+		t.Errorf("the ledger changed:\nbefore %s\nafter  %s", before, got)
+	}
+}
+
+// A plan whose conversion the export does not have is not one that the export has a part of:
+// the payments of it are there and the first row of it is not, so the rows that were its
+// conversion were deleted or edited, and the plan is an orphan like any other.
+func TestAPlanWhoseConversionTheExportHasNotIsAnOrphanAndNotOneItHasAPartOf(t *testing.T) {
+	w := confirmedThrough(t, "2026-03")
+	rows := slices.DeleteFunc(within(fixture(), "", "2026-03-15", true), func(r model.Row) bool { return r.Type == model.TypeBillInstalment })
+	w.export(rows)
+
+	if out := w.apply(); len(out.Orphans) < 1 {
+		t.Errorf("apply = orphans %d, want the plan, whose conversion the export has not, told as one", len(out.Orphans))
+	}
+}
+
+// An export that has no rows of the opening balances says nothing of them, and they are
+// part of the history it describes all the same: the accounts started from them. The ones
+// the ledger has as drafts are confirmed with the month they are dated in, like any other
+// unit, and not left as they are, which would hold the reconciliations of the month up.
+func TestAnExportWithNoOpeningRowsConfirmsTheOpeningDraftsTheLedgerHasWithTheirMonth(t *testing.T) {
+	w := applied(t)
+	openings := w.ledger.ofKind("opening")
+	if len(openings) == 0 {
+		t.Fatal("the ledger has no opening balance")
+	}
+	w.export(within(fixture(), "", "", false))
+
+	for _, m := range []string{"2026-01", "2026-02", "2026-03", "2026-04"} {
+		out, err := w.confirm(m)
+		if err != nil {
+			t.Fatalf("confirm %s = %v", m, err)
+		}
+		for _, a := range out.Adjustments {
+			if a.State == usecase.AdjustmentBlocked {
+				t.Errorf("confirm %s: the adjustment of %s on %s is blocked, want it reconciled", m, a.Adjustment.Account, a.Adjustment.Date.Format(time.DateOnly))
+			}
+		}
+		for _, o := range openings {
+			want := "draft"
+			if model.MonthOf(o.OccurredOn) <= m {
+				want = "confirmed"
+			}
+			if o.Status != want {
+				t.Errorf("after confirm %s the opening balance of %s is %s, want %s", m, o.OccurredOn.Format(time.DateOnly), o.Status, want)
+			}
+		}
+	}
+	v, err := w.imp.Verify(context.Background(), usecase.VerifyInput{Files: w.files})
+	if err != nil || v.Unexplained != 0 || len(v.Months) != 4 || len(v.Orphans)+len(v.Stale)+len(v.Blocked) != 0 {
+		t.Errorf("verify = %d months, %d unexplained, orphans %d, stale %d, blocked %d, %v, want the four months to agree",
+			len(v.Months), v.Unexplained, len(v.Orphans), len(v.Stale), len(v.Blocked), err)
 	}
 }

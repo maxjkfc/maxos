@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -351,29 +352,74 @@ func TestTheRefusalNamesWhatToPutRight(t *testing.T) {
 	}
 }
 
-// An export that begins after the import in the ledger does is refused with one sentence,
-// and status says the same as a warning: the whole export is needed, and what the ledger
-// has is not to be voided. Nothing else is said, and nothing that asks to void anything.
-func TestAnExportThatBeginsLateIsRefusedAndWarnedInOneSentence(t *testing.T) {
-	const want = "這份匯出從 2026-02-05 開始，帳本裡的匯入從 2026-01-04 開始。匯入需要完整的匯出，請改用完整的匯出；不要作廢帳本裡的交易"
-	later := usecase.LaterStart{From: day("2026-02-05"), LedgerFrom: day("2026-01-04")}
+// An export that begins after the import in the ledger does is refused with the
+// transactions of the import that are before it (twenty at most, then how many more are
+// not said), their status, and the two things that can be: an export that begins later,
+// which the user replaces; or the first rows deleted or changed in MOZE, whose
+// transactions the user voids (discards, for a draft). Status says the same as a warning.
+// Nothing was changed, which it says, and nothing of the opening balances is.
+func TestAnExportThatBeginsLateIsRefusedWithTheTransactionsBeforeItAndTheTwoWaysOut(t *testing.T) {
+	const (
+		shorter = "這份匯出的開頭比較晚：請改用完整的匯出"
+		deleted = "你在 MOZE 刪掉或改了最前面的列：請作廢（草稿則捨棄）上面這幾筆，再執行一次"
+	)
+	before := func(n int) []usecase.Orphan {
+		var out []usecase.Orphan
+		for i := range n {
+			status := "confirmed"
+			if i%2 == 1 {
+				status = "draft"
+			}
+			out = append(out, usecase.Orphan{
+				Key: fmt.Sprintf("moze:row-%02d", i), Status: status, Kind: "expense", Date: day("2026-01-03").AddDate(0, 0, i/5),
+				Account: "Cash", Instrument: "TWD", Amount: dec("-5"), Description: "Noodles",
+			})
+		}
+		return out
+	}
+	for _, tt := range []struct {
+		n    int
+		more string
+	}{{2, ""}, {20, ""}, {23, "  …另有 3 筆\n"}} {
+		later := usecase.LaterStart{From: day("2026-02-05"), LedgerFrom: day("2026-01-03"), Before: before(tt.n)}
+		var b strings.Builder
+		err := cli.Refusal(&b, &usecase.LaterStartError{LaterStart: later})
+		out := b.String()
+		wantError := "這份匯出從 2026-02-05 開始，帳本裡的匯入從 2026-01-03 開始，什麼都沒有動"
+		if err == nil || err.Error() != wantError {
+			t.Errorf("%d transactions: Refusal = %v, want %q", tt.n, err, wantError)
+		}
+		for _, want := range []string{
+			fmt.Sprintf("這份匯出從 2026-02-05 開始，帳本裡的匯入從 2026-01-03 開始，而且帳本裡有 %d 筆匯入的交易，日期早於這份匯出的第一列：\n", tt.n),
+			"  2026-01-03 支出 Cash TWD -5「Noodles」（已確認）\n    鍵：moze:row-00\n",
+			"  2026-01-03 支出 Cash TWD -5「Noodles」（草稿）\n    鍵：moze:row-01\n",
+			"有兩種可能：\n  " + shorter + "\n  " + deleted + "\n什麼都沒有動\n",
+			tt.more,
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%d transactions: the refusal does not say %q:\n%s", tt.n, want, out)
+			}
+		}
+		if listed := strings.Count(out, "鍵：moze:row-"); listed != min(tt.n, 20) {
+			t.Errorf("%d transactions: the refusal lists %d, want %d", tt.n, listed, min(tt.n, 20))
+		}
+		if tt.more == "" && strings.Contains(out, "另有") {
+			t.Errorf("%d transactions: the refusal says there are more:\n%s", tt.n, out)
+		}
+		if strings.Contains(out, "期初餘額") {
+			t.Errorf("%d transactions: the refusal says opening balances:\n%s", tt.n, out)
+		}
+		for _, sentence := range []string{shorter, deleted, strings.SplitN(out, "：\n", 2)[0]} {
+			if asciiSentence.MatchString(sentence) {
+				t.Errorf("the sentence has English words: %q", sentence)
+			}
+		}
 
-	var b strings.Builder
-	err := cli.Refusal(&b, &usecase.LaterStartError{LaterStart: later})
-	if err == nil || err.Error() != want || b.Len() != 0 {
-		t.Errorf("Refusal = %v, printed %q, want %q and nothing printed", err, b.String(), want)
-	}
-	if asciiSentence.MatchString(want) {
-		t.Errorf("the sentence has English words: %q", want)
-	}
-
-	b.Reset()
-	if err := cli.RenderStatus(&b, usecase.StatusOutput{LaterStart: &later}); err != nil || b.String() != "注意："+want+"\n" {
-		t.Errorf("status printed %q (%v), want the sentence as a warning and nothing else", b.String(), err)
-	}
-	// Nothing that asks the user to void anything but the sentence's own "do not".
-	if rest := strings.ReplaceAll(b.String(), "不要作廢帳本裡的交易", ""); strings.Contains(rest, "作廢") {
-		t.Errorf("status asks to void:\n%s", b.String())
+		// Status says all of it as a warning, and nothing else.
+		var status strings.Builder
+		if err := cli.RenderStatus(&status, usecase.StatusOutput{LaterStart: &later}); err != nil || status.String() != "注意："+out {
+			t.Errorf("%d transactions: status printed (%v):\n%s\nwant the refusal as a warning", tt.n, err, status.String())
+		}
 	}
 }
 
