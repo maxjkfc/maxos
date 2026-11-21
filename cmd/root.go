@@ -26,6 +26,6 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage: true,
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.AddCommand(newMigrateCmd(), newServeCmd(), newMCPStdioCmd())
+	root.AddCommand(newMigrateCmd(), newServeCmd(), newMCPStdioCmd(), newImportCmd())
 	return root
 }

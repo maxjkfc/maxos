@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -70,4 +71,24 @@ func Load(requireAccess bool) (Config, error) {
 	}
 	c.Timezone = loc
 	return c, nil
+}
+
+// MozeDirVariable names the environment variable that says where the files of a MOZE
+// import are.
+const MozeDirVariable = "MAXOS_MOZE_DIR"
+
+// MozeDir is the directory that holds the files of a MOZE import: the export
+// (MOZE_*.csv, the newest of them), the mapping (mapping.yaml) and the rates
+// (rates.csv). MAXOS_MOZE_DIR, when set, names it; otherwise it is
+// ~/.config/maxos/moze. It is read apart from Load, which needs the database: the
+// plan of an import is made with none.
+func MozeDir() (string, error) {
+	if dir := strings.TrimSpace(os.Getenv(MozeDirVariable)); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("%s is not set, and the home directory is not known: %w", MozeDirVariable, err)
+	}
+	return filepath.Join(home, ".config", "maxos", "moze"), nil
 }

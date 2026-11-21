@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
@@ -25,6 +26,11 @@ import (
 	financeclock "github.com/maxjkfc/maxos/app/finance/usecase/port/out/clock"
 	financerepo "github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
 	financetx "github.com/maxjkfc/maxos/app/finance/usecase/port/out/tx"
+	importerfile "github.com/maxjkfc/maxos/app/importer/adapter/out/file"
+	"github.com/maxjkfc/maxos/app/importer/usecase/moze"
+	importermapping "github.com/maxjkfc/maxos/app/importer/usecase/port/out/mapping"
+	importerrates "github.com/maxjkfc/maxos/app/importer/usecase/port/out/rates"
+	importersource "github.com/maxjkfc/maxos/app/importer/usecase/port/out/source"
 	inboxmcp "github.com/maxjkfc/maxos/app/inbox/adapter/in/mcp"
 	inboxpg "github.com/maxjkfc/maxos/app/inbox/adapter/out/persistence/postgres"
 	"github.com/maxjkfc/maxos/app/inbox/usecase/capture"
@@ -53,6 +59,8 @@ func InfraModule() fx.Option {
 		// only repeat them.
 		fx.NopLogger,
 		fx.Provide(log.New, newPool, newClock),
+		// The timezone as a *time.Location, for what reads the time of day of a record.
+		fx.Provide(newLocation),
 	)
 }
 
@@ -60,6 +68,12 @@ func InfraModule() fx.Option {
 // the timezone the application is configured with (MAXOS_TIMEZONE).
 func newClock(cfg config.Config) financeclock.Clock {
 	return clock.New(cfg.Timezone)
+}
+
+// newLocation is where the user lives (MAXOS_TIMEZONE): the use cases that read the
+// time of day of a record, as the importer does, read it there.
+func newLocation(cfg config.Config) *time.Location {
+	return cfg.Timezone
 }
 
 // newPool builds the pool and ties it to the app: the database is checked when
@@ -140,6 +154,22 @@ func FinanceModule() fx.Option {
 		financecategory.Module(),
 		financeledger.Module(),
 		financebudget.Module(),
+	)
+}
+
+// ImporterModule wires the importer context: the adapters that read the MOZE export,
+// the mapping and the rates, and its use cases. The use cases that work on the
+// ledger need CatalogModule, FinanceModule and the pool, which InfraModule provides,
+// and the *time.Location of the application; planning needs none of them, so
+// `import moze plan` runs with no database at all.
+func ImporterModule() fx.Option {
+	return fx.Module("importer",
+		fx.Provide(
+			fx.Annotate(importerfile.NewMozeCSV, fx.As(new(importersource.Source))),
+			fx.Annotate(importerfile.NewMappingYAML, fx.As(new(importermapping.Store))),
+			fx.Annotate(importerfile.NewRatesCSV, fx.As(new(importerrates.Store))),
+		),
+		moze.Module(),
 	)
 }
 
