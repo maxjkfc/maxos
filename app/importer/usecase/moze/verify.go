@@ -6,7 +6,8 @@ import (
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/in/usecase"
 )
 
-// Verify compares the balances of every month that is confirmed so far. A month is
+// Verify compares the balances of every month that is confirmed so far: at the end of the
+// month, or on the last day of the export for the month the export stops in. A month is
 // confirmed when everything the plan records in it is confirmed (or voided, which is
 // the user's say), and the balance adjustments of it are made; the months are
 // looked at in order, up to the first that is not: one that has a draft, a unit not
@@ -14,7 +15,8 @@ import (
 // unit whose confirmed version is not what the plan says now, which Verify reports. It
 // names the transactions of the import that no unit of the plan accounts for as well,
 // on days the export covers: a confirmed one counts toward the balances, and is what the
-// differences of a month can come of.
+// differences of a month can come of. An export that begins after the import in the
+// ledger does is refused first.
 func (a *Importer) Verify(ctx context.Context, in usecase.VerifyInput) (usecase.VerifyOutput, error) {
 	var out usecase.VerifyOutput
 	ld, err := a.inputs.load(ctx, in.Files)
@@ -23,10 +25,14 @@ func (a *Importer) Verify(ctx context.Context, in usecase.VerifyInput) (usecase.
 	}
 	plan := ld.plan
 	out.Warnings = plan.Warnings
+	st, err := a.openState(ctx, plan)
+	if err != nil {
+		return out, err
+	}
 	if plan.Blocked() {
 		return out, &usecase.BlockedError{Plan: plan}
 	}
-	st, err := a.readState(ctx, plan)
+	plan, err = st.complete(ctx, a, plan)
 	if err != nil {
 		return out, err
 	}

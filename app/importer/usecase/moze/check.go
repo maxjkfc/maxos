@@ -15,10 +15,19 @@ import (
 // confirmed and dated up to that day, which is how the export's own balance is made
 // up, so that what the import recorded and confirmed is what is compared; what the
 // plan does not record is Unrecorded, and is what a difference can be explained by.
+//
+// The month that the export stops in, before its end, is compared as of the last day of
+// the export: that is all the export says of it, and what the ledger has of the days after
+// it, from a longer export, is not what it is to be compared with.
 func (a *Importer) check(ctx context.Context, plan model.Plan, st *state, month string) (model.MonthCheck, error) {
 	end, err := model.MonthEnd(month)
 	if err != nil {
 		return model.MonthCheck{}, err
+	}
+	_, last := plan.Days()
+	partial := model.MonthOf(last) == month && last.Before(end)
+	if partial {
+		end = last
 	}
 	balances, err := a.ledger.GetBalances.GetBalances(ctx, finance.GetBalancesInput{AsOf: &end})
 	if err != nil {
@@ -46,7 +55,7 @@ func (a *Importer) check(ctx context.Context, plan model.Plan, st *state, month 
 			all[pair] = decimal.Zero
 		}
 	}
-	check := model.MonthCheck{Month: month, End: end, Decimals: map[string]int{}}
+	check := model.MonthCheck{Month: month, End: end, Partial: partial, Decimals: map[string]int{}}
 	for _, pair := range all.Pairs() {
 		line := model.BalanceLine{
 			Account:    pair.Account,

@@ -434,6 +434,7 @@ func (f *fakeLedger) ListTransactions(_ context.Context, in finance.ListTransact
 	for _, t := range f.txns {
 		if in.Status == "" || t.Status == in.Status {
 			all = append(all, t.Transaction)
+			all = append(all, t.periods()...)
 		}
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].OccurredOn.After(all[j].OccurredOn) })
@@ -443,6 +444,25 @@ func (f *fakeLedger) ListTransactions(_ context.Context, in finance.ListTransact
 	}
 	end := min(in.Offset+limit, len(all))
 	return finance.ListTransactionsOutput{Transactions: all[min(in.Offset, len(all)):end], HasMore: end < len(all)}, nil
+}
+
+// periods are the transactions that charge the periods of a plan of instalments, which the
+// real ledger lists beside its origin, each on the day it falls due and with the status
+// of the plan. The fake keeps the whole plan in its origin, with a delta for each period
+// on the day it falls due, so they are made here, and have no deltas of their own.
+func (s *stored) periods() []finance.Transaction {
+	if s.Kind != "instalment" || len(s.deltas) < 2 {
+		return nil
+	}
+	var out []finance.Transaction
+	for i, d := range s.deltas[1:] {
+		origin, seq := s.ID, i+1
+		out = append(out, finance.Transaction{
+			ID: uuid.NewSHA1(s.ID, []byte(fmt.Sprint(seq))), Kind: "instalment", Status: s.Status, OccurredOn: d.on,
+			IdempotencyKey: fmt.Sprintf("instalment:%s:%d", s.IdempotencyKey, seq), PlanID: &origin, PlanSeq: &seq, CreatedAt: s.CreatedAt,
+		})
+	}
+	return out
 }
 
 // balance is what the account holds of the instrument on the day: the confirmed

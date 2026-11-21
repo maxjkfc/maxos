@@ -350,3 +350,58 @@ func TestTheRefusalNamesWhatToPutRight(t *testing.T) {
 		t.Errorf("the refusal of a mapping with guesses = %v, want it to say how many", err)
 	}
 }
+
+// An export that begins after the import in the ledger does is refused with one sentence,
+// and status says the same as a warning: the whole export is needed, and what the ledger
+// has is not to be voided. Nothing else is said, and nothing that asks to void anything.
+func TestAnExportThatBeginsLateIsRefusedAndWarnedInOneSentence(t *testing.T) {
+	const want = "這份匯出從 2026-02-05 開始，帳本裡的匯入從 2026-01-04 開始。匯入需要完整的匯出，請改用完整的匯出；不要作廢帳本裡的交易"
+	later := usecase.LaterStart{From: day("2026-02-05"), LedgerFrom: day("2026-01-04")}
+
+	var b strings.Builder
+	err := cli.Refusal(&b, &usecase.LaterStartError{LaterStart: later})
+	if err == nil || err.Error() != want || b.Len() != 0 {
+		t.Errorf("Refusal = %v, printed %q, want %q and nothing printed", err, b.String(), want)
+	}
+	if asciiSentence.MatchString(want) {
+		t.Errorf("the sentence has English words: %q", want)
+	}
+
+	b.Reset()
+	if err := cli.RenderStatus(&b, usecase.StatusOutput{LaterStart: &later}); err != nil || b.String() != "注意："+want+"\n" {
+		t.Errorf("status printed %q (%v), want the sentence as a warning and nothing else", b.String(), err)
+	}
+	// Nothing that asks the user to void anything but the sentence's own "do not".
+	if rest := strings.ReplaceAll(b.String(), "不要作廢帳本裡的交易", ""); strings.Contains(rest, "作廢") {
+		t.Errorf("status asks to void:\n%s", b.String())
+	}
+}
+
+// The month that an export stops in is compared as of the last day of the export, and says so.
+func TestTheMonthAnExportStopsInSaysItIsOnlyThereToTheLastDay(t *testing.T) {
+	line := func(partial bool) model.MonthCheck {
+		return model.MonthCheck{
+			Month: "2026-06", End: day("2026-06-15"), Partial: partial, Decimals: map[string]int{"TWD": 0},
+			Lines: []model.BalanceLine{{Account: "Cash", Instrument: "TWD", Ledger: dec("5"), Expected: dec("5")}},
+		}
+	}
+	var b strings.Builder
+	if err := cli.RenderConfirm(&b, usecase.ConfirmOutput{Month: "2026-06", Check: line(true)}); err != nil ||
+		!strings.Contains(b.String(), "2026-06 這個月只到 2026-06-15（匯出的最後一天），帳本餘額與 CSV 預期餘額：全部吻合") || strings.Contains(b.String(), "月底") {
+		t.Errorf("confirm of a month the export stops in printed (%v):\n%s", err, b.String())
+	}
+	b.Reset()
+	if err := cli.RenderVerify(&b, usecase.VerifyOutput{Months: []model.MonthCheck{line(true)}}); err != nil ||
+		!strings.Contains(b.String(), "2026-06：全部吻合（1 個帳戶與標的），這個月只到 2026-06-15（匯出的最後一天）") {
+		t.Errorf("verify of a month the export stops in printed (%v):\n%s", err, b.String())
+	}
+	b.Reset()
+	if err := cli.RenderConfirm(&b, usecase.ConfirmOutput{Month: "2026-06", Check: line(false)}); err != nil ||
+		!strings.Contains(b.String(), "2026-06 月底（2026-06-15）帳本餘額與 CSV 預期餘額：全部吻合") || strings.Contains(b.String(), "只到") {
+		t.Errorf("confirm of a month the export goes to the end of printed (%v):\n%s", err, b.String())
+	}
+	b.Reset()
+	if err := cli.RenderVerify(&b, usecase.VerifyOutput{Months: []model.MonthCheck{line(false)}}); err != nil || strings.Contains(b.String(), "只到") {
+		t.Errorf("verify of a month the export goes to the end of printed (%v):\n%s", err, b.String())
+	}
+}

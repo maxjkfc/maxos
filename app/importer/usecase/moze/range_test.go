@@ -11,12 +11,12 @@ import (
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/in/usecase"
 )
 
-// An export is the whole history only when the user makes it so. One that ends earlier,
-// or begins later, than the export that was applied before says nothing of the days it
-// does not reach: what the ledger has of those days is not what it says should not be
-// there, so it is neither an orphan nor removed. What it does say of the days it reaches
-// is said as before: a month in the middle that it has no rows of is a month whose
-// transactions are orphans.
+// An export is the whole history only when the user makes it so. One that ends earlier
+// than the export that was applied before says nothing of the days it does not reach:
+// what the ledger has of those days is not what it says should not be there, so it is
+// neither an orphan nor removed. What it does say of the days it reaches is said as
+// before: a month in the middle that it has no rows of is a month whose transactions are
+// orphans. One that begins later is refused (see later_test.go).
 
 // within keeps the rows of an export that are dated from one day to another ("" for no
 // limit), and those that have no day (the openings) when keepOpenings is true.
@@ -98,33 +98,6 @@ func TestAnExportThatEndsEarlierLeavesWhatTheLedgerHasOfLaterDaysAloneAndSaysSo(
 	}
 }
 
-func TestAnExportThatBeginsLaterLeavesWhatTheLedgerHasOfEarlierDaysAloneAndSaysSo(t *testing.T) {
-	w := applied(t)
-	w.mustConfirm("2026-01")
-	earlier := func(d time.Time) bool { return d.Before(day("2026-02-01")) }
-	n, from, to := w.ledger.importedOutside(earlier)
-	if n == 0 {
-		t.Fatal("the ledger has nothing of January")
-	}
-	txns := len(w.ledger.txns)
-	// The export of February on: the openings, which belong to the beginning, are not in it.
-	w.export(within(fixture(), "2026-02-01", "", false))
-
-	out := w.apply()
-	if len(out.Removed) != 0 || len(out.Orphans) != 0 || len(w.ledger.discards) != 0 || len(w.ledger.txns) != txns {
-		t.Fatalf("apply = removed %d, orphans %d, discards %d, ledger %d -> %d, want nothing removed: the export does not reach those days",
-			len(out.Removed), len(out.Orphans), len(w.ledger.discards), txns, len(w.ledger.txns))
-	}
-	u := out.Uncovered
-	if u.Count != n || !u.First.Equal(day("2026-02-05")) || !u.Last.Equal(day("2026-04-15")) || !u.From.Equal(from) || !u.To.Equal(to) {
-		t.Errorf("uncovered = %+v, want %d transactions from %s to %s, by an export of 5 February to 15 April", u, n, from.Format(time.DateOnly), to.Format(time.DateOnly))
-	}
-	// January is confirmed and is not in the export: it does not stand in the way of February.
-	if _, err := w.confirm("2026-02"); err != nil {
-		t.Errorf("confirm February = %v, want what the ledger has of January not to stand in its way", err)
-	}
-}
-
 func TestAnExportThatHasNoRowsOfAMonthInTheMiddleHasItsTransactionsAsOrphans(t *testing.T) {
 	w := applied(t)
 	w.mustConfirm("2026-01")
@@ -151,49 +124,6 @@ func TestAnExportThatHasNoRowsOfAMonthInTheMiddleHasItsTransactionsAsOrphans(t *
 	}
 }
 
-// The plan of instalments is made on the 5th of February, and what is left of it in an
-// export that begins on the 10th are its payments and its interest: the interest rows
-// come to alone, as when the plan is broken, and recording them beside the plan, which
-// counts them, would count them twice. The plan is of a day that the export does not
-// cover, so it is not an orphan and is not removed; it holds them back all the same.
-func TestAnExportThatBeginsInTheMiddleOfAPlanOfInstalmentsHoldsBackTheInterestItsRowsComeToAlone(t *testing.T) {
-	w := applied(t)
-	w.mustConfirm("2026-01")
-	w.mustConfirm("2026-02")
-	if got := w.ledger.ofKind("instalment"); len(got) != 1 || got[0].Status != "confirmed" {
-		t.Fatalf("the plan is %v, want one confirmed instalment", got)
-	}
-	txns := len(w.ledger.txns)
-	w.export(within(fixture(), "2026-02-10", "", false))
-
-	out := w.apply()
-	if len(out.Orphans) != 0 || len(out.Removed) != 0 || len(out.Stale) != 0 {
-		t.Errorf("apply = orphans %d, removed %d, stale %d, want none: the plan is of a day the export does not cover", len(out.Orphans), len(out.Removed), len(out.Stale))
-	}
-	if len(out.Blocked) < 3 || sum(out.New) != 0 || sum(out.Updated) != 0 || len(w.ledger.txns) != txns {
-		t.Fatalf("apply = blocked %d, new %v, updated %v, ledger %d -> %d, want the interest rows held back and nothing recorded beside the plan",
-			len(out.Blocked), out.New, out.Updated, txns, len(w.ledger.txns))
-	}
-	plan := w.ledger.ofKind("instalment")[0]
-	for _, b := range out.Blocked {
-		if b.Plan != plan.IdempotencyKey {
-			t.Errorf("a unit is blocked by %q, want the plan, %q", b.Plan, plan.IdempotencyKey)
-		}
-	}
-	if !out.Uncovered.To.Equal(day("2026-02-05")) || out.Uncovered.Count < 1 {
-		t.Errorf("uncovered = %+v, want what the ledger has up to the plan of the 5th told as what the export does not cover", out.Uncovered)
-	}
-
-	// The user voids the plan: the rows that are left are recorded as they are.
-	if n := w.ledger.void("moze:plan-"); n != 1 {
-		t.Fatalf("voided %d plans", n)
-	}
-	out = w.apply()
-	if len(out.Blocked) != 0 || sum(out.New)+sum(out.Updated) < 3 {
-		t.Errorf("apply after the void = blocked %d, new %v, updated %v, want the interest recorded", len(out.Blocked), out.New, out.Updated)
-	}
-}
-
 func TestAnExportWithNoDayAtAllCoversNothingAndRemovesNothing(t *testing.T) {
 	w := applied(t)
 	txns := len(w.ledger.txns)
@@ -206,6 +136,35 @@ func TestAnExportWithNoDayAtAllCoversNothingAndRemovesNothing(t *testing.T) {
 	n, _, _ := w.ledger.importedOutside(func(time.Time) bool { return true })
 	if !out.Uncovered.First.IsZero() || out.Uncovered.Count != n {
 		t.Errorf("uncovered = %+v, want all %d transactions, by an export of no day", out.Uncovered, n)
+	}
+}
+
+func TestAnExportWithNoRowsAtAllCoversNothingAndRemovesNothing(t *testing.T) {
+	w := applied(t)
+	w.mustConfirm("2026-01")
+	before := w.ledger.snapshot()
+	w.export(nil)
+	ctx := context.Background()
+
+	out := w.apply()
+	n, _, _ := w.ledger.importedOutside(func(time.Time) bool { return true })
+	if len(out.Removed) != 0 || len(out.Orphans) != 0 || out.Uncovered.Count != n || !out.Uncovered.First.IsZero() {
+		t.Errorf("apply = removed %d, orphans %d, uncovered %+v, want nothing removed and all %d told: the export has no day, so it does not begin after anything",
+			len(out.Removed), len(out.Orphans), out.Uncovered, n)
+	}
+	if _, err := w.confirm("2026-01"); !errors.Is(err, usecase.ErrUnknownMonth) {
+		t.Errorf("confirm = %v, want the export to have nothing in the month", err)
+	}
+	v, err := w.imp.Verify(ctx, usecase.VerifyInput{Files: w.files})
+	if err != nil || len(v.Months) != 0 || v.Unexplained != 0 {
+		t.Errorf("verify = %+v, %v, want nothing to compare", v, err)
+	}
+	st, err := w.imp.Status(ctx, usecase.StatusInput{Files: w.files})
+	if err != nil || st.LaterStart != nil || len(st.Orphans) != 0 || st.Uncovered.Count != n {
+		t.Errorf("status = %+v, %v, want the transactions told as what the export does not cover", st, err)
+	}
+	if got := w.ledger.snapshot(); got != before {
+		t.Errorf("the ledger changed:\nbefore %s\nafter  %s", before, got)
 	}
 }
 

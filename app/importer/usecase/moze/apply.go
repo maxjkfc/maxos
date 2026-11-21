@@ -13,7 +13,8 @@ import (
 // earlier version is reported and left alone. A transaction of the import that no
 // unit of the plan accounts for is an orphan, if it is of a day that the export
 // covers: a draft is discarded, a confirmed one is reported. What is of a day the
-// export does not cover is told, and left alone.
+// export does not cover is told, and left alone. An export that begins after the
+// import in the ledger does is refused first, before anything is made or changed.
 func (a *Importer) Apply(ctx context.Context, in usecase.ApplyInput) (usecase.ApplyOutput, error) {
 	ld, err := a.inputs.load(ctx, in.Files)
 	if err != nil {
@@ -29,6 +30,12 @@ func (a *Importer) Apply(ctx context.Context, in usecase.ApplyInput) (usecase.Ap
 		Adjustments: len(plan.Adjustments),
 		NoOps:       len(plan.NoOps),
 	}
+	// The ledger is read first: an export that begins after the import in it does is
+	// refused before anything is made or changed.
+	st, err := a.openState(ctx, plan)
+	if err != nil {
+		return out, err
+	}
 	// What the ledger is made of, its accounts and instruments, cannot be changed
 	// afterwards, so a guess that the user has not looked at is not recorded from.
 	if plan.Blocked() || ld.mapping.Guessed > 0 {
@@ -40,7 +47,7 @@ func (a *Importer) Apply(ctx context.Context, in usecase.ApplyInput) (usecase.Ap
 		return out, err
 	}
 	out.Created, out.ProjectDifferences = made.created, made.projectDifferences
-	st, err := a.readState(ctx, plan)
+	plan, err = st.complete(ctx, a, plan)
 	if err != nil {
 		return out, err
 	}

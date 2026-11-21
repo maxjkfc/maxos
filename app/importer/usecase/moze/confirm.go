@@ -67,10 +67,14 @@ func (a *Importer) Confirm(ctx context.Context, in usecase.ConfirmInput) (usecas
 	}
 	plan := ld.plan
 	out.Warnings = plan.Warnings
+	st, err := a.openState(ctx, plan)
+	if err != nil {
+		return out, err
+	}
 	if err := askable(plan, in.Month); err != nil {
 		return out, err
 	}
-	st, err := a.readState(ctx, plan)
+	plan, err = st.complete(ctx, a, plan)
 	if err != nil {
 		return out, err
 	}

@@ -222,6 +222,15 @@ func (m Mapping) Entries() int { return len(m.Items()) }
 // Empty tells whether the mapping has nothing in it.
 func (m Mapping) Empty() bool { return m.Entries() == 0 }
 
+// LedgerAccount is the name of the account of the ledger that an account of MOZE is:
+// the name the mapping gives it, or its own when the mapping says none.
+func (m Mapping) LedgerAccount(mozeAccount string) string {
+	if a, ok := m.Accounts[mozeAccount]; ok && a.Name != "" {
+		return a.Name
+	}
+	return mozeAccount
+}
+
 // Merge returns the mapping with the entries of other that it does not have.
 func (m Mapping) Merge(other Mapping) Mapping {
 	out := Mapping{

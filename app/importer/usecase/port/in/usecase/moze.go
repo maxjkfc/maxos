@@ -54,10 +54,13 @@ type PlanOutput struct {
 	Guessed int
 }
 
-// Apply records the export in the ledger as drafts. It refuses a plan that has
-// anything to map or to put right, and a mapping file that still has an entry marked
-// "# guessed" (a *BlockedError): what the ledger is made of, the accounts and the
-// instruments, cannot be changed afterwards, so the user looks at every guess first.
+// Apply records the export in the ledger as drafts. Before it makes or changes anything
+// it refuses an export that begins after the import in the ledger does (a
+// *LaterStartError): that is a part of the history, not the whole of it. It refuses a
+// plan that has anything to map or to put right, and a mapping file that still has an
+// entry marked "# guessed" (a *BlockedError): what the ledger is made of, the accounts
+// and the instruments, cannot be changed afterwards, so the user looks at every guess
+// first.
 //
 // It makes the reference data the mapping names that the ledger does not have
 // (instruments, institutions, accounts, categories, areas, projects, tags, parties)
@@ -80,13 +83,16 @@ type PlanOutput struct {
 //     of instalments that the export does not have any more is confirmed in the
 //     ledger, as it charges the interest the unit's rows come to: it is reported as
 //     blocked, and the plan is what the user voids;
+//   - a plan of instalments of the ledger whose periods run past the last day of the
+//     export is not one that the export does not have any more: the export ends before
+//     its later periods, and has a part of it. It is not an orphan, and the rows of the
+//     instalment that the export has are not recorded either, as the plan has them;
 //   - a transaction of the import that no unit of the plan accounts for any more (its
 //     row was edited, which makes it another row, or deleted, or is left out now) is
 //     an orphan: a draft is discarded, a confirmed one is reported and left alone. It
 //     is one only on a day that the export covers, from its first row to its last: an
-//     export that ends earlier or begins later than an older one says nothing of the
-//     days it does not reach, so what the ledger has of them is told (Uncovered) and
-//     left alone.
+//     export that ends earlier than an older one says nothing of the days it does not
+//     reach, so what the ledger has of them is told (Uncovered) and left alone.
 //
 // A unit that the ledger refuses is reported and does not stop the others.
 type Apply interface {
@@ -219,6 +225,18 @@ type Uncovered struct {
 	From, To time.Time
 }
 
+// LaterStart says that an export begins after the import in the ledger does: the
+// ledger has transactions of the import dated before the first day of the export, the
+// opening balances apart, which are dated from the first row of their account. The
+// export is then a part of the history and not the whole of it, and what it says of
+// the ledger is not meant for it: the import works on the whole export only, and what
+// the ledger has is correct, so it is not to be voided.
+type LaterStart struct {
+	// From is the first day of the export, and LedgerFrom the first day that the
+	// ledger has anything of the import.
+	From, LedgerFrom time.Time
+}
+
 // ProjectDifference is a project that the ledger had already, whose default area is
 // not what the mapping says it is. Names are of areas, empty for none.
 type ProjectDifference struct {
@@ -230,12 +248,13 @@ type ProjectDifference struct {
 // Confirm confirms the drafts of the import that are dated in a month, in date
 // order, and applies the balance adjustments of that month: each when everything of
 // its account and instrument up to its day is confirmed, by reconciling the account
-// to what it held plus what the adjustment adds. It refuses when a month before it
-// still has a draft of the import to confirm, or an adjustment, so that the months
-// are confirmed in order, when a unit of that month or of an earlier one is stale
-// (a *StaleError), and while the ledger has a confirmed transaction of the import that
-// no unit of the plan accounts for (an *OrphanError). It touches nothing the import did
-// not record.
+// to what it held plus what the adjustment adds. It refuses an export that begins
+// after the import in the ledger does (a *LaterStartError), before anything else; it
+// refuses when a month before it still has a draft of the import to confirm, or an
+// adjustment, so that the months are confirmed in order, when a unit of that month or
+// of an earlier one is stale (a *StaleError), and while the ledger has a confirmed
+// transaction of the import that no unit of the plan accounts for (an *OrphanError).
+// It touches nothing the import did not record.
 type Confirm interface {
 	Confirm(ctx context.Context, in ConfirmInput) (ConfirmOutput, error)
 }
@@ -288,7 +307,9 @@ type AdjustmentResult struct {
 }
 
 // Verify compares what the accounts hold at the end of each month that is confirmed
-// with what the export says they hold.
+// with what the export says they hold: on the last day of the export for the month it
+// stops in, when that is before the end of the month. It refuses an export that begins
+// after the import in the ledger does (a *LaterStartError).
 type Verify interface {
 	Verify(ctx context.Context, in VerifyInput) (VerifyOutput, error)
 }
@@ -335,9 +356,12 @@ type StatusOutput struct {
 	Months   []MonthStatus
 	// Orphans are the transactions of the import that no unit of the plan accounts for
 	// any more, on days the export covers, drafts and confirmed ones. Uncovered is what
-	// the ledger has of the import on days it does not cover.
-	Orphans   []Orphan
-	Uncovered Uncovered
+	// the ledger has of the import on days it does not cover. LaterStart is set when the
+	// export begins after the import in the ledger does: nothing else is said then, as
+	// what the export says of the ledger is not meant for it.
+	Orphans    []Orphan
+	Uncovered  Uncovered
+	LaterStart *LaterStart
 }
 
 // MonthStatus counts units, which are one or two transactions or a whole plan, and
@@ -448,6 +472,23 @@ func (e *OrphanError) Error() string {
 
 // Is tells ErrOrphan.
 func (e *OrphanError) Is(target error) bool { return target == ErrOrphan }
+
+// ErrLaterStart is what apply, confirm and verify are refused with when the export
+// begins after the import in the ledger does.
+var ErrLaterStart = errors.New("the export begins after the import in the ledger does")
+
+// LaterStartError is that refusal. Nothing was made or changed.
+type LaterStartError struct {
+	LaterStart
+}
+
+func (e *LaterStartError) Error() string {
+	return fmt.Sprintf("%v: the export begins on %s, the import in the ledger on %s; the import needs the whole export, and nothing is to be voided",
+		ErrLaterStart, e.From.Format(time.DateOnly), e.LedgerFrom.Format(time.DateOnly))
+}
+
+// Is tells ErrLaterStart.
+func (e *LaterStartError) Is(target error) bool { return target == ErrLaterStart }
 
 // ErrUnknownMonth is returned for a month that the export has nothing in.
 var ErrUnknownMonth = errors.New("the export has nothing in that month")

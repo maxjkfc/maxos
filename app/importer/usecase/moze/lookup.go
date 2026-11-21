@@ -84,8 +84,9 @@ func (st *state) relatedTo(u model.Unit) []string {
 // holdingBack are the plans of instalments, gone from the plan, that hold the unit back: a
 // plan that is gone still charges the interest and takes the payments that the rows of the
 // instalments in its account now come to as units of their own, so those units are not
-// recorded beside it, which would count the same interest twice. The transactions the unit
-// replaces already are not among them: they are not plans of their own.
+// recorded beside it, which would count the same interest twice. A plan charges what falls
+// due from the day of its origin on, so it holds back no unit before it. The transactions
+// the unit replaces already are not among them: they are not plans of their own.
 func (st *state) holdingBack(u model.Unit, replaced map[uuid.UUID]bool) []versioned {
 	account, ok := st.instalmentUnits[u.ID]
 	if !ok {
@@ -93,7 +94,7 @@ func (st *state) holdingBack(u model.Unit, replaced map[uuid.UUID]bool) []versio
 	}
 	var plans []versioned
 	for _, g := range st.plansGone {
-		if g.account == account && !replaced[g.tx.ID] {
+		if g.account == account && !u.Date.Before(g.tx.OccurredOn) && !replaced[g.tx.ID] {
 			v := g.versioned
 			v.gone = st.discarded[v.tx.ID]
 			plans = append(plans, v)

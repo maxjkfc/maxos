@@ -38,28 +38,33 @@ func (st *state) unaccounted() []finance.Transaction {
 }
 
 // orphans are the transactions of the import that no unit of the plan accounts for and
-// that are of days the export covers: it has the days of them, and says nothing of
-// them, so they are not what it says. What it does not cover (an export that ends
-// earlier, or begins later, than what was recorded of an older and longer one) is not
-// an orphan: it is what the export does not say anything of, and is left alone.
+// that the export says something of: it has the days of them, and not them, so they are
+// not what it says. What it says nothing of is not an orphan, and is left alone: the days
+// that an export that ends earlier than an older and longer one does not reach, and what
+// is told by outside.
 func (st *state) orphans() []finance.Transaction {
-	return slices.DeleteFunc(st.unaccounted(), func(t finance.Transaction) bool { return !st.covered(t.OccurredOn) })
+	return slices.DeleteFunc(st.unaccounted(), st.outside)
 }
 
-// uncovered says what the ledger has of the import on days that the export does not
-// cover, which no unit of the plan accounts for.
+// uncovered says what the ledger has of the import that the export says nothing of, which
+// no unit of the plan accounts for, with the first and the last day of it: the day of the
+// last period for a plan of instalments the export ends before the end of.
 func (st *state) uncovered() usecase.Uncovered {
 	u := usecase.Uncovered{First: st.first, Last: st.last}
 	for _, t := range st.unaccounted() {
-		if st.covered(t.OccurredOn) {
+		if !st.outside(t) {
 			continue
 		}
-		u.Count++
-		if u.Count == 1 || t.OccurredOn.Before(u.From) {
-			u.From = t.OccurredOn
+		from, to := t.OccurredOn, t.OccurredOn
+		if c, cut := st.cuts[t.ID]; cut {
+			to = c.end
 		}
-		if u.Count == 1 || t.OccurredOn.After(u.To) {
-			u.To = t.OccurredOn
+		u.Count++
+		if u.Count == 1 || from.Before(u.From) {
+			u.From = from
+		}
+		if u.Count == 1 || to.After(u.To) {
+			u.To = to
 		}
 	}
 	return u

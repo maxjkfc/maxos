@@ -29,11 +29,17 @@ func (l BalanceLine) Unexplained() decimal.Decimal {
 }
 
 // MonthCheck is the balances of the accounts at the end of a month, by the ledger and
-// by the export.
+// by the export: at the end of the month, or, for the month that an export that stops
+// inside it ends in, on the last day of the export, which is all it says of the month.
 type MonthCheck struct {
 	Month string
-	End   time.Time
-	Lines []BalanceLine
+	// End is the day the balances are of.
+	End time.Time
+	// Partial is true when End is the last day of the export and not the last day of
+	// the month: the export has nothing after it, and what the ledger has of the days
+	// after it is not to be compared with nothing.
+	Partial bool
+	Lines   []BalanceLine
 	// Decimals are the decimal places of each instrument in Lines, by code.
 	Decimals map[string]int
 }

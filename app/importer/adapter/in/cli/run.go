@@ -300,7 +300,11 @@ func checkText(w *strings.Builder, c model.MonthCheck, onlyDifferences bool) {
 	if onlyDifferences {
 		lines = c.Differences()
 	}
-	fmt.Fprintf(w, "%s 月底（%s）帳本餘額與 CSV 預期餘額：", c.Month, c.End.Format(time.DateOnly))
+	if c.Partial {
+		fmt.Fprintf(w, "%s 這個月只到 %s（匯出的最後一天），帳本餘額與 CSV 預期餘額：", c.Month, c.End.Format(time.DateOnly))
+	} else {
+		fmt.Fprintf(w, "%s 月底（%s）帳本餘額與 CSV 預期餘額：", c.Month, c.End.Format(time.DateOnly))
+	}
 	if n := len(c.Differences()); n == 0 {
 		fmt.Fprintln(w, "全部吻合")
 	} else {
@@ -353,7 +357,7 @@ func verifyText(w *strings.Builder, out usecase.VerifyOutput) {
 		fmt.Fprintln(w)
 		for _, m := range out.Months {
 			if len(m.Differences()) == 0 {
-				fmt.Fprintf(w, "%s：全部吻合（%d 個帳戶與標的）\n", m.Month, len(m.Lines))
+				fmt.Fprintf(w, "%s：全部吻合（%d 個帳戶與標的）%s\n", m.Month, len(m.Lines), partialText(m))
 				continue
 			}
 			checkText(w, m, true)
@@ -381,6 +385,10 @@ func verifyText(w *strings.Builder, out usecase.VerifyOutput) {
 // RenderStatus writes the state of the import by month.
 func RenderStatus(w io.Writer, out usecase.StatusOutput) error {
 	var b strings.Builder
+	if out.LaterStart != nil {
+		fmt.Fprintf(&b, "注意：%s\n", laterStartText(*out.LaterStart))
+		return flush(w, &b)
+	}
 	for _, warning := range out.Warnings {
 		fmt.Fprintf(&b, "注意：%s\n", warningText(warning))
 	}
@@ -401,11 +409,13 @@ func RenderStatus(w io.Writer, out usecase.StatusOutput) error {
 }
 
 // Refusal says, in plain terms, what the use cases refuse with when it is something the
-// user can put right: a mapping that is not ready, a month that comes after one that is
-// not confirmed, a confirmed transaction that is not what the plan says. It returns the
-// error for the command to fail with, in words the user reads, or the error as it is for
-// anything else (the ledger's own errors are English, as everything of the ledger is).
+// user can put right: an export that begins after the import in the ledger does, a
+// mapping that is not ready, a month that comes after one that is not confirmed, a
+// confirmed transaction that is not what the plan says. It returns the error for the
+// command to fail with, in words the user reads, or the error as it is for anything
+// else (the ledger's own errors are English, as everything of the ledger is).
 func Refusal(w io.Writer, err error) error {
+	var later *usecase.LaterStartError
 	var blocked *usecase.BlockedError
 	var order *usecase.MonthOrderError
 	var stale *usecase.StaleError
@@ -413,6 +423,8 @@ func Refusal(w io.Writer, err error) error {
 	var b strings.Builder
 	var out error
 	switch {
+	case errors.As(err, &later):
+		return errors.New(laterStartText(later.LaterStart))
 	case errors.As(err, &blocked):
 		blockedText(&b, blocked)
 		out = errors.New("對照檔還有要處理的項目，什麼都沒有寫入")
@@ -449,4 +461,21 @@ func Refusal(w io.Writer, err error) error {
 		return werr
 	}
 	return out
+}
+
+// laterStartText says, as the refusal and as the warning of status, that the export
+// begins after the import in the ledger does, and what is to be done about it: the
+// whole export is needed, and what the ledger has is right, so it is not to be voided.
+func laterStartText(l usecase.LaterStart) string {
+	return fmt.Sprintf("這份匯出從 %s 開始，帳本裡的匯入從 %s 開始。匯入需要完整的匯出，請改用完整的匯出；不要作廢帳本裡的交易",
+		l.From.Format(time.DateOnly), l.LedgerFrom.Format(time.DateOnly))
+}
+
+// partialText says of the month that the export stops in that it is compared only up to
+// the last day of the export; it says nothing for any other month.
+func partialText(c model.MonthCheck) string {
+	if !c.Partial {
+		return ""
+	}
+	return fmt.Sprintf("，這個月只到 %s（匯出的最後一天）", c.End.Format(time.DateOnly))
 }

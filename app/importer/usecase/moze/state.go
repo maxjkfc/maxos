@@ -2,6 +2,7 @@ package moze
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -48,16 +49,23 @@ type state struct {
 	// instalmentUnits are the units of the plan that are made of rows of an instalment
 	// (a conversion, a payment, interest), by ID, with the account of the ledger they
 	// are of; plansGone are the plans of instalments the import recorded that the plan
-	// does not have any more, which are not void: on a day that the export does not
-	// cover as well, for the export may begin after the conversion that the rows left
-	// are of.
+	// does not have any more, which are not void and which the export is not cut short
+	// of (see cuts).
 	instalmentUnits map[string]string
 	plansGone       []planGone
+	// lastPeriod is the day of the last period of each plan of instalments the ledger has,
+	// by the id of its origin; cuts are the plans of the import that the plan does not have
+	// and whose periods run past the last day of the export, by the id of their origin: the
+	// export has a part of them (see findCuts).
+	lastPeriod map[uuid.UUID]time.Time
+	cuts       map[uuid.UUID]cutPlan
 	// first and last are the first and the last day that the export covers, and covers
 	// says whether it covers any: the days of its rows, and of its units that are of
 	// rows with none (an opening balance is dated from the first row of its account).
+	// dateless says whether it has rows with no day, which are the opening balances.
 	covers      bool
 	first, last time.Time
+	dateless    bool
 	// discarded are the drafts that have been discarded since the state was read.
 	discarded map[uuid.UUID]bool
 }
@@ -79,21 +87,39 @@ type planGone struct {
 	account string
 }
 
-// readState reads the ledger, and sorts what the import recorded by the units of the
-// plan.
-func (a *Importer) readState(ctx context.Context, plan model.Plan) (*state, error) {
+// openState reads the transactions of the ledger that the import recorded, and nothing
+// else, and refuses the export that begins after the import in the ledger does (a
+// *usecase.LaterStartError, with the state, whose transactions it has read): that is
+// before anything is made or changed.
+func (a *Importer) openState(ctx context.Context, plan model.Plan) (*state, error) {
 	st := &state{
 		accountIDs:      map[string]uuid.UUID{},
 		accountNames:    map[uuid.UUID]string{},
 		instrumentIDs:   map[string]uuid.UUID{},
 		instrumentCodes: map[uuid.UUID]string{},
 		byKey:           map[string]finance.Transaction{},
+		lastPeriod:      map[uuid.UUID]time.Time{},
+		cuts:            map[uuid.UUID]cutPlan{},
 		refs:            newRefs(),
 		discarded:       map[uuid.UUID]bool{},
 	}
+	if err := st.readTransactions(ctx, a); err != nil {
+		return nil, err
+	}
+	if later := st.laterStart(plan); later != nil {
+		return st, &usecase.LaterStartError{LaterStart: *later}
+	}
+	return st, nil
+}
+
+// complete reads the accounts, the instruments and the catalog by the names the plan
+// uses, and sorts what the import recorded by the units of the plan. It returns the plan
+// as the ledger has it where the export has only a part of a plan of instalments (see
+// adopt), which is the plan the use cases go on with.
+func (st *state) complete(ctx context.Context, a *Importer, plan model.Plan) (model.Plan, error) {
 	accounts, err := a.ledger.ListAccounts.ListAccounts(ctx, finance.ListAccountsInput{IncludeArchived: true})
 	if err != nil {
-		return nil, usecase.StepFailure(usecase.VerbList, usecase.ThingAccount, "", err)
+		return plan, usecase.StepFailure(usecase.VerbList, usecase.ThingAccount, "", err)
 	}
 	for _, acc := range accounts.Accounts {
 		st.accountIDs[acc.Name] = acc.ID
@@ -101,24 +127,23 @@ func (a *Importer) readState(ctx context.Context, plan model.Plan) (*state, erro
 	}
 	instruments, err := a.ledger.ListInstruments.ListInstruments(ctx, finance.ListInstrumentsInput{IncludeArchived: true})
 	if err != nil {
-		return nil, usecase.StepFailure(usecase.VerbList, usecase.ThingInstrument, "", err)
+		return plan, usecase.StepFailure(usecase.VerbList, usecase.ThingInstrument, "", err)
 	}
 	for _, in := range instruments.Instruments {
 		st.instrumentIDs[in.Code] = in.ID
 		st.instrumentCodes[in.ID] = in.Code
 	}
 	if err := st.readCatalog(ctx, a); err != nil {
-		return nil, err
+		return plan, err
 	}
-	if err := st.readTransactions(ctx, a); err != nil {
-		return nil, err
-	}
+	st.findCuts(plan)
+	plan = st.adopt(plan)
 	st.index(plan)
-	return st, nil
+	return plan, nil
 }
 
 // readTransactions lists every transaction of the ledger, a page at a time, and keeps
-// the ones the import recorded.
+// the ones the import recorded, and the day each plan of instalments is charged last.
 func (st *state) readTransactions(ctx context.Context, a *Importer) error {
 	for offset := 0; ; {
 		page, err := a.ledger.ListTransactions.ListTransactions(ctx, finance.ListTransactionsInput{Limit: finance.MaxListLimit, Offset: offset})
@@ -126,14 +151,23 @@ func (st *state) readTransactions(ctx context.Context, a *Importer) error {
 			return usecase.StepFailure(usecase.VerbList, usecase.ThingTransaction, "", err)
 		}
 		for _, t := range page.Transactions {
-			if strings.HasPrefix(t.IdempotencyKey, model.KeyPrefix) {
-				st.byKey[t.IdempotencyKey] = t
-			}
+			st.note(t)
 		}
 		offset += len(page.Transactions)
 		if !page.HasMore || len(page.Transactions) == 0 {
 			return nil
 		}
+	}
+}
+
+// note keeps a transaction of the ledger that the import recorded, by its key, and the day
+// of a period of a plan of instalments, which is the last of the plan when it is the latest.
+func (st *state) note(t finance.Transaction) {
+	if strings.HasPrefix(t.IdempotencyKey, model.KeyPrefix) {
+		st.byKey[t.IdempotencyKey] = t
+	}
+	if t.PlanID != nil && t.PlanSeq != nil && *t.PlanSeq > 0 && t.OccurredOn.After(st.lastPeriod[*t.PlanID]) {
+		st.lastPeriod[*t.PlanID] = t.OccurredOn
 	}
 }
 
@@ -167,6 +201,7 @@ func (st *state) readCatalog(ctx context.Context, a *Importer) error {
 // units by the rows they are made of.
 func (st *state) index(plan model.Plan) {
 	st.first, st.last, st.covers = exportSpan(plan)
+	st.dateless = slices.ContainsFunc(plan.Rows, func(r model.Row) bool { return !r.HasDate() })
 	rows := plan.RowIndex()
 	st.planIDs = map[string]bool{}
 	st.planRows = map[string]bool{}
@@ -175,8 +210,7 @@ func (st *state) index(plan model.Plan) {
 		st.planIDs[u.ID] = true
 		for _, row := range u.Rows {
 			st.planRows[row] = true
-			switch rows[row].Type {
-			case model.TypeBillInstalment, model.TypeInstalmentPayment, model.TypeInterest:
+			if instalmentRow(rows[row].Type) {
 				st.instalmentUnits[u.ID] = u.Main.Account
 			}
 		}
@@ -208,7 +242,7 @@ func (st *state) index(plan model.Plan) {
 			}
 			st.rowUnits[row][parsed.ID] = true
 		}
-		if parsed.IsPlan() && !st.planIDs[parsed.ID] && t.Status != "void" {
+		if _, cut := st.cuts[t.ID]; parsed.IsPlan() && !cut && !st.planIDs[parsed.ID] && t.Status != "void" {
 			st.plansGone = append(st.plansGone, planGone{versioned: v, account: st.firstAccount(t).Account})
 		}
 	}

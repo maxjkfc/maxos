@@ -458,6 +458,24 @@ func (p Plan) Months() []string {
 	return months
 }
 
+// Days are the first and the last day that a row of the export has: an opening balance
+// has none, and the day an opening balance is dated from its account is not one of
+// them. Both are zero when no row has a day.
+func (p Plan) Days() (first, last time.Time) {
+	for _, r := range p.Rows {
+		if !r.HasDate() {
+			continue
+		}
+		if first.IsZero() || r.Date.Before(first) {
+			first = r.Date
+		}
+		if last.IsZero() || r.Date.After(last) {
+			last = r.Date
+		}
+	}
+	return first, last
+}
+
 // MonthEnd is the last day of the month "2006-01", at midnight UTC.
 func MonthEnd(month string) (time.Time, error) {
 	first, err := time.Parse("2006-01", month)

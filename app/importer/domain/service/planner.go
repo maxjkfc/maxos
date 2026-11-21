@@ -217,10 +217,7 @@ func (b *builder) unitBefore(x, y model.Unit) bool {
 
 // ledger is the name of the account of the ledger that an account of MOZE is.
 func (b *builder) ledger(mozeAccount string) string {
-	if a, ok := b.m.Accounts[mozeAccount]; ok && a.Name != "" {
-		return a.Name
-	}
-	return mozeAccount
+	return b.m.LedgerAccount(mozeAccount)
 }
 
 func (b *builder) isCurrency(code string) bool {
