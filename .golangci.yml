@@ -345,6 +345,93 @@ linters:
             - pkg: github.com/maxjkfc/maxos/app/finance/
               desc: other contexts may import only app/finance/usecase/port/in
 
+        # Layers inside the importer context (the inbox-* rules above, for importer).
+        # It has no tables and no repo: its outbound adapters read files, and its use
+        # cases call finance and catalog through their in-ports only (the finance-boundary
+        # and catalog-boundary rules above apply to it as to every other context).
+        importer-domain:
+          list-mode: lax
+          files:
+            - "${config-path}/app/importer/domain/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/importer/usecase/
+              desc: domain must not depend on use cases
+            - pkg: github.com/maxjkfc/maxos/app/importer/adapter/
+              desc: domain must not depend on adapters
+        importer-domain-allowlist:
+          list-mode: strict
+          files:
+            - "${config-path}/app/importer/domain/**"
+          allow:
+            - $gostd
+            - github.com/shopspring/decimal
+            - github.com/maxjkfc/maxos/app/importer/domain/
+        importer-usecase-allowlist:
+          list-mode: strict
+          files:
+            - "${config-path}/app/importer/usecase/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/google/uuid
+            - github.com/shopspring/decimal
+            - go.uber.org/fx
+            - github.com/maxjkfc/maxos/app/importer/domain/
+            - github.com/maxjkfc/maxos/app/importer/usecase/port/
+            - github.com/maxjkfc/maxos/app/finance/usecase/port/in/
+            - github.com/maxjkfc/maxos/app/catalog/usecase/port/in/
+        importer-usecase:
+          list-mode: lax
+          files:
+            - "${config-path}/app/importer/usecase/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/importer/adapter/
+              desc: use cases must not depend on adapters; go through a port
+        importer-adapter:
+          list-mode: lax
+          files:
+            - "${config-path}/app/importer/adapter/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/importer/usecase/port/
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/importer/usecase/
+              desc: adapters depend on usecase/port only; cmd/ injects the implementations
+            - pkg: github.com/maxjkfc/maxos/app/importer/domain/service
+              desc: adapters must not call domain services; go through a use case port
+        importer-adapter-in:
+          list-mode: lax
+          files:
+            - "${config-path}/app/importer/adapter/in/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/importer/adapter/out/
+              desc: inbound adapters must not depend on outbound adapters
+        importer-adapter-out:
+          list-mode: lax
+          files:
+            - "${config-path}/app/importer/adapter/out/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/importer/adapter/in/
+              desc: outbound adapters must not depend on inbound adapters
+        importer-adapter-out-file:
+          list-mode: lax
+          files:
+            - "${config-path}/app/importer/adapter/out/file/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/importer/adapter/out/file
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/importer/adapter/out/
+              desc: the file adapter must not depend on another outbound adapter
+        importer-boundary:
+          list-mode: lax
+          files:
+            - "${config-path}/app/**"
+            - "!${config-path}/app/importer/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/importer/usecase/port/in/
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/importer/
+              desc: other contexts may import only app/importer/usecase/port/in
+
     # Conventions section 4, rule 7: the domain and the use cases get the time from
     # the clock port of their context (usecase/port/out/clock), not from time.Now,
     # time.Since or time.Until, which all read the wall clock, so that a test can

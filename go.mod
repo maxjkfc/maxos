@@ -12,6 +12,7 @@ require (
 	github.com/shopspring/decimal v1.6.0
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/fx v1.24.0
+	go.yaml.in/yaml/v3 v3.0.6
 )
 
 require (
