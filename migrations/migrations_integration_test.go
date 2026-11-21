@@ -140,25 +140,29 @@ func wantSameSchema(t *testing.T, name string, got, want []string) {
 	t.Fatalf("%s is not the schema it should be:\n%s", name, strings.Join(diff, "\n"))
 }
 
-// atVersion5 returns a database that has the migrations up to 0005 applied, which
-// is where the tests of 0005 begin: the template has them all, so 0006 is rolled
-// back, as an empty ledger lets it be.
-func atVersion5(t *testing.T) (*pgxpool.Pool, *goose.Provider) {
+// latestVersion is the version of the newest migration, which the test database is
+// at. The tests of an older migration begin at its version, by rolling the newer
+// ones back, which an empty database lets them do.
+const latestVersion = 7
+
+// atVersion returns a database that has the migrations up to the version applied:
+// the template has them all, so the newer ones are rolled back.
+func atVersion(t *testing.T, want int64) (*pgxpool.Pool, *goose.Provider) {
 	t.Helper()
 	pool := testpg.New(t)
 	provider := newProvider(t, pool)
-	if v := version(t, provider); v != 6 {
-		t.Fatalf("the test database is at version %d, want 6: the latest, which these tests roll back", v)
+	if v := version(t, provider); v != latestVersion {
+		t.Fatalf("the test database is at version %d, want %d: the latest, which these tests roll back", v, latestVersion)
 	}
-	if _, err := provider.DownTo(context.Background(), 5); err != nil {
-		t.Fatalf("down to 0005: %v", err)
+	if _, err := provider.DownTo(context.Background(), want); err != nil {
+		t.Fatalf("down to %04d: %v", want, err)
 	}
 	return pool, provider
 }
 
 func TestMigration0005GoesDownToTheSchemaOf0004AndUpAgain(t *testing.T) {
 	ctx := context.Background()
-	pool, provider := atVersion5(t)
+	pool, provider := atVersion(t, 5)
 	atFive := schema(t, pool)
 
 	// What the migrations up to 0004 make, on their own: taken by going all the way
@@ -332,7 +336,7 @@ func TestMigration0005RefusesToGoDownWhileTheLedgerHoldsWhatItAddedAndLeavesTheL
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pool, provider := atVersion5(t)
+			pool, provider := atVersion(t, 5)
 			seedLedger(t, pool, tt.kind, tt.postings...)
 			before := schema(t, pool)
 
@@ -370,7 +374,7 @@ func TestMigration0005RefusesToGoDownWhileTheLedgerHoldsWhatItAddedAndLeavesTheL
 
 func TestMigration0005GoesDownOverOrdinaryExpensesAndTransfers(t *testing.T) {
 	ctx := context.Background()
-	pool, provider := atVersion5(t)
+	pool, provider := atVersion(t, 5)
 	// What 0004 could hold, which the migration must not mistake for its own.
 	seedLedger(t, pool, "expense",
 		posting{book: "account", account: "cash", quantity: "-120"},
@@ -402,7 +406,7 @@ func TestMigration0005RefusesToGoDownWhileACategoryIsUnderASystemCategoryAndLeav
 		{"an income category", "income", unrecordedIncome},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			pool, provider := atVersion5(t)
+			pool, provider := atVersion(t, 5)
 			exec := func(query string, args ...any) {
 				t.Helper()
 				if _, err := pool.Exec(ctx, query, args...); err != nil {
@@ -480,11 +484,7 @@ func TestMigration0005StopsWhereATopLevelCategoryIsAlreadyCalledUnrecorded(t *te
 
 func TestMigration0006GoesDownToTheSchemaOf0005AndUpAgain(t *testing.T) {
 	ctx := context.Background()
-	pool := testpg.New(t)
-	provider := newProvider(t, pool)
-	if v := version(t, provider); v != 6 {
-		t.Fatalf("the test database is at version %d, want 6: this test is about 0006", v)
-	}
+	pool, provider := atVersion(t, 6)
 	atSix := schema(t, pool)
 
 	// What the migrations up to 0005 make, on their own: taken by going all the way
@@ -500,7 +500,7 @@ func TestMigration0006GoesDownToTheSchemaOf0005AndUpAgain(t *testing.T) {
 		t.Fatal("the schema at 0005 is the schema at 0006: the test sees nothing of the migration")
 	}
 
-	if _, err := provider.Up(ctx); err != nil {
+	if _, err := provider.UpTo(ctx, 6); err != nil {
 		t.Fatalf("up to 0006: %v", err)
 	}
 	wantSameSchema(t, "the schema after up", schema(t, pool), atSix)
@@ -513,7 +513,7 @@ func TestMigration0006GoesDownToTheSchemaOf0005AndUpAgain(t *testing.T) {
 	}
 	wantSameSchema(t, "the schema after down", schema(t, pool), atFive)
 
-	if _, err := provider.Up(ctx); err != nil {
+	if _, err := provider.UpTo(ctx, 6); err != nil {
 		t.Fatalf("up to 0006 again: %v", err)
 	}
 	wantSameSchema(t, "the schema after up again", schema(t, pool), atSix)
@@ -554,8 +554,7 @@ func TestMigration0006RefusesToGoDownWhileTheLedgerHoldsWhatItAddedAndLeavesTheL
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pool := testpg.New(t)
-			provider := newProvider(t, pool)
+			pool, provider := atVersion(t, 6)
 			seedTransactions(t, pool, tt.transactions...)
 			before := schema(t, pool)
 
@@ -600,8 +599,7 @@ func TestMigration0006RefusesToGoDownWhileTheLedgerHoldsWhatItAddedAndLeavesTheL
 
 func TestMigration0006GoesDownOverWhatTheEarlierMigrationsHold(t *testing.T) {
 	ctx := context.Background()
-	pool := testpg.New(t)
-	provider := newProvider(t, pool)
+	pool, provider := atVersion(t, 6)
 	// What 0005 could hold, which the migration must not mistake for its own.
 	seedTransactions(t, pool,
 		seeded{kind: "expense", postings: []posting{
@@ -629,5 +627,157 @@ func TestMigration0006GoesDownOverWhatTheEarlierMigrationsHold(t *testing.T) {
 	}
 	if transactions != 3 || postings != 6 {
 		t.Errorf("%d transactions and %d postings left, want them kept: 3 and 6", transactions, postings)
+	}
+}
+
+func TestMigration0007GoesDownToTheSchemaOf0006AndUpAgain(t *testing.T) {
+	ctx := context.Background()
+	pool, provider := atVersion(t, 7)
+	atSeven := schema(t, pool)
+
+	// What the migrations up to 0006 make, on their own: taken by going all the way
+	// down and up again, so that it is a database where 0007 never was.
+	if _, err := provider.DownTo(ctx, 0); err != nil {
+		t.Fatalf("down to the start: %v", err)
+	}
+	if _, err := provider.UpTo(ctx, 6); err != nil {
+		t.Fatalf("up to 0006: %v", err)
+	}
+	atSix := schema(t, pool)
+	if slices.Equal(atSix, atSeven) {
+		t.Fatal("the schema at 0006 is the schema at 0007: the test sees nothing of the migration")
+	}
+
+	if _, err := provider.UpTo(ctx, 7); err != nil {
+		t.Fatalf("up to 0007: %v", err)
+	}
+	wantSameSchema(t, "the schema after up", schema(t, pool), atSeven)
+
+	if _, err := provider.DownTo(ctx, 6); err != nil {
+		t.Fatalf("down to 0006: %v", err)
+	}
+	if v := version(t, provider); v != 6 {
+		t.Fatalf("version after down = %d, want 6", v)
+	}
+	wantSameSchema(t, "the schema after down", schema(t, pool), atSix)
+
+	if _, err := provider.UpTo(ctx, 7); err != nil {
+		t.Fatalf("up to 0007 again: %v", err)
+	}
+	wantSameSchema(t, "the schema after up again", schema(t, pool), atSeven)
+}
+
+// seedBudgets stores, in a database at version 7, an expense category and the
+// budget of an area with an allocation, and the budget of a project. The area and
+// the project are ids that no table knows.
+func seedBudgets(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	food, area, project, areaBudget, projectBudget := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	for _, stmt := range []struct {
+		sql  string
+		args []any
+	}{
+		{`INSERT INTO fin_category (id, direction, name) VALUES ($1, 'expense', 'food')`, []any{food}},
+		{`INSERT INTO fin_budget (id, scope, area_id, effective_from, amount) VALUES ($1, 'area', $2, '2026-11-01', 5000)`, []any{areaBudget, area}},
+		{`INSERT INTO fin_budget_allocation (budget_id, category_id, amount) VALUES ($1, $2, 2000)`, []any{areaBudget, food}},
+		{`INSERT INTO fin_budget (id, scope, project_id, amount) VALUES ($1, 'project', $2, 80000)`, []any{projectBudget, project}},
+	} {
+		if _, err := pool.Exec(ctx, stmt.sql, stmt.args...); err != nil {
+			t.Fatalf("%s: %v", stmt.sql, err)
+		}
+	}
+}
+
+func TestMigration0007RefusesToGoDownWhileTheDatabaseHoldsBudgetsAndLeavesThemAlone(t *testing.T) {
+	ctx := context.Background()
+	// A case for each scope on its own, and one for both with an allocation: a guard
+	// that looks at one of the scopes only lets the budgets of the other go.
+	tests := []struct {
+		name string
+		seed func(t *testing.T, pool *pgxpool.Pool)
+	}{
+		{"the budgets of an area and a project, with an allocation", seedBudgets},
+		{"the budget of an area alone", func(t *testing.T, pool *pgxpool.Pool) {
+			t.Helper()
+			if _, err := pool.Exec(ctx, `INSERT INTO fin_budget (id, scope, area_id, effective_from, amount) VALUES ($1, 'area', $2, '2026-11-01', 5000)`, uuid.New(), uuid.New()); err != nil {
+				t.Fatalf("insert the budget: %v", err)
+			}
+		}},
+		{"the budget of a project alone", func(t *testing.T, pool *pgxpool.Pool) {
+			t.Helper()
+			if _, err := pool.Exec(ctx, `INSERT INTO fin_budget (id, scope, project_id, amount) VALUES ($1, 'project', $2, 0)`, uuid.New(), uuid.New()); err != nil {
+				t.Fatalf("insert the budget: %v", err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool, provider := atVersion(t, 7)
+			tt.seed(t, pool)
+			before := schema(t, pool)
+			var budgets, allocations int
+			if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM fin_budget), (SELECT count(*) FROM fin_budget_allocation)`).Scan(&budgets, &allocations); err != nil {
+				t.Fatalf("count: %v", err)
+			}
+
+			_, err := provider.Down(ctx)
+
+			pgErr := pgError(t, err)
+			if pgErr.Code != "P0001" || !strings.Contains(pgErr.Message, "cannot roll back 0007_fin_budgets") || pgErr.Hint == "" {
+				t.Fatalf("err = %v, hint = %q, want the migration to refuse, say which migration, and say what to do", err, pgErr.Hint)
+			}
+			if v := version(t, provider); v != 7 {
+				t.Errorf("version = %d after the refused Down, want 7", v)
+			}
+			wantSameSchema(t, "the schema after the refused Down", schema(t, pool), before)
+			var budgetsLeft, allocationsLeft int
+			if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM fin_budget), (SELECT count(*) FROM fin_budget_allocation)`).Scan(&budgetsLeft, &allocationsLeft); err != nil {
+				t.Fatalf("count: %v", err)
+			}
+			if budgetsLeft != budgets || allocationsLeft != allocations {
+				t.Errorf("%d budgets and %d allocations left, want the budgets untouched: %d and %d", budgetsLeft, allocationsLeft, budgets, allocations)
+			}
+
+			// Once there is no budget, it goes down: the allocations went with theirs.
+			if _, err := pool.Exec(ctx, `DELETE FROM fin_budget`); err != nil {
+				t.Fatalf("delete the budgets: %v", err)
+			}
+			if _, err := provider.Down(ctx); err != nil {
+				t.Fatalf("Down of a database with no budget: %v", err)
+			}
+			if v := version(t, provider); v != 6 {
+				t.Errorf("version = %d, want 6", v)
+			}
+		})
+	}
+}
+
+func TestMigration0007GoesDownOverWhatTheEarlierMigrationsHold(t *testing.T) {
+	ctx := context.Background()
+	pool, provider := atVersion(t, 7)
+	// The ledger, which the migration must not mistake for budgets: it does not touch it.
+	seedTransactions(t, pool,
+		seeded{kind: "expense", postings: []posting{
+			{book: "account", account: "cash", quantity: "-450"},
+			{book: "expense", category: "food", quantity: "450", baseAmount: "450"},
+		}},
+		seeded{kind: "exchange", postings: []posting{
+			{book: "account", account: "cash", quantity: "-100"},
+			{book: "conversion", quantity: "100"},
+		}},
+	)
+
+	if _, err := provider.Down(ctx); err != nil {
+		t.Fatalf("Down: %v, want it to go down: a ledger without budgets is not what 0007 added", err)
+	}
+
+	var transactions, postings int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM fin_transaction), (SELECT count(*) FROM fin_posting)`).
+		Scan(&transactions, &postings); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if transactions != 2 || postings != 4 {
+		t.Errorf("%d transactions and %d postings left, want them kept: 2 and 4", transactions, postings)
 	}
 }

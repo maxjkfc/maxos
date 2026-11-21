@@ -20,6 +20,16 @@ type FinAccount struct {
 	ArchivedAt    *time.Time
 }
 
+type FinBudget struct {
+	ID            uuid.UUID
+	Scope         string
+	AreaID        uuid.NullUUID
+	ProjectID     uuid.NullUUID
+	EffectiveFrom *time.Time
+	Amount        decimal.Decimal
+	CreatedAt     time.Time
+}
+
 type FinCategory struct {
 	ID              uuid.UUID
 	Direction       string

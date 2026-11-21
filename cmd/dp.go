@@ -17,6 +17,7 @@ import (
 	catalogtag "github.com/maxjkfc/maxos/app/catalog/usecase/tag"
 	financepg "github.com/maxjkfc/maxos/app/finance/adapter/out/persistence/postgres"
 	financeaccount "github.com/maxjkfc/maxos/app/finance/usecase/account"
+	financebudget "github.com/maxjkfc/maxos/app/finance/usecase/budget"
 	financecategory "github.com/maxjkfc/maxos/app/finance/usecase/category"
 	financeinstitution "github.com/maxjkfc/maxos/app/finance/usecase/institution"
 	financeinstrument "github.com/maxjkfc/maxos/app/finance/usecase/instrument"
@@ -98,7 +99,8 @@ func InboxModule() fx.Option {
 
 // CatalogModule wires the catalog context: its Postgres repos and its use cases.
 // The finance ledger calls VerifyReferences, ResolveProjectDefaults,
-// ResolveProjectArea and ListParties; the MCP tools will use the rest.
+// ResolveProjectArea and ListParties, and the finance budgets VerifyReferences,
+// ListAreas and ListProjects; the MCP tools will use the rest.
 func CatalogModule() fx.Option {
 	return fx.Module("catalog",
 		fx.Provide(
@@ -116,11 +118,11 @@ func CatalogModule() fx.Option {
 }
 
 // FinanceModule wires the finance context: its Postgres repos and its use cases.
-// That is the reference data (instruments, institutions, accounts, categories) and
-// the ledger. The ledger opens its database transactions through the same pool as
-// the repos, and calls the catalog, so the app must include CatalogModule too. It
-// tells today by a financeclock.Clock, which InfraModule provides and a test
-// supplies.
+// That is the reference data (instruments, institutions, accounts, categories), the
+// ledger and the budgets. The ledger and the budgets open their database
+// transactions through the same pool as the repos, and call the catalog, so the
+// app must include CatalogModule too. They tell today by a financeclock.Clock,
+// which InfraModule provides and a test supplies.
 func FinanceModule() fx.Option {
 	return fx.Module("finance",
 		fx.Provide(
@@ -129,6 +131,7 @@ func FinanceModule() fx.Option {
 			fx.Annotate(financepg.NewAccountRepo, fx.As(new(financerepo.AccountRepo))),
 			fx.Annotate(financepg.NewCategoryRepo, fx.As(new(financerepo.CategoryRepo))),
 			fx.Annotate(financepg.NewTransactionRepo, fx.As(new(financerepo.TransactionRepo))),
+			fx.Annotate(financepg.NewBudgetRepo, fx.As(new(financerepo.BudgetRepo))),
 			fx.Annotate(postgres.NewDB, fx.As(new(financetx.Transactor))),
 		),
 		financeinstrument.Module(),
@@ -136,6 +139,7 @@ func FinanceModule() fx.Option {
 		financeaccount.Module(),
 		financecategory.Module(),
 		financeledger.Module(),
+		financebudget.Module(),
 	)
 }
 
