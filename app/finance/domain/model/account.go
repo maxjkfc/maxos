@@ -104,10 +104,17 @@ func (a Account) IsArchived() bool {
 	return a.ArchivedAt != nil
 }
 
-// HasStatements reports whether the account has statements: it is a card, and has
-// a closing day to cut them by.
-func (a Account) HasStatements() bool {
-	return a.Kind == AccountKindCard && a.ClosingDay != nil
+// CheckHasStatements returns nil when the account has statements: it is a card, and
+// has a closing day to cut them by. An account that is not a card, and a card that
+// has no closing day, is ErrNoStatements, with which of the two it is.
+func (a Account) CheckHasStatements() error {
+	switch {
+	case a.Kind != AccountKindCard:
+		return fmt.Errorf("%w: account %q is a %s, not a card", ErrNoStatements, a.Name, a.Kind)
+	case a.ClosingDay == nil:
+		return fmt.Errorf("%w: card %q has no closing day", ErrNoStatements, a.Name)
+	}
+	return nil
 }
 
 // WithStatementDays returns the account with the closing day and the payment due

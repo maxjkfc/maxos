@@ -32,12 +32,6 @@ import (
 // November: after the 14th, the day of the transactions.
 var postingDate = dateOn(2026, time.November, 20)
 
-// cardDraft records an expense of 120 on the card dated the 14th, a draft.
-func (a *plansApp) cardDraft(t *testing.T, card uuid.UUID, key string) usecase.Transaction {
-	t.Helper()
-	return a.lunch(t, card, key)
-}
-
 // setPostingDate sets the posting date of the transaction, with the context of the
 // call, which is the deadline it has.
 func (a *plansApp) setPostingDate(ctx context.Context, id uuid.UUID, postedOn time.Time) error {
@@ -68,7 +62,7 @@ func (a *plansApp) stateOf(t *testing.T, id uuid.UUID) string {
 // looked at before the lock, the date would be put on a void transaction.
 func TestSettingThePostingDateWhileTheTransactionIsBeingVoidedWaitsAndIsRefused(t *testing.T) {
 	a := newPlansApp(t, 4, lockStatement)
-	txn := a.cardDraft(t, a.card(t), "set-while-void-001")
+	txn := a.lunch(t, a.card(t), "set-while-void-001")
 	a.l.confirm(t, txn)
 
 	errs := make([]error, 2)
@@ -95,7 +89,7 @@ func TestSettingThePostingDateWhileTheTransactionIsBeingVoidedWaitsAndIsRefused(
 // then voids what has the date, which is the order the date first, the void second.
 func TestVoidingWhileThePostingDateIsBeingSetWaitsForItAndVoidsTheTransactionWithTheDate(t *testing.T) {
 	a := newPlansApp(t, 4, lockStatement)
-	txn := a.cardDraft(t, a.card(t), "void-while-set-001")
+	txn := a.lunch(t, a.card(t), "void-while-set-001")
 	a.l.confirm(t, txn)
 
 	errs := make([]error, 2)
@@ -127,7 +121,7 @@ func TestConfirmingAndSettingThePostingDateOfADraftInEitherOrderLeavesItConfirme
 	}{{"the date is held first", true}, {"the confirmation is held first", false}} {
 		t.Run(tt.name, func(t *testing.T) {
 			a := newPlansApp(t, 4, lockStatement)
-			txn := a.cardDraft(t, a.card(t), "confirm-and-set-0001")
+			txn := a.lunch(t, a.card(t), "confirm-and-set-0001")
 
 			errs := make([]error, 2)
 			a.heldTogether(t, 2, func(ctx context.Context, i int) {
@@ -155,7 +149,7 @@ func TestConfirmingAndSettingThePostingDateOfADraftInEitherOrderLeavesItConfirme
 // the lock: it is not found, and no date is written anywhere.
 func TestSettingThePostingDateWhileTheDraftIsBeingDiscardedFindsItGone(t *testing.T) {
 	a := newPlansApp(t, 4, lockStatement)
-	txn := a.cardDraft(t, a.card(t), "set-while-discard-1")
+	txn := a.lunch(t, a.card(t), "set-while-discard-1")
 
 	errs := make([]error, 2)
 	a.heldTogether(t, 2, func(ctx context.Context, i int) {
@@ -311,7 +305,7 @@ func TestSettingPostingDatesWhileTheTransactionIsConfirmedVoidedAndDiscardedIsEx
 	orders := permutations(len(calls))
 
 	for round := range stressRounds {
-		txn := a.cardDraft(t, card, fmt.Sprintf("explained-by-one-%03d", round))
+		txn := a.lunch(t, card, fmt.Sprintf("explained-by-one-%03d", round))
 
 		errs := make([]error, len(calls))
 		together(len(calls), func(ctx context.Context, i int) {
@@ -462,7 +456,7 @@ func TestSettingThePostingDateOfAPlanPeriodDoesNotWaitForTheLocksOfThePlan(t *te
 // date is not set before the transaction that holds it ends.
 func TestSettingThePostingDateWaitsForAnotherConnectionThatHoldsTheTransaction(t *testing.T) {
 	a := newPlansApp(t, 2, "")
-	txn := a.cardDraft(t, a.card(t), "set-waits-for-row-1")
+	txn := a.lunch(t, a.card(t), "set-waits-for-row-1")
 	a.l.confirm(t, txn)
 
 	ctx := context.Background()

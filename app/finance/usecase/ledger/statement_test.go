@@ -603,21 +603,21 @@ func TestGetCardStatementListsItsTransactionsByStatementDateAndAMovedOneIsOnTheN
 		return out
 	}
 	// Before the date, the purchase of the 5th is the last of the closed one.
-	if got := lines(before); len(got) != 2 || got[0] != "11-05 happened 11-05 posted - expense -500 TWD" {
-		t.Fatalf("closed statement before = %q, want the purchase of the 5th first of its two", got)
+	if got := lines(before); len(got) != 2 || got[1] != "11-05 happened 11-05 posted - expense -500 TWD" {
+		t.Fatalf("closed statement before = %q, want the purchase of the 5th last of its two", got)
 	}
 	wantClosed := []string{"10-20 happened 10-20 posted - expense -1000 TWD"}
 	if got := lines(closed); !slices.Equal(got, wantClosed) {
 		t.Errorf("closed statement after = %q, want %q: the purchase of the 5th is out of it", got, wantClosed)
 	}
-	// Newest statement date first; for the same statement date, the day it happened
-	// newest first: the purchase of the 6th, then the one of the 5th that was posted on
-	// the 6th.
+	// Oldest statement date first, as the lines of a bank's statement run; for the same
+	// statement date, the day it happened oldest first: the one of the 5th that was
+	// posted on the 6th, then the purchase of the 6th.
 	wantOpen := []string{
-		"11-12 happened 11-12 posted - transfer +400 TWD",
-		"11-10 happened 11-10 posted - expense -300 TWD",
-		"11-06 happened 11-06 posted - expense -200 TWD",
 		"11-06 happened 11-05 posted 11-06 expense -500 TWD",
+		"11-06 happened 11-06 posted - expense -200 TWD",
+		"11-10 happened 11-10 posted - expense -300 TWD",
+		"11-12 happened 11-12 posted - transfer +400 TWD",
 	}
 	if got := lines(open); !slices.Equal(got, wantOpen) {
 		t.Errorf("open statement = %q, want %q", got, wantOpen)

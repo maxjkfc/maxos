@@ -357,8 +357,8 @@ func (f *fakeTransactions) InstalmentPlans(_ context.Context, accountID *uuid.UU
 }
 
 // SetPostedOn stores the posting date in a database transaction, as the repo
-// does, and refuses what the table's CHECK refuses: a date before the day the
-// transaction happened.
+// does, and refuses what the table's CHECKs refuse: a date before the day the
+// transaction happened, and a date on a transaction of an instalment plan.
 func (f *fakeTransactions) SetPostedOn(ctx context.Context, id uuid.UUID, postedOn *time.Time) (model.Transaction, error) {
 	if !inTx(ctx) {
 		return model.Transaction{}, errNotInTx
@@ -371,6 +371,9 @@ func (f *fakeTransactions) SetPostedOn(ctx context.Context, id uuid.UUID, posted
 	if postedOn != nil {
 		if postedOn.Before(txn.OccurredOn) {
 			return model.Transaction{}, errors.New("fin_transaction_posted_on_check")
+		}
+		if txn.PlanID != nil {
+			return model.Transaction{}, errors.New("fin_transaction_posted_on_plan_check")
 		}
 		txn.PostedOn = new(*postedOn)
 	}
@@ -467,7 +470,7 @@ func (f *fakeTransactions) StatementFigures(_ context.Context, accountID uuid.UU
 // Statement reads a statement as the repo does: its figures, the confirmed
 // transactions on it, which are those with an account posting to the account whose
 // statement date is on it and not after today, by statement date, then the day they
-// happened, then the id, newest first, and the drafts that are on it by their
+// happened, then the id, oldest first, and the drafts that are on it by their
 // statement date, today or not.
 func (f *fakeTransactions) Statement(_ context.Context, q repo.StatementFilter) (repo.StatementContent, error) {
 	f.statementsAsked = append(f.statementsAsked, q)
@@ -484,15 +487,15 @@ func (f *fakeTransactions) Statement(_ context.Context, q repo.StatementFilter) 
 		switch {
 		case txn.Status == model.StatusConfirmed && !on.Before(q.Period.From) && !on.After(countedTo):
 			content.Transactions = append(content.Transactions, txn)
-		case txn.Status == model.StatusDraft && q.Period.Contains(on):
+		case txn.Status == model.StatusDraft && !on.Before(q.Period.From) && !on.After(q.Period.ClosingOn):
 			content.Drafts++
 		}
 	}
 	slices.SortFunc(content.Transactions, func(a, b model.Transaction) int {
 		return cmp.Or(
-			b.StatementDate().Compare(a.StatementDate()),
-			b.OccurredOn.Compare(a.OccurredOn),
-			bytes.Compare(b.ID[:], a.ID[:]),
+			a.StatementDate().Compare(b.StatementDate()),
+			a.OccurredOn.Compare(b.OccurredOn),
+			bytes.Compare(a.ID[:], b.ID[:]),
 		)
 	})
 	return content, nil

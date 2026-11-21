@@ -32,7 +32,7 @@ func (t Transaction) StatementDate() time.Time {
 // without taking a lock on it; WithPostedOn is the rest of the rules.
 func (t Transaction) CheckPostedOnAllowed() error {
 	if t.PlanID != nil {
-		return fmt.Errorf("%w: transaction %s is part of instalment plan %s: its days are the days the institution bills it, and it has no posting date",
+		return fmt.Errorf("%w: transaction %s is in plan %s, and a plan has no posting date: its periods fall due on the days the institution bills them",
 			ErrPartOfPlan, t.ID, *t.PlanID)
 	}
 	if t.Status == StatusVoid {
@@ -99,7 +99,7 @@ func (t Transaction) checkPostedOn() error {
 		return nil
 	}
 	if t.PlanID != nil {
-		return fmt.Errorf("%w: transaction %s is part of instalment plan %s, and has a posting date", ErrPartOfPlan, t.ID, *t.PlanID)
+		return fmt.Errorf("%w: transaction %s is in plan %s, and has a posting date", ErrPartOfPlan, t.ID, *t.PlanID)
 	}
 	if t.PostedOn.Before(t.OccurredOn) {
 		return fmt.Errorf("%w: it is %s, and the transaction happened on %s",

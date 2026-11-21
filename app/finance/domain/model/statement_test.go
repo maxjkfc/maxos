@@ -106,7 +106,7 @@ func TestEveryDayIsOnOneStatementWhateverTheClosingDay(t *testing.T) {
 	for closingDay := model.MinDayOfMonth; closingDay <= model.MaxDayOfMonth; closingDay++ {
 		for d := first; !d.After(last); d = d.AddDate(0, 0, 1) {
 			p := model.StatementContaining(closingDay, d)
-			if !p.Contains(d) || d.Before(p.From) || d.After(p.ClosingOn) {
+			if d.Before(p.From) || d.After(p.ClosingOn) {
 				t.Fatalf("closing day %d: the statement of %s is %s, which does not have the day in it", closingDay, d.Format(time.DateOnly), days(p))
 			}
 			if got := model.StatementContaining(closingDay, p.ClosingOn); got != p {
@@ -246,27 +246,6 @@ func TestAStatementIsClosedWhenItsClosingDateIsBeforeToday(t *testing.T) {
 				t.Fatalf("Closed(%s) = %v, want %v", tt.today.Format(time.RFC3339), got, tt.want)
 			}
 		})
-	}
-}
-
-func TestAStatementContainsTheDaysFromItsFirstToItsClosingDateAndNoOther(t *testing.T) {
-	period := model.StatementContaining(5, on(2026, time.November, 3)) // 2026-10-06..2026-11-05
-	tests := []struct {
-		day  time.Time
-		want bool
-	}{
-		{on(2026, time.October, 5), false},
-		{on(2026, time.October, 6), true},
-		{on(2026, time.October, 31), true},
-		{on(2026, time.November, 5), true},
-		{on(2026, time.November, 6), false},
-		{time.Date(2026, time.November, 5, 23, 0, 0, 0, time.UTC), true},
-		{time.Date(2026, time.November, 6, 0, 30, 0, 0, taipei), false},
-	}
-	for _, tt := range tests {
-		if got := period.Contains(tt.day); got != tt.want {
-			t.Errorf("%s contains %s = %v, want %v", days(period), tt.day.Format(time.RFC3339), got, tt.want)
-		}
 	}
 }
 

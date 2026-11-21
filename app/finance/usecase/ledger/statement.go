@@ -89,18 +89,16 @@ func (s *Service) postingAccounts(ctx context.Context, txn model.Transaction) ([
 }
 
 // cardWithStatements loads the card whose statements are asked for. An account that
-// is not there is model.ErrNotFound, and one that is not a card, or has no closing
-// day to cut statements by, is model.ErrNoStatements.
+// is not there is model.ErrNotFound, and one that has no statements, which is one
+// that is not a card and one that has no closing day to cut them by, is
+// model.ErrNoStatements (Account.CheckHasStatements).
 func (s *Service) cardWithStatements(ctx context.Context, id uuid.UUID) (model.Account, error) {
 	account, err := s.account(ctx, id)
 	if err != nil {
 		return model.Account{}, err
 	}
-	switch {
-	case account.Kind != model.AccountKindCard:
-		return model.Account{}, fmt.Errorf("%w: account %q is a %s, not a card", model.ErrNoStatements, account.Name, account.Kind)
-	case account.ClosingDay == nil:
-		return model.Account{}, fmt.Errorf("%w: card %q has no closing day", model.ErrNoStatements, account.Name)
+	if err := account.CheckHasStatements(); err != nil {
+		return model.Account{}, err
 	}
 	return account, nil
 }

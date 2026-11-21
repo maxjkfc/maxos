@@ -117,9 +117,10 @@ type StatementTransaction struct {
 type CardStatement struct {
 	CardStatementSummary
 	// Transactions are the confirmed transactions with an account posting to the card
-	// whose statement date is on the statement and not after today, by statement date
-	// newest first, then the day they happened, newest first, and for the same day
-	// the latest made first, as ListTransactions orders them.
+	// whose statement date is on the statement and not after today, oldest first, the
+	// way the lines of a bank's statement run: by statement date, then the day they
+	// happened, and for the same day the one made first. That is the opposite of
+	// ListTransactions, which lists the newest first.
 	Transactions []StatementTransaction
 	// Drafts is how many draft transactions with an account posting to the card have
 	// a statement date on the statement. The figures do not count them: it is how

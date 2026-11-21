@@ -188,15 +188,16 @@ func TestACardStatementFollowsThePostingDateAndNothingElseDoesThroughTheRealUseC
 	wantStatus(t, "the statement that has closed, after", []string{twdOf(closed.CardStatementSummary)}, "0 1000 0 -1000")
 	wantStatus(t, "the statement that is open, after", []string{twdOf(open.CardStatementSummary)}, "-1000 1400 700 -1700")
 	wantStatus(t, "its transactions", linesOf(closed), "10-20 happened 10-20 posted -: -1000")
-	// By statement date, then the day they happened: the payment, the 10th, and the
-	// three of the 6th, the one that happened that day before the two that happened
-	// before it.
+	// Oldest first, the way the lines of a bank's statement run: by statement date,
+	// then the day they happened. The three of the 6th are the purchase of the 31st of
+	// October that was posted on it, the purchase of the 5th that was posted on it,
+	// and the one that happened that day; then the 10th, and the payment of the 12th.
 	wantStatus(t, "the transactions of the open statement", linesOf(open),
-		"11-12 happened 11-12 posted -: 700",
-		"11-10 happened 11-10 posted -: -300",
-		"11-06 happened 11-06 posted -: -200",
-		"11-06 happened 11-05 posted 11-06: -500",
 		"11-06 happened 10-31 posted 11-06: -400",
+		"11-06 happened 11-05 posted 11-06: -500",
+		"11-06 happened 11-06 posted -: -200",
+		"11-10 happened 11-10 posted -: -300",
+		"11-12 happened 11-12 posted -: 700",
 	)
 
 	// Nothing but the statements moved.

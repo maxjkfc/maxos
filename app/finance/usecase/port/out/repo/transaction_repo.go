@@ -72,8 +72,8 @@ type StatementContent struct {
 	Figures []model.StatementFigures
 	// Transactions are the confirmed transactions on the statement, with their
 	// postings and tags: those with an account posting to the card whose statement
-	// date is on the statement and not after today. By statement date, newest
-	// first, then the day they happened, newest first, then the latest made first.
+	// date is on the statement and not after today. By statement date, oldest first,
+	// then the day they happened, oldest first, then the one made first.
 	Transactions []model.Transaction
 	// Drafts is how many drafts with an account posting to the card have a statement
 	// date on the statement. They are not in Figures nor in Transactions, and today

@@ -205,9 +205,10 @@ ORDER BY s.idx, i.code, p.instrument_id;
 -- account posting to the account whose statement date, the day it was posted when
 -- it has a posting date and otherwise the day it happened, is from from_day to
 -- to_day, both ends included. The caller gives as to_day the day the statement
--- closes, or today when that is earlier, as ListStatementFigures counts. Newest
--- statement date first, then as ListTransactions orders them: the day it happened,
--- newest first, and for the same day the latest made first (the ids are UUIDv7).
+-- closes, or today when that is earlier, as ListStatementFigures counts. Oldest
+-- statement date first, the way the lines of a bank's statement run, then the day it
+-- happened, oldest first, and for the same day the one made first (the ids are
+-- UUIDv7). That is the opposite of ListTransactions, which lists the newest first.
 SELECT t.id
 FROM fin_transaction t
 WHERE t.status = 'confirmed'
@@ -215,7 +216,7 @@ WHERE t.status = 'confirmed'
   AND EXISTS (
       SELECT 1 FROM fin_posting p
       WHERE p.transaction_id = t.id AND p.book = 'account' AND p.account_id = @account_id)
-ORDER BY COALESCE(t.posted_on, t.occurred_on) DESC, t.occurred_on DESC, t.id DESC;
+ORDER BY COALESCE(t.posted_on, t.occurred_on), t.occurred_on, t.id;
 
 -- name: CountStatementDrafts :one
 -- How many drafts with an account posting to the account have a statement date from

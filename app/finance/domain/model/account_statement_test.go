@@ -201,21 +201,29 @@ func TestClearingTheDaysOfAnAccountThatCannotHaveThemChangesNothing(t *testing.T
 	wantDays(t, got, nil, nil)
 }
 
-func TestACardHasStatementsWhenItHasAClosingDay(t *testing.T) {
+func TestOnlyACardWithAClosingDayHasStatements(t *testing.T) {
 	tests := []struct {
 		name    string
 		account model.Account
-		want    bool
+		wantWhy string // the reason the refusal gives, which ErrNoStatements does not say itself; nothing when the account has statements
 	}{
-		{"a card with both days", newCard(t, "卡", new(5), new(20)), true},
-		{"a card with a closing day", newCard(t, "卡", new(31), nil), true},
-		{"a card with no days", newCard(t, "卡", nil, nil), false},
-		{"cash", newCash(t, "現金"), false},
+		{"a card with both days", newCard(t, "卡", new(5), new(20)), ""},
+		{"a card with a closing day", newCard(t, "卡", new(31), nil), ""},
+		{"a card with no days", newCard(t, "卡", nil, nil), "has no closing day"},
+		{"cash", newCash(t, "現金"), `account "現金" is a cash, not a card`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.account.HasStatements(); got != tt.want {
-				t.Fatalf("HasStatements() = %v, want %v", got, tt.want)
+			err := tt.account.CheckHasStatements()
+
+			if tt.wantWhy == "" {
+				if err != nil {
+					t.Fatalf("CheckHasStatements() = %v, want none", err)
+				}
+				return
+			}
+			if !errors.Is(err, model.ErrNoStatements) || !strings.Contains(err.Error(), tt.wantWhy) {
+				t.Fatalf("CheckHasStatements() = %v, want ErrNoStatements saying %q", err, tt.wantWhy)
 			}
 		})
 	}

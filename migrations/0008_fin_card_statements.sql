@@ -36,16 +36,21 @@ ALTER TABLE fin_account
 -- The posting date (入帳日): the day the institution put the transaction on a
 -- statement, when that is not the day it happened. NULL means the day it happened,
 -- occurred_on. It decides which statement the transaction is on and nothing else:
--- balances, budgets and dealings go by occurred_on, as before. Nothing but the
--- use cases checks that it belongs to a transaction on a card, and that the
--- transaction is not part of an instalment plan: a CHECK cannot see other tables.
+-- balances, budgets and dealings go by occurred_on, as before. A transaction that
+-- is part of an instalment plan, the origin or a period, has none: the day of a
+-- period is the day the institution bills it already. That the transaction is on
+-- a card needs the accounts of its postings, which are in other tables and which a
+-- CHECK cannot see, so only the use cases check that.
 ALTER TABLE fin_transaction
     ADD COLUMN posted_on date;
 
 ALTER TABLE fin_transaction
-    -- Passes when posted_on is NULL.
+    -- Each of these passes when posted_on is NULL.
     ADD CONSTRAINT fin_transaction_posted_on_check
-        CHECK (posted_on >= occurred_on);
+        CHECK (posted_on >= occurred_on),
+    -- plan_id is set on the origin of a plan (it is its own id) and on every period.
+    ADD CONSTRAINT fin_transaction_posted_on_plan_check
+        CHECK (posted_on IS NULL OR plan_id IS NULL);
 
 -- +goose Down
 

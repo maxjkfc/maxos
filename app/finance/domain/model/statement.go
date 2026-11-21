@@ -81,12 +81,6 @@ func StatementsClosingBetween(closingDay int, from, to time.Time) []StatementPer
 	return periods
 }
 
-// Contains reports whether the day is one the statement covers.
-func (p StatementPeriod) Contains(day time.Time) bool {
-	day = DateOf(day)
-	return !day.Before(p.From) && !day.After(p.ClosingOn)
-}
-
 // DueDate returns the day the statement is to be paid by: the first date after
 // its closing date, strictly, whose day is the payment due day, which in a month
 // with fewer days is the last day of the month. A due day that is not after the

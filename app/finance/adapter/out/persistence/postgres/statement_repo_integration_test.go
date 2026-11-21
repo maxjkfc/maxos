@@ -203,8 +203,8 @@ func TestAStatementHasItsFirstAndLastDayAndNotTheDaysAroundIt(t *testing.T) {
 		[]string{"TWD -1 110 0 -111"},     // the 6th of October and the 5th of November are on it, and not the 6th of November
 		[]string{"TWD -111 1000 0 -1111"}, // the 6th of November starts the next
 	)
-	if got := keys(e.statement(on(2026, time.October, 20), today).Transactions); !slices.Equal(got, []string{"last-day-100", "first-day-10"}) {
-		t.Errorf("transactions of the statement of the 6th of October = %q, want the first day and the closing date, newest first", got)
+	if got := keys(e.statement(on(2026, time.October, 20), today).Transactions); !slices.Equal(got, []string{"first-day-10", "last-day-100"}) {
+		t.Errorf("transactions of the statement of the 6th of October = %q, want the first day and the closing date, oldest first", got)
 	}
 	if got := keys(e.statement(on(2026, time.November, 20), today).Transactions); !slices.Equal(got, []string{"next-day-1000"}) {
 		t.Errorf("transactions of the next statement = %q, want the day after the closing date", got)
@@ -250,11 +250,11 @@ func TestAPostingDateMovesATransactionToTheNextStatementAndABalanceStillCountsIt
 		t.Errorf("closed statement after = %q, want it to have lost the purchase", got)
 	}
 	nextGot := e.statement(on(2026, time.November, 6), today).Transactions
-	if got := keys(nextGot); !slices.Equal(got, []string{"later-300", "moved-500"}) {
-		t.Fatalf("next statement after = %q, want the purchase that was posted on its first day", got)
+	if got := keys(nextGot); !slices.Equal(got, []string{"moved-500", "later-300"}) {
+		t.Fatalf("next statement after = %q, want the purchase that was posted on its first day, then the later one", got)
 	}
-	if nextGot[1].PostedOn == nil || !nextGot[1].PostedOn.Equal(on(2026, time.November, 6)) || !nextGot[1].OccurredOn.Equal(on(2026, time.November, 5)) {
-		t.Errorf("the moved transaction = posted %v, occurred %v, want posted on the 6th and happened on the 5th", nextGot[1].PostedOn, nextGot[1].OccurredOn)
+	if nextGot[0].PostedOn == nil || !nextGot[0].PostedOn.Equal(on(2026, time.November, 6)) || !nextGot[0].OccurredOn.Equal(on(2026, time.November, 5)) {
+		t.Errorf("the moved transaction = posted %v, occurred %v, want posted on the 6th and happened on the 5th", nextGot[0].PostedOn, nextGot[0].OccurredOn)
 	}
 	// What a balance counts is the day it happened: nothing about it moved.
 	if got := balanceOn(on(2026, time.November, 5)); got != "visa TWD -1200" {
@@ -342,8 +342,8 @@ func TestWhatIsDatedAfterTodayIsOnNoStatementUntilItsDay(t *testing.T) {
 		{"the day before the purchase of the 20th", on(2026, time.November, 19), []string{"TWD -300 0 0 -300"}, nil},
 		{"the 20th, the day of the purchase, which counts from it", on(2026, time.November, 20), []string{"TWD -300 50 0 -350"}, []string{"dated-20th-50"}},
 		{"the day before the posting date", on(2026, time.November, 24), []string{"TWD -300 50 0 -350"}, []string{"dated-20th-50"}},
-		{"the 25th, the day it was posted, which counts from it", on(2026, time.November, 25), []string{"TWD -300 57 0 -357"}, []string{"posted-25th-7", "dated-20th-50"}},
-		{"long after", on(2027, time.March, 1), []string{"TWD -300 57 0 -357"}, []string{"posted-25th-7", "dated-20th-50"}},
+		{"the 25th, the day it was posted, which counts from it", on(2026, time.November, 25), []string{"TWD -300 57 0 -357"}, []string{"dated-20th-50", "posted-25th-7"}},
+		{"long after", on(2027, time.March, 1), []string{"TWD -300 57 0 -357"}, []string{"dated-20th-50", "posted-25th-7"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -544,12 +544,12 @@ func TestAForeignCurrencyCardHasFiguresForEachOfItsInstruments(t *testing.T) {
 // from one statement of SQL.
 func TestTheClosingOfAStatementIsThePreviousOfTheNextAndWhatThePostingsAddUpTo(t *testing.T) {
 	e := newStatementEnv(t)
-	days := []time.Time{
+	dates := []time.Time{
 		on(2026, time.July, 6), on(2026, time.July, 28), on(2026, time.August, 5), on(2026, time.August, 6), on(2026, time.September, 5),
 		on(2026, time.September, 20), on(2026, time.October, 5), on(2026, time.October, 6), on(2026, time.October, 31),
 		on(2026, time.November, 5), on(2026, time.November, 6), on(2026, time.November, 21), on(2026, time.December, 5), on(2026, time.December, 6),
 	}
-	for i, day := range days {
+	for i, day := range dates {
 		switch {
 		case i%3 == 0:
 			e.payment(fmt.Sprintf("payment-%02d", i), day, fmt.Sprint(100*(i+1)))
@@ -603,24 +603,24 @@ func TestTheClosingOfAStatementIsThePreviousOfTheNextAndWhatThePostingsAddUpTo(t
 	for i, period := range periods {
 		f := figureOf(got[i])
 		if want := f.Previous.Sub(f.Charges).Add(f.Credits); !f.Closing.Equal(want) {
-			t.Errorf("%s: closing %s, want previous %s less charges %s plus credits %s = %s", days2(period), f.Closing, f.Previous, f.Charges, f.Credits, want)
+			t.Errorf("%s: closing %s, want previous %s less charges %s plus credits %s = %s", days(period), f.Closing, f.Previous, f.Charges, f.Credits, want)
 		}
 		if want := owed(period.ClosingOn); !f.Closing.Equal(want) {
-			t.Errorf("%s: closing %s, want what the postings add up to by the closing date, %s", days2(period), f.Closing, want)
+			t.Errorf("%s: closing %s, want what the postings add up to by the closing date, %s", days(period), f.Closing, want)
 		}
 		if want := owed(period.From.AddDate(0, 0, -1)); !f.Previous.Equal(want) {
-			t.Errorf("%s: previous %s, want what the postings add up to by the day before it, %s", days2(period), f.Previous, want)
+			t.Errorf("%s: previous %s, want what the postings add up to by the day before it, %s", days(period), f.Previous, want)
 		}
 		if i > 0 {
 			if before := figureOf(got[i-1]); !before.Closing.Equal(f.Previous) {
-				t.Errorf("%s closes at %s, and %s starts from %s, want them the same", days2(periods[i-1]), before.Closing, days2(period), f.Previous)
+				t.Errorf("%s closes at %s, and %s starts from %s, want them the same", days(periods[i-1]), before.Closing, days(period), f.Previous)
 			}
 		}
 	}
 }
 
-// days2 is a statement as the days it covers.
-func days2(p model.StatementPeriod) string {
+// days is a statement as the days it covers.
+func days(p model.StatementPeriod) string {
 	return p.From.Format(time.DateOnly) + ".." + p.ClosingOn.Format(time.DateOnly)
 }
 
@@ -665,7 +665,7 @@ func TestStatementFiguresAreOfTheAccountAskedAboutAndNoOther(t *testing.T) {
 	}
 }
 
-func TestTheTransactionsOfAStatementAreByStatementDateThenTheDayTheyHappenedThenNewestFirst(t *testing.T) {
+func TestTheTransactionsOfAStatementAreByStatementDateThenTheDayTheyHappenedThenOldestFirst(t *testing.T) {
 	e := newStatementEnv(t)
 	first := e.spend("a-nov-06", on(2026, time.November, 6), "1")
 	posted := e.spendPosted("b-nov-05-posted-06", on(2026, time.November, 5), "2", on(2026, time.November, 6))
@@ -674,20 +674,21 @@ func TestTheTransactionsOfAStatementAreByStatementDateThenTheDayTheyHappenedThen
 	e.spend("e-nov-02-posted-10", on(2026, time.November, 2), "5") // dated before the statement, and not posted
 	e.spendPosted("f-nov-03-posted-10", on(2026, time.November, 3), "6", on(2026, time.November, 10))
 	if first.ID.String() >= second.ID.String() {
-		t.Fatal("the ids are not in the order they were made in: the test cannot say which is the latest made")
+		t.Fatal("the ids are not in the order they were made in: the test cannot say which of the two was made first")
 	}
 
 	got := e.statement(on(2026, time.November, 20), on(2026, time.December, 1)).Transactions
 
-	// 10th: the one that happened on the 10th, then the one that was posted on it, which
-	// happened earlier; the 6th: the two of the 6th, the later made first, then the one
-	// that happened on the 5th and was posted on the 6th.
-	want := []string{"d-nov-10", "f-nov-03-posted-10", "c-nov-06", "a-nov-06", "b-nov-05-posted-06"}
+	// The statement dates in order, the 6th and then the 10th. On the 6th: the one that
+	// happened on the 5th and was posted on the 6th, then the two that happened on the
+	// 6th, in the order they were made. On the 10th: the one that happened on the 3rd
+	// and was posted on the 10th, then the one that happened on the 10th.
+	want := []string{"b-nov-05-posted-06", "a-nov-06", "c-nov-06", "f-nov-03-posted-10", "d-nov-10"}
 	if !slices.Equal(keys(got), want) {
 		t.Fatalf("transactions = %q, want %q", keys(got), want)
 	}
 	// Each is whole: its postings, and the posting date it has.
-	if len(got[0].Postings) != 2 || got[4].ID != posted.ID || got[4].PostedOn == nil || !got[4].PostedOn.Equal(on(2026, time.November, 6)) {
+	if len(got[4].Postings) != 2 || got[0].ID != posted.ID || got[0].PostedOn == nil || !got[0].PostedOn.Equal(on(2026, time.November, 6)) {
 		t.Errorf("transactions = %+v, want them with their postings and posting dates", got)
 	}
 }
@@ -787,6 +788,62 @@ func TestSetPostedOnSetsChangesAndClearsTheDateAndTheTableRefusesOneBeforeTheDay
 	}
 }
 
+// The table is the last guard of the rule that a transaction of an instalment plan
+// has no posting date: the origin of the plan, whose plan_id is its own id, as much
+// as each of its periods. The model and the use cases refuse it first, so these go
+// round them, by an update of what is stored and by an insert with the date set.
+func TestTheTableRefusesAPostingDateOnTheOriginAndOnEachPeriodOfAnInstalmentPlan(t *testing.T) {
+	e := newStatementEnv(t)
+	newPlan := func(key string) model.InstalmentPlan {
+		t.Helper()
+		plan, err := model.NewInstalmentExpense(model.ExpenseParams{
+			Header: e.header(key, on(2026, time.November, 10)), Account: &e.visa, Instrument: e.twd, BaseCurrency: e.twd,
+			Lines: []model.CategoryLine{{Category: e.food, Amount: dec("2000")}},
+		}, model.InstalmentSchedule{Periods: []model.InstalmentPeriod{
+			{ID: uuid.Must(uuid.NewV7()), DueOn: on(2026, time.December, 5), Principal: dec("1000")},
+			{ID: uuid.Must(uuid.NewV7()), DueOn: on(2027, time.January, 5), Principal: dec("1000")},
+		}})
+		if err != nil {
+			t.Fatalf("NewInstalmentExpense: %v", err)
+		}
+		return plan
+	}
+	// After every day of the plan, so that the plan is all that is wrong with the date.
+	postedOn := on(2027, time.February, 1)
+
+	stored := e.storePlan(newPlan("plan-update-2000"))
+	for _, txn := range stored.Transactions() {
+		_, err := e.pool.Exec(context.Background(), `UPDATE fin_transaction SET posted_on = $2 WHERE id = $1`, txn.ID, postedOn)
+		wantConstraint(t, err, checkViolation, "fin_transaction_posted_on_plan_check")
+		if got := e.get(txn.ID); got.PostedOn != nil {
+			t.Errorf("%s: posting date %v after a refused update, want none", txn.IdempotencyKey, got.PostedOn)
+		}
+	}
+
+	for _, tt := range []struct {
+		name string
+		key  string
+		give func(*model.InstalmentPlan)
+	}{
+		{"the origin", "plan-insert-origin", func(p *model.InstalmentPlan) { p.Origin.PostedOn = new(postedOn) }},
+		{"a period", "plan-insert-period", func(p *model.InstalmentPlan) { p.Periods[1].PostedOn = new(postedOn) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := newPlan(tt.key)
+			tt.give(&plan)
+			err := e.inTx(func(ctx context.Context) error {
+				for _, txn := range plan.Transactions() {
+					if _, err := e.txns.Insert(ctx, txn); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			wantConstraint(t, err, checkViolation, "fin_transaction_posted_on_plan_check")
+		})
+	}
+}
+
 // The statement is read in one snapshot: a purchase that is confirmed on another
 // connection after the figures are read must not be in the list of transactions that
 // goes with them, as it would be in a list read after it, or the list would not be
@@ -800,7 +857,7 @@ func TestAStatementIsReadInOneSnapshot(t *testing.T) {
 	late := e.draft("late-draft-1", on(2026, time.November, 10), "1")
 
 	tracer := &afterStatement{prefix: "-- name: ListStatementFigures", hook: func() {
-		// Another connection confirms the purchase and records one more draft.
+		// Another connection confirms the purchase and deletes a draft.
 		e.setStatus(arriving.ID, model.StatusConfirmed)
 		if _, err := e.pool.Exec(context.Background(), `DELETE FROM fin_transaction WHERE id = $1`, late.ID); err != nil {
 			t.Errorf("delete a draft on another connection: %v", err)

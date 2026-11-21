@@ -223,7 +223,7 @@ var (
 	// It is also what giving a transaction of a plan a posting date comes to, the
 	// origin as much as a period: the day of a period is the day the institution
 	// bills it already.
-	ErrPartOfPlan = errors.New("the transaction is a period of an instalment plan")
+	ErrPartOfPlan = errors.New("the transaction is part of an instalment plan")
 
 	// ErrInstalmentsWithPaidBy is returned for an expense that a party paid and that
 	// is to be paid in instalments: a plan is of the account that is charged, which
