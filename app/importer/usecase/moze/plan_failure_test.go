@@ -8,6 +8,7 @@ import (
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
 	"github.com/maxjkfc/maxos/app/importer/usecase/moze"
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/in/usecase"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/filefailure"
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/mapping"
 )
 
@@ -61,20 +62,20 @@ func TestAFileAPortCannotReadOrWriteIsAFailureOfThatFile(t *testing.T) {
 	tests := []struct {
 		name     string
 		change   func(*moze.Inputs)
-		wantCode model.FailureCode
+		wantCode filefailure.Code
 		wantFile string
 	}{
-		{"the export", func(in *moze.Inputs) { in.Source = brokenSource{errDisk} }, model.FailureFileUnreadable, "export.csv"},
-		{"the mapping", func(in *moze.Inputs) { in.Mapping = brokenMapping{load: errDisk} }, model.FailureFileUnreadable, "mapping.yaml"},
-		{"the rates", func(in *moze.Inputs) { in.Rates = brokenRates{errDisk} }, model.FailureFileUnreadable, "rates.csv"},
-		{"the mapping, to add the guesses to", func(in *moze.Inputs) { in.Mapping = brokenMapping{add: errDisk} }, model.FailureFileNotWritten, "mapping.yaml"},
+		{"the export", func(in *moze.Inputs) { in.Source = brokenSource{errDisk} }, filefailure.Unreadable, "export.csv"},
+		{"the mapping", func(in *moze.Inputs) { in.Mapping = brokenMapping{load: errDisk} }, filefailure.Unreadable, "mapping.yaml"},
+		{"the rates", func(in *moze.Inputs) { in.Rates = brokenRates{errDisk} }, filefailure.Unreadable, "rates.csv"},
+		{"the mapping, to add the guesses to", func(in *moze.Inputs) { in.Mapping = brokenMapping{add: errDisk} }, filefailure.NotWritten, "mapping.yaml"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := planOf(inputsWith(tt.change))
-			var f *model.Failure
+			var f *filefailure.Failure
 			if !errors.As(err, &f) {
-				t.Fatalf("Plan = %v, want a *model.Failure", err)
+				t.Fatalf("Plan = %v, want a *filefailure.Failure", err)
 			}
 			if f.Code != tt.wantCode || f.File != tt.wantFile || f.Line != 0 || len(f.Args) != 0 {
 				t.Errorf("failure = %s about %q at line %d with %q, want %s about %q", f.Code, f.File, f.Line, f.Args, tt.wantCode, tt.wantFile)
@@ -89,7 +90,7 @@ func TestAFileAPortCannotReadOrWriteIsAFailureOfThatFile(t *testing.T) {
 // What an adapter says of its file is said already, and is returned as it is: it
 // names the file and the line.
 func TestAFailureOfAPortIsReturnedAsItIs(t *testing.T) {
-	given := &model.Failure{Code: model.FailureNotDay, File: "my.csv", Line: 4, Args: []string{"日期", "x", "2026/03/10"}}
+	given := &filefailure.Failure{Code: filefailure.NotDay, File: "my.csv", Line: 4, Args: []string{"日期", "x", "2026/03/10"}}
 	tests := map[string]func(*moze.Inputs){
 		"the export":  func(in *moze.Inputs) { in.Source = brokenSource{given} },
 		"the mapping": func(in *moze.Inputs) { in.Mapping = brokenMapping{load: given} },
@@ -99,7 +100,7 @@ func TestAFailureOfAPortIsReturnedAsItIs(t *testing.T) {
 	for name, change := range tests {
 		t.Run(name, func(t *testing.T) {
 			err := planOf(inputsWith(change))
-			var f *model.Failure
+			var f *filefailure.Failure
 			if !errors.As(err, &f) || f != given {
 				t.Errorf("Plan = %v, want the failure the port gave, as it is", err)
 			}
@@ -113,7 +114,7 @@ func TestTheEndOfTheContextIsNotAFailureOfAFile(t *testing.T) {
 	for _, reason := range []error{context.Canceled, context.DeadlineExceeded} {
 		t.Run(reason.Error(), func(t *testing.T) {
 			err := planOf(inputsWith(func(in *moze.Inputs) { in.Source = brokenSource{reason} }))
-			var f *model.Failure
+			var f *filefailure.Failure
 			if !errors.Is(err, reason) || errors.As(err, &f) {
 				t.Errorf("Plan = %v, want %v and no failure", err, reason)
 			}

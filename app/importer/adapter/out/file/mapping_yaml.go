@@ -19,6 +19,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/filefailure"
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/mapping"
 )
 
@@ -49,7 +50,7 @@ var _ mapping.Store = (*MappingYAML)(nil)
 // is read and ignored, whatever it is written as, and Load has a warning for each, with
 // the line of its key. Neither Load nor Append changes the file for it.
 //
-// What is wrong with a file is a *model.Failure that has the file, the line and the
+// What is wrong with a file is a *filefailure.Failure that has the file, the line and the
 // values of its code, never a sentence: the words are the command line's.
 //
 // An entry that the import added ends with the comment "# guessed" until the user
@@ -126,7 +127,7 @@ var (
 // that does not exist; one that has nothing in it is an empty mapping that does.
 // Guessed is the number of entries that end with the mark "# guessed": see
 // countGuessed. Warnings has what is odd in the file and stops nothing. Load writes
-// nothing. What is wrong with the file is a *model.Failure that names it.
+// nothing. What is wrong with the file is a *filefailure.Failure that names it.
 func (*MappingYAML) Load(ctx context.Context, path string) (mapping.Loaded, error) {
 	if err := ctx.Err(); err != nil {
 		return mapping.Loaded{}, err
@@ -239,7 +240,7 @@ func parseDocument(data []byte) (document, error) {
 		if len(next.Content) > 0 {
 			line = next.Content[0].Line
 		}
-		return document{}, failAt(model.FailureSecondDocument, line)
+		return document{}, failAt(filefailure.SecondDocument, line)
 	}
 
 	if len(doc.Content) == 0 {
@@ -250,7 +251,7 @@ func parseDocument(data []byte) (document, error) {
 		return document{}, nil
 	}
 	if root.Kind != yaml.MappingNode {
-		return document{}, failAt(model.FailureNotSections, root.Line)
+		return document{}, failAt(filefailure.NotSections, root.Line)
 	}
 	d := &decoder{}
 	content, err := d.mapping(root)
@@ -273,7 +274,7 @@ func yamlFailure(err error) error {
 			line = n
 		}
 	}
-	return failAt(model.FailureYAMLSyntax, line)
+	return failAt(filefailure.YAMLSyntax, line)
 }
 
 // decoder reads a mapping from the nodes of a file, walking them and not decoding into
@@ -555,17 +556,17 @@ func entriesOf(n *yaml.Node, where string) ([]field, error) {
 		return nil, nil
 	}
 	if n.Kind != yaml.MappingNode {
-		return nil, failAt(model.FailureMustBeMapping, n.Line, where)
+		return nil, failAt(filefailure.MustBeMapping, n.Line, where)
 	}
 	fields := make([]field, 0, len(n.Content)/2)
 	lines := make(map[string]int, len(n.Content)/2) // the line each key is on
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		k, v := resolved(n.Content[i]), resolved(n.Content[i+1])
 		if k.Kind != yaml.ScalarNode {
-			return nil, failAt(model.FailureKeyNotSingle, k.Line, where)
+			return nil, failAt(filefailure.KeyNotSingle, k.Line, where)
 		}
 		if first, twice := lines[k.Value]; twice {
-			return nil, failAt(model.FailureKeyTwice, k.Line, where, k.Value, strconv.Itoa(first))
+			return nil, failAt(filefailure.KeyTwice, k.Line, where, k.Value, strconv.Itoa(first))
 		}
 		lines[k.Value] = k.Line
 		fields = append(fields, field{key: k.Value, at: k, val: v})
@@ -582,7 +583,7 @@ func objectOf(n *yaml.Node, where string, known []string) ([]field, error) {
 	}
 	for _, f := range fields {
 		if !slices.Contains(known, f.key) {
-			return nil, failAt(model.FailureKeyUnknown, f.at.Line, append([]string{f.key, where}, known...)...)
+			return nil, failAt(filefailure.KeyUnknown, f.at.Line, append([]string{f.key, where}, known...)...)
 		}
 	}
 	return fields, nil
@@ -595,7 +596,7 @@ func (f field) text() (string, error) {
 		return "", nil
 	}
 	if f.val.Kind != yaml.ScalarNode {
-		return "", failAt(model.FailureValueNotSingle, f.val.Line, f.key)
+		return "", failAt(filefailure.ValueNotSingle, f.val.Line, f.key)
 	}
 	return f.val.Value, nil
 }
@@ -608,7 +609,7 @@ func (f field) integer() (int, error) {
 	}
 	n, err := strconv.Atoi(text)
 	if err != nil {
-		return 0, failAt(model.FailureNotWholeNumber, f.val.Line, f.key, text)
+		return 0, failAt(filefailure.NotWholeNumber, f.val.Line, f.key, text)
 	}
 	return n, nil
 }
@@ -625,7 +626,7 @@ func (f field) boolean() (bool, error) {
 	case "true":
 		return true, nil
 	}
-	return false, failAt(model.FailureNotBoolean, f.val.Line, f.key, text)
+	return false, failAt(filefailure.NotBoolean, f.val.Line, f.key, text)
 }
 
 // day is the value as a day at midnight UTC, written 2006-01-02; no value is the
@@ -637,7 +638,7 @@ func (f field) day() (time.Time, error) {
 	}
 	day, err := time.Parse(time.DateOnly, text)
 	if err != nil {
-		return time.Time{}, failAt(model.FailureNotDay, f.val.Line, f.key, text, mappingDayExample)
+		return time.Time{}, failAt(filefailure.NotDay, f.val.Line, f.key, text, mappingDayExample)
 	}
 	return day, nil
 }
@@ -651,7 +652,7 @@ func (f field) quantity() (*decimal.Decimal, error) {
 	}
 	d, err := decimal.NewFromString(text)
 	if err != nil {
-		return nil, failAt(model.FailureNotNumber, f.val.Line, f.key, text)
+		return nil, failAt(filefailure.NotNumber, f.val.Line, f.key, text)
 	}
 	return &d, nil
 }

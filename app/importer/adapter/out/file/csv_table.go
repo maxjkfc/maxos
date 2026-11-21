@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/filefailure"
 )
 
 // utf8BOM is the byte order mark that some programs put at the start of a UTF-8 file.
@@ -51,7 +51,7 @@ func openCSV(r io.Reader, comment rune, required ...string) (*csvTable, error) {
 
 	header, err := rd.Read()
 	if errors.Is(err, io.EOF) {
-		return nil, failAt(model.FailureFileEmpty, 0)
+		return nil, failAt(filefailure.Empty, 0)
 	}
 	if err != nil {
 		return nil, csvFailure(err)
@@ -65,7 +65,7 @@ func openCSV(r io.Reader, comment rune, required ...string) (*csvTable, error) {
 			continue // a column that is not used
 		}
 		if _, twice := cols[name]; twice {
-			return nil, failAt(model.FailureColumnTwice, line, name)
+			return nil, failAt(filefailure.ColumnTwice, line, name)
 		}
 		cols[name] = i
 	}
@@ -76,7 +76,7 @@ func openCSV(r io.Reader, comment rune, required ...string) (*csvTable, error) {
 		}
 	}
 	if len(missing) > 0 {
-		return nil, failAt(model.FailureColumnsMissing, line, missing...)
+		return nil, failAt(filefailure.ColumnsMissing, line, missing...)
 	}
 	return &csvTable{rd: rd, cols: cols, size: len(header)}, nil
 }
@@ -93,7 +93,7 @@ func (t *csvTable) next() (csvRecord, error) {
 	}
 	line, _ := t.rd.FieldPos(0)
 	if len(fields) != t.size {
-		return csvRecord{}, failAt(model.FailureFieldCount, line, strconv.Itoa(len(fields)), strconv.Itoa(t.size))
+		return csvRecord{}, failAt(filefailure.FieldCount, line, strconv.Itoa(len(fields)), strconv.Itoa(t.size))
 	}
 	return csvRecord{line: line, fields: fields, cols: t.cols}, nil
 }

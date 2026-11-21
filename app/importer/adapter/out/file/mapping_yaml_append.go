@@ -17,6 +17,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/filefailure"
 )
 
 const (
@@ -61,16 +62,16 @@ const newFileHeader = `# maxos import moze 的對照檔：MOZE 匯出檔裡的�
 //
 // Before anything is written the new text is read back, and what it says of every
 // entry has to be what the file said, and, of the entries put in, what was asked,
-// value for value. When it is not, Append fails with FailureWouldReadDifferently,
+// value for value. When it is not, Append fails with filefailure.WouldReadDifferently,
 // which names the first entry that would read differently, and writes nothing. That is
 // how a layout it cannot put lines into is found out: a block scalar that has a line
 // like a comment in it, which a new entry would cut short.
 //
 // A section that is written between braces with entries in it, {a: b}, cannot be
-// added to: that is FailureBraces, and the file is left as it is. {} with nothing in
+// added to: that is filefailure.Braces, and the file is left as it is. {} with nothing in
 // it is made the key of a section of lines.
 //
-// What goes wrong is a *model.Failure that names the file: what the file says, as Load
+// What goes wrong is a *filefailure.Failure that names the file: what the file says, as Load
 // finds it; an entry that cannot be written as a line; a layout that lines cannot be
 // added to; a file that cannot be read or written, with the reason of the system.
 func (*MappingYAML) Append(ctx context.Context, path string, guessed model.Mapping) error {
@@ -193,7 +194,7 @@ func (a additions) pick(path string, have map[string]bool) ([]entry, error) {
 			continue
 		}
 		if e.text == "" {
-			return nil, failAt(model.FailureEntryNotWritable, 0, path, e.key)
+			return nil, failAt(filefailure.EntryNotWritable, 0, path, e.key)
 		}
 		out = append(out, e)
 	}
@@ -387,7 +388,7 @@ func extend(data []byte, guessed model.Mapping) (updated []byte, changed bool, e
 		return data, false, nil
 	}
 	if ed.flowRoot {
-		return nil, false, failAt(model.FailureBraces, doc.root.Line, "")
+		return nil, false, failAt(filefailure.Braces, doc.root.Line, "")
 	}
 	updated = ed.text()
 
@@ -397,11 +398,11 @@ func extend(data []byte, guessed model.Mapping) (updated []byte, changed bool, e
 	// entries have lost what they said.
 	back, err := parseDocument(updated)
 	if err != nil {
-		return nil, false, failAt(model.FailureWouldReadDifferently, 0)
+		return nil, false, failAt(filefailure.WouldReadDifferently, 0)
 	}
 	want := doc.content.Merge(addedOf(guessed, ed.added))
 	if ref, differs := firstDifference(back.content, want); differs {
-		return nil, false, failAt(model.FailureWouldReadDifferently, 0, ref.Section, ref.Key)
+		return nil, false, failAt(filefailure.WouldReadDifferently, 0, ref.Section, ref.Key)
 	}
 	return updated, true, nil
 }
@@ -694,7 +695,7 @@ func (ed *editor) room(s field, where string, starts []int) (after, indent int, 
 	case shapeBlock:
 		return ed.contentEnd(s, starts), s.val.Content[0].Column - 1, nil
 	}
-	return 0, 0, failAt(model.FailureBraces, s.at.Line, where)
+	return 0, 0, failAt(filefailure.Braces, s.at.Line, where)
 }
 
 // contentEnd is the index of the last line of a section that has something on it:
@@ -741,7 +742,7 @@ func (ed *editor) clearValue(s field, where string) error {
 	line := ed.lines[i]
 	start := s.val.Column - 1
 	if s.val.Line != s.at.Line || start < 0 || start > len(line) {
-		return failAt(model.FailureLayout, s.at.Line, where)
+		return failAt(filefailure.Layout, s.at.Line, where)
 	}
 	rest := line[start:]
 	var width int
@@ -751,11 +752,11 @@ func (ed *editor) clearValue(s field, where string) error {
 	case s.val.Kind == yaml.MappingNode && strings.HasPrefix(rest, "{"):
 		end := strings.IndexByte(rest, '}')
 		if end < 0 || strings.TrimSpace(rest[1:end]) != "" {
-			return failAt(model.FailureLayout, s.at.Line, where)
+			return failAt(filefailure.Layout, s.at.Line, where)
 		}
 		width = end + 1
 	default:
-		return failAt(model.FailureLayout, s.at.Line, where)
+		return failAt(filefailure.Layout, s.at.Line, where)
 	}
 	head := strings.TrimRight(line[:start], " ")
 	tail := line[start+width:]

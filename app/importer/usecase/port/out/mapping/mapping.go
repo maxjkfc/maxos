@@ -23,12 +23,15 @@ type Loaded struct {
 // Store keeps the mapping.
 type Store interface {
 	// Load reads the mapping at path. A file that does not exist is an empty mapping,
-	// not an error; a file that cannot be read as a mapping is an error that says
-	// what is wrong with it and where.
+	// not an error; a file that cannot be read, or read as a mapping, is a
+	// *filefailure.Failure that names the file and says what is wrong with it and
+	// where.
 	Load(ctx context.Context, path string) (Loaded, error)
 	// Append adds the entries of guessed to the file at path, each marked "# guessed",
 	// and leaves everything that is in the file alone, comments and the order of its
 	// entries included. It creates the file, with a comment that says what it is, when
-	// there is none. An entry the file has is not added again.
+	// there is none. An entry the file has is not added again. What it cannot do, a
+	// file that cannot be read or written, or entries that cannot be added to it as it
+	// is laid out, is a *filefailure.Failure, and nothing is written.
 	Append(ctx context.Context, path string, guessed model.Mapping) error
 }

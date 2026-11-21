@@ -76,9 +76,17 @@ type PlanOutput struct {
 //     theirs to keep, and recorded again, under a key of its own, when the void was
 //     what made room for another version that is gone too (the plan went back to
 //     what it said before);
+//   - a unit that is made of the rows of an instalment is not recorded while a plan
+//     of instalments that the export does not have any more is confirmed in the
+//     ledger, as it charges the interest the unit's rows come to: it is reported as
+//     blocked, and the plan is what the user voids;
 //   - a transaction of the import that no unit of the plan accounts for any more (its
 //     row was edited, which makes it another row, or deleted, or is left out now) is
-//     an orphan: a draft is discarded, a confirmed one is reported and left alone.
+//     an orphan: a draft is discarded, a confirmed one is reported and left alone. It
+//     is one only on a day that the export covers, from its first row to its last: an
+//     export that ends earlier or begins later than an older one says nothing of the
+//     days it does not reach, so what the ledger has of them is told (Uncovered) and
+//     left alone.
 //
 // A unit that the ledger refuses is reported and does not stop the others.
 type Apply interface {
@@ -108,14 +116,22 @@ type ApplyOutput struct {
 	Failed []Failure
 	// Stale are the units whose confirmed version is not what the plan says now.
 	Stale []StaleUnit
+	// Blocked are the units that a plan of instalments which the export does not have
+	// any more, and which is confirmed, holds back: not stale, and not to be voided
+	// themselves, since it is the plan that the user voids.
+	Blocked []BlockedUnit
 	// Voided are the units whose present version the user voided, which stay as they
 	// are.
 	Voided []VoidedUnit
 	// Removed are the drafts of the import that no unit of the plan accounts for any
 	// more, which were discarded; Orphans are the confirmed transactions of the import
-	// that none does, which are left alone and which the user voids.
+	// that none does, which are left alone and which the user voids. Both are of days
+	// that the export covers.
 	Removed []Orphan
 	Orphans []Orphan
+	// Uncovered is what the ledger has of the import on days that the export does not
+	// cover, which no unit accounts for: it was left alone.
+	Uncovered Uncovered
 	// ProjectDifferences are the projects the ledger already had, which are used as
 	// they are, whose default area is not the one the mapping says.
 	ProjectDifferences []ProjectDifference
@@ -141,6 +157,19 @@ type StaleUnit struct {
 	Unit model.Unit
 	// Lines are the lines of the export the unit is made of.
 	Lines []int
+}
+
+// BlockedUnit is a unit that is not recorded because a plan of instalments that the
+// export does not have any more is confirmed in the ledger, and still charges the
+// interest that the rows of the unit now come to: recorded beside it, the same interest
+// would be counted twice. The unit is not stale, and is not what the user voids: the
+// plan is, and then apply records the unit.
+type BlockedUnit struct {
+	Unit model.Unit
+	// Lines are the lines of the export the unit is made of.
+	Lines []int
+	// Plan is the idempotency key the plan was recorded under.
+	Plan string
 }
 
 // VoidedUnit is a unit whose present version the user voided: the ledger has it, and
@@ -175,6 +204,20 @@ type Orphan struct {
 // Confirmed tells whether the orphan is a confirmed transaction, which counts toward
 // the balances until the user voids it.
 func (o Orphan) Confirmed() bool { return o.Status == "confirmed" }
+
+// Uncovered is what the ledger has of the import on days that an export does not cover,
+// which none of its units accounts for: the transactions that an older and longer export
+// made, when this one ends earlier or begins later. It says nothing of them, so they are
+// not orphans, and they are left alone.
+type Uncovered struct {
+	// First and Last are the first and the last day the export covers; both are zero
+	// when it has no day at all.
+	First, Last time.Time
+	// Count is how many transactions of the import, drafts and confirmed ones, the ledger
+	// has of days outside that, and From and To the first and the last of those days.
+	Count    int
+	From, To time.Time
+}
 
 // ProjectDifference is a project that the ledger had already, whose default area is
 // not what the mapping says it is. Names are of areas, empty for none.
@@ -265,10 +308,13 @@ type VerifyOutput struct {
 	// Unexplained is how many differences that nothing explains there are in all.
 	Unexplained int
 	// Stale are the units of the months confirmed so far, and of the month that is
-	// open, whose confirmed version is not what the plan says now.
-	Stale []StaleUnit
+	// open, whose confirmed version is not what the plan says now; Blocked those that a
+	// plan of instalments which the export does not have any more holds back.
+	Stale   []StaleUnit
+	Blocked []BlockedUnit
 	// Orphans are the transactions of the import that no unit of the plan accounts for
-	// any more, drafts and confirmed ones: a confirmed one counts toward the balances.
+	// any more, on days the export covers, drafts and confirmed ones: a confirmed one
+	// counts toward the balances.
 	Orphans []Orphan
 }
 
@@ -288,8 +334,10 @@ type StatusOutput struct {
 	Warnings []model.Warning
 	Months   []MonthStatus
 	// Orphans are the transactions of the import that no unit of the plan accounts for
-	// any more, drafts and confirmed ones.
-	Orphans []Orphan
+	// any more, on days the export covers, drafts and confirmed ones. Uncovered is what
+	// the ledger has of the import on days it does not cover.
+	Orphans   []Orphan
+	Uncovered Uncovered
 }
 
 // MonthStatus counts units, which are one or two transactions or a whole plan, and
@@ -298,13 +346,15 @@ type MonthStatus struct {
 	Month string
 	// Drafts and Confirmed are the units the ledger has as drafts and as confirmed,
 	// NotApplied those it does not have yet (or has in an earlier version, which a
-	// run of apply puts right), Voided those that were voided, and Stale those whose
-	// confirmed version is not what the plan says now.
+	// run of apply puts right), Voided those that were voided, Stale those whose
+	// confirmed version is not what the plan says now, and Blocked those that a plan
+	// of instalments which the export does not have any more holds back.
 	Drafts     int
 	Confirmed  int
 	NotApplied int
 	Voided     int
 	Stale      int
+	Blocked    int
 	// Skipped is how many rows are not recorded.
 	Skipped int
 	// AdjustmentsPending are the balance adjustments not confirmed yet.

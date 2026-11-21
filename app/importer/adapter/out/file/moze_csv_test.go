@@ -12,6 +12,7 @@ import (
 
 	"github.com/maxjkfc/maxos/app/importer/adapter/out/file"
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/filefailure"
 )
 
 // mozeNames are the names of the columns of an export, in the order MOZE writes them.
@@ -119,7 +120,7 @@ func parse(t *testing.T, text string) []model.Row {
 }
 
 // parseFails parses text that must be refused, and returns the failure it is.
-func parseFails(t *testing.T, text string) *model.Failure {
+func parseFails(t *testing.T, text string) *filefailure.Failure {
 	t.Helper()
 	rows, err := file.ParseMozeCSV(strings.NewReader(text))
 	if err == nil {
@@ -254,7 +255,7 @@ func TestParseMozeCSVDay(t *testing.T) {
 	tests := []struct {
 		name, typ, date string
 		want            string // the day, or "none" for a row that has none
-		wantCode        model.FailureCode
+		wantCode        filefailure.Code
 		wantArgs        []string // what the failure says: the column, the text, a day as it is to be written
 	}{
 		{"slashes", "支出", "2026/03/10", "2026-03-10", "", nil},
@@ -262,11 +263,11 @@ func TestParseMozeCSVDay(t *testing.T) {
 		{"whitespace", "支出", "  2026/03/10 ", "2026-03-10", "", nil},
 		{"initial balance with a day", "初始金額", "2026/01/01", "2026-01-01", "", nil},
 		{"initial balance without one", "初始金額", "", "none", "", nil},
-		{"expense without one", "支出", "", "", model.FailureValueEmpty, []string{"日期"}},
-		{"transfer without one", "轉出", "", "", model.FailureValueEmpty, []string{"日期"}},
-		{"not a day", "支出", "2026/13/45", "", model.FailureNotDay, []string{"日期", "2026/13/45", "2026/03/10"}},
-		{"another order", "支出", "10/03/2026", "", model.FailureNotDay, []string{"日期", "10/03/2026", "2026/03/10"}},
-		{"no zero padding", "支出", "2026/3/1", "", model.FailureNotDay, []string{"日期", "2026/3/1", "2026/03/10"}},
+		{"expense without one", "支出", "", "", filefailure.ValueEmpty, []string{"日期"}},
+		{"transfer without one", "轉出", "", "", filefailure.ValueEmpty, []string{"日期"}},
+		{"not a day", "支出", "2026/13/45", "", filefailure.NotDay, []string{"日期", "2026/13/45", "2026/03/10"}},
+		{"another order", "支出", "10/03/2026", "", filefailure.NotDay, []string{"日期", "10/03/2026", "2026/03/10"}},
+		{"no zero padding", "支出", "2026/3/1", "", filefailure.NotDay, []string{"日期", "2026/3/1", "2026/03/10"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -293,15 +294,15 @@ func TestParseMozeCSVDay(t *testing.T) {
 func TestParseMozeCSVClock(t *testing.T) {
 	tests := []struct {
 		clock, want string
-		wantCode    model.FailureCode
+		wantCode    filefailure.Code
 	}{
 		{"12:30", "12:30", ""},
 		{"12:30:45", "12:30", ""},
 		{"7:05", "07:05", ""},
 		{"", "", ""},
 		{" 23:59 ", "23:59", ""},
-		{"noon", "", model.FailureNotTime},
-		{"25:00", "", model.FailureNotTime},
+		{"noon", "", filefailure.NotTime},
+		{"25:00", "", filefailure.NotTime},
 	}
 	for _, tt := range tests {
 		t.Run(tt.clock, func(t *testing.T) {
@@ -359,7 +360,7 @@ func TestParseMozeCSVRefusesBadNumbers(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := lunch()
 			r[tt.col] = tt.text
-			wantFailure(t, parseFails(t, export(r)), model.FailureNotNumber, 2, tt.column, tt.text)
+			wantFailure(t, parseFails(t, export(r)), filefailure.NotNumber, 2, tt.column, tt.text)
 		})
 	}
 }
@@ -369,15 +370,15 @@ func TestParseMozeCSVRefusesRecordsOfTheWrongSize(t *testing.T) {
 	extra := lunch()
 	long := csvLine(append(extra[:], "extra")...) + "\n"
 	t.Run("short", func(t *testing.T) {
-		wantFailure(t, parseFails(t, export(lunch())+short), model.FailureFieldCount, 3, "3", "16")
+		wantFailure(t, parseFails(t, export(lunch())+short), filefailure.FieldCount, 3, "3", "16")
 	})
 	t.Run("long", func(t *testing.T) {
-		wantFailure(t, parseFails(t, export(lunch(), lunch())+long), model.FailureFieldCount, 4, "17", "16")
+		wantFailure(t, parseFails(t, export(lunch(), lunch())+long), filefailure.FieldCount, 4, "17", "16")
 	})
 	t.Run("after a record of several lines", func(t *testing.T) {
 		r := lunch()
 		r[cDesc] = "a\nb"
-		wantFailure(t, parseFails(t, export(r)+short), model.FailureFieldCount, 4, "3", "16")
+		wantFailure(t, parseFails(t, export(r)+short), filefailure.FieldCount, 4, "3", "16")
 	})
 }
 
@@ -386,16 +387,16 @@ func TestParseMozeCSVRefusesRecordsOfTheWrongSize(t *testing.T) {
 func TestParseMozeCSVRefusesBrokenQuoting(t *testing.T) {
 	good := export(lunch())
 	t.Run("a quote in a field that has none", func(t *testing.T) {
-		wantFailure(t, parseFails(t, good+`Fake Wallet,TWD,支出,食物,午餐,-120,0,0,Lun"ch`+"\n"), model.FailureCSVBareQuote, 3)
+		wantFailure(t, parseFails(t, good+`Fake Wallet,TWD,支出,食物,午餐,-120,0,0,Lun"ch`+"\n"), filefailure.CSVBareQuote, 3)
 	})
 	t.Run("a quote that is not closed", func(t *testing.T) {
-		wantFailure(t, parseFails(t, good+`Fake Wallet,TWD,支出,食物,午餐,-120,0,0,"Lunch`+"\n"), model.FailureCSVQuote, 3)
+		wantFailure(t, parseFails(t, good+`Fake Wallet,TWD,支出,食物,午餐,-120,0,0,"Lunch`+"\n"), filefailure.CSVQuote, 3)
 	})
 	t.Run("a quote that is not closed in a record of several lines", func(t *testing.T) {
-		wantFailure(t, parseFails(t, good+`Fake Wallet,TWD,支出,食物,午餐,-120,0,0,"Lunch`+"\nand more\nand more\n"), model.FailureCSVQuote, 5, "3")
+		wantFailure(t, parseFails(t, good+`Fake Wallet,TWD,支出,食物,午餐,-120,0,0,"Lunch`+"\nand more\nand more\n"), filefailure.CSVQuote, 5, "3")
 	})
 	t.Run("text after a quote that is closed", func(t *testing.T) {
-		wantFailure(t, parseFails(t, good+`Fake Wallet,TWD,支出,食物,午餐,-120,0,0,"Lunch"x`+"\n"), model.FailureCSVQuote, 3)
+		wantFailure(t, parseFails(t, good+`Fake Wallet,TWD,支出,食物,午餐,-120,0,0,"Lunch"x`+"\n"), filefailure.CSVQuote, 3)
 	})
 }
 
@@ -428,13 +429,13 @@ func TestParseMozeCSVFindsColumnsByName(t *testing.T) {
 
 func TestParseMozeCSVRefusesAHeaderThatIsWrong(t *testing.T) {
 	t.Run("one column missing", func(t *testing.T) {
-		wantFailure(t, parseFails(t, exportOf(withoutColumns(cAmount), lunch())), model.FailureColumnsMissing, 1, "金額")
+		wantFailure(t, parseFails(t, exportOf(withoutColumns(cAmount), lunch())), filefailure.ColumnsMissing, 1, "金額")
 	})
 	t.Run("two columns missing, in the order they are needed", func(t *testing.T) {
-		wantFailure(t, parseFails(t, exportOf(withoutColumns(cAmount, cDate), lunch())), model.FailureColumnsMissing, 1, "金額", "日期")
+		wantFailure(t, parseFails(t, exportOf(withoutColumns(cAmount, cDate), lunch())), filefailure.ColumnsMissing, 1, "金額", "日期")
 	})
 	t.Run("a column twice", func(t *testing.T) {
-		wantFailure(t, parseFails(t, exportOf(append(allColumns(), cAmount), lunch())), model.FailureColumnTwice, 1, "金額")
+		wantFailure(t, parseFails(t, exportOf(append(allColumns(), cAmount), lunch())), filefailure.ColumnTwice, 1, "金額")
 	})
 }
 
@@ -485,7 +486,7 @@ func TestParseMozeCSVNoRows(t *testing.T) {
 	})
 	for name, text := range map[string]string{"an empty file": "", "a byte order mark alone": "\ufeff", "blank lines": "\n\n"} {
 		t.Run(name, func(t *testing.T) {
-			wantFailure(t, parseFails(t, text), model.FailureFileEmpty, 0)
+			wantFailure(t, parseFails(t, text), filefailure.Empty, 0)
 		})
 	}
 }
@@ -558,13 +559,13 @@ func TestMozeCSVRows(t *testing.T) {
 		path := filepath.Join(dir, "none.csv")
 		_, err := store.Rows(ctx, path)
 		f := failureOf(t, err)
-		wantFailure(t, f, model.FailureFileMissing, 0)
+		wantFailure(t, f, filefailure.Missing, 0)
 		wantFile(t, f, path)
 	})
 	t.Run("a file that cannot be read gives the reason of the system", func(t *testing.T) {
 		_, err := store.Rows(ctx, dir) // a folder opens, and cannot be read
 		f := failureOf(t, err)
-		wantFailure(t, f, model.FailureFileUnreadable, 0)
+		wantFailure(t, f, filefailure.Unreadable, 0)
 		wantFile(t, f, dir)
 		if f.Err == nil {
 			t.Error("the failure has no Err: the user is told the reason of the system as it is")
@@ -579,7 +580,7 @@ func TestMozeCSVRows(t *testing.T) {
 			t.Fatal("Rows read a file with a row that has no day")
 		}
 		f := failureOf(t, err)
-		wantFailure(t, f, model.FailureValueEmpty, 3, "日期")
+		wantFailure(t, f, filefailure.ValueEmpty, 3, "日期")
 		wantFile(t, f, path)
 	})
 	t.Run("a context that is done", func(t *testing.T) {

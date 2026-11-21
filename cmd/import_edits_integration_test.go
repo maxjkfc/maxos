@@ -245,18 +245,36 @@ func TestImportOfAPlanOfInstalmentsTheExportNoLongerHasOnARealDatabase(t *testin
 	// rows that are left must not be recorded beside it.
 	e.editExport(amountOf("2026/03/15", "23:59", "Fake 信用卡分期", "-200", "-190"))
 	out, err := e.moze("apply")
-	if err == nil || !strings.Contains(out, "已確認的內容與對照不同 3 筆") || !strings.Contains(out, "匯出裡沒有對應的列、但已確認的交易 1 筆") || !strings.Contains(out, "2026-02-05 分期") {
+	key := regexp.MustCompile(`鍵：(moze:plan-\S+)`).FindStringSubmatch(out)
+	if err == nil || key == nil {
 		t.Fatalf("apply after the edit: err = %v, printed:\n%s", err, out)
+	}
+	// The interest rows that are left are held back by the plan, and are told as that: it
+	// is the plan that the user voids, not them, which have no confirmed version of their own.
+	for _, want := range []string{
+		"被已不存在的計畫 " + key[1] + " 擋住、沒有記的單位 3 筆",
+		"要作廢的是這個計畫（" + key[1] + "），不是這些單位",
+		"匯出裡沒有對應的列、但已確認的交易 1 筆",
+		"2026-02-05 分期",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("apply after the edit does not say %q; it printed:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "已確認的內容與對照不同") || strings.Contains(err.Error(), "與對照不同") {
+		t.Errorf("apply tells the units held back as confirmed transactions that differ from the plan: %v\n%s", err, out)
 	}
 	if got := len(e.transactions(l)); got != count {
 		t.Errorf("the ledger has %d transactions, want %d: nothing is recorded beside the plan", got, count)
 	}
-	key := regexp.MustCompile(`鍵：(moze:plan-\S+)`).FindStringSubmatch(out)
-	if key == nil {
-		t.Fatalf("apply names no plan:\n%s", out)
-	}
-	if out, err := e.moze("confirm", "--month", "2026-03"); err == nil || !strings.Contains(out, "已確認的內容與對照不同") {
+	if out, err := e.moze("confirm", "--month", "2026-03"); err == nil || !strings.Contains(out, "匯出裡沒有對應的列") || strings.Contains(out, "已確認的內容與對照不同") {
 		t.Errorf("confirm: err = %v, printed:\n%s", err, out)
+	}
+	if verify, err := e.moze("verify"); err == nil || !strings.Contains(verify, "被已不存在的計畫 "+key[1]+" 擋住") || strings.Contains(verify, "已確認的內容與對照不同") {
+		t.Errorf("verify: err = %v, printed:\n%s", err, verify)
+	}
+	if status := e.must("status"); !strings.Contains(status, "被已不存在的計畫擋住") {
+		t.Errorf("status printed:\n%s", status)
 	}
 
 	// The user voids the plan, which voids it as a whole, and the interest is recorded as

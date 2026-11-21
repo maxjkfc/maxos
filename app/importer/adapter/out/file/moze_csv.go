@@ -16,6 +16,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/filefailure"
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/source"
 )
 
@@ -65,7 +66,7 @@ type MozeCSV struct{}
 func NewMozeCSV() *MozeCSV { return &MozeCSV{} }
 
 // Rows reads the export at path, as ParseMozeCSV does. What is wrong with it is a
-// *model.Failure that names the path: a file that is not there, one that cannot be
+// *filefailure.Failure that names the path: a file that is not there, one that cannot be
 // read, or a failure of its contents.
 func (*MozeCSV) Rows(ctx context.Context, path string) ([]model.Row, error) {
 	if err := ctx.Err(); err != nil {
@@ -73,7 +74,7 @@ func (*MozeCSV) Rows(ctx context.Context, path string) ([]model.Row, error) {
 	}
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, &model.Failure{Code: model.FailureFileMissing, File: path}
+		return nil, &filefailure.Failure{Code: filefailure.Missing, File: path}
 	}
 	if err != nil {
 		return nil, unreadable(path, err)
@@ -96,7 +97,7 @@ func (*MozeCSV) Rows(ctx context.Context, path string) ([]model.Row, error) {
 //
 // What a row says is kept as the file has it: its numbers with their signs, its
 // record type whatever it is (the plan tells of those the import does not know).
-// What is wrong with the file is a *model.Failure (see failAt) that has the line it
+// What is wrong with the file is a *filefailure.Failure (see failAt) that has the line it
 // is about, and the column or the value when it is one.
 func ParseMozeCSV(r io.Reader) ([]model.Row, error) {
 	table, err := openCSV(r, 0, mozeColumns...)
@@ -167,7 +168,7 @@ func mozeDecimal(rec csvRecord, col string) (decimal.Decimal, error) {
 	}
 	d, err := decimal.NewFromString(text)
 	if err != nil {
-		return decimal.Zero, failAt(model.FailureNotNumber, rec.line, col, text)
+		return decimal.Zero, failAt(filefailure.NotNumber, rec.line, col, text)
 	}
 	return d, nil
 }
@@ -180,14 +181,14 @@ func mozeDate(rec csvRecord, typ model.RecordType) (time.Time, error) {
 		if typ == model.TypeInitial {
 			return time.Time{}, nil
 		}
-		return time.Time{}, failAt(model.FailureValueEmpty, rec.line, colDate)
+		return time.Time{}, failAt(filefailure.ValueEmpty, rec.line, colDate)
 	}
 	for _, layout := range mozeDateLayouts {
 		if day, err := time.Parse(layout, text); err == nil {
 			return day, nil
 		}
 	}
-	return time.Time{}, failAt(model.FailureNotDay, rec.line, colDate, text, mozeDateExample)
+	return time.Time{}, failAt(filefailure.NotDay, rec.line, colDate, text, mozeDateExample)
 }
 
 // mozeClock reads 時間 as "15:04"; the seconds, if it has any, are left out.
@@ -201,7 +202,7 @@ func mozeClock(rec csvRecord) (string, error) {
 			return t.Format("15:04"), nil
 		}
 	}
-	return "", failAt(model.FailureNotTime, rec.line, colTime, text)
+	return "", failAt(filefailure.NotTime, rec.line, colTime, text)
 }
 
 // mozeTags reads 標籤, "#家庭;#公司", as the words of the tags: without their "#", in

@@ -276,6 +276,24 @@ func (e importEnv) reviewedMapping() model.Mapping {
 	return loaded.Mapping
 }
 
+// wantOnlyTheMappingToChange checks what the command printed of an instrument or an
+// account that the ledger has otherwise than the mapping says: it says to change the
+// mapping, since the ledger cannot change what it has, and does not offer the ledger as
+// a way out. The command must have failed.
+func wantOnlyTheMappingToChange(t *testing.T, out string, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("the command did not fail, and printed:\n%s", out)
+	}
+	all := out + "\n" + err.Error()
+	if want := "改對照檔（帳本裡已建立的標的與帳戶不能修改）"; !strings.Contains(all, want) {
+		t.Errorf("the command does not say %q; it printed:\n%s", want, all)
+	}
+	if strings.Contains(all, "改帳本") {
+		t.Errorf("the command offers the ledger as a way out, which cannot be changed; it printed:\n%s", all)
+	}
+}
+
 // The reference data that the ledger has, and the mapping names, is not made again, and
 // is not used when it is not what the mapping says, or when it is archived: the command
 // stops, and tells the conflict in Chinese, with the name and the two sides.
@@ -293,7 +311,8 @@ func TestImportTellsInChineseWhatTheLedgerHasOtherwise(t *testing.T) {
 			t.Fatal(err)
 		}
 		out, err := e.moze("apply")
-		wantTold(t, out, err, fmt.Sprintf("帳戶「%s」在帳本裡的種類是「%s」，對照檔寫的是「%s」；兩邊要一致，改對照檔或改帳本都可以", m.Name, other, m.Kind))
+		wantTold(t, out, err, fmt.Sprintf("帳戶「%s」在帳本裡的種類是「%s」，對照檔寫的是「%s」；兩邊要一致，改對照檔（帳本裡已建立的標的與帳戶不能修改）", m.Name, other, m.Kind))
+		wantOnlyTheMappingToChange(t, out, err)
 	})
 
 	t.Run("an instrument that is not what the mapping says", func(t *testing.T) {
@@ -310,8 +329,9 @@ func TestImportTellsInChineseWhatTheLedgerHasOtherwise(t *testing.T) {
 			return "不是幣別"
 		}
 		out, err := e.moze("apply")
-		wantTold(t, out, err, fmt.Sprintf("標的「USD」在帳本裡是「%s」、%d 位小數、%s，對照檔寫的是「%s」、%d 位小數、%s；兩邊要一致，改對照檔或改帳本都可以",
+		wantTold(t, out, err, fmt.Sprintf("標的「USD」在帳本裡是「%s」、%d 位小數、%s，對照檔寫的是「%s」、%d 位小數、%s；兩邊要一致，改對照檔（帳本裡已建立的標的與帳戶不能修改）",
 			in.Kind, in.Decimals, flag(in.IsCurrency), m.Kind, m.Decimals, flag(m.IsCurrency)))
+		wantOnlyTheMappingToChange(t, out, err)
 	})
 
 	t.Run("an account that is archived", func(t *testing.T) {
@@ -326,7 +346,7 @@ func TestImportTellsInChineseWhatTheLedgerHasOtherwise(t *testing.T) {
 			t.Fatal(err)
 		}
 		out, err := e.moze("apply")
-		wantTold(t, out, err, fmt.Sprintf("帳本裡的帳戶「%s」已經封存，對照檔卻用到它；在帳本裡把它恢復使用，或讓對照檔改用別的名稱", m.Name))
+		wantTold(t, out, err, fmt.Sprintf("帳本裡的帳戶「%s」已經封存，對照檔卻用到它；改對照檔，用別的名稱（帳本裡已封存的不能恢復使用）", m.Name))
 	})
 
 	t.Run("an area that is archived", func(t *testing.T) {
@@ -350,7 +370,7 @@ func TestImportTellsInChineseWhatTheLedgerHasOtherwise(t *testing.T) {
 			t.Fatal(err)
 		}
 		out, err := e.moze("apply")
-		wantTold(t, out, err, fmt.Sprintf("帳本裡的領域「%s」已經封存，對照檔卻用到它；在帳本裡把它恢復使用，或讓對照檔改用別的名稱", area))
+		wantTold(t, out, err, fmt.Sprintf("帳本裡的領域「%s」已經封存，對照檔卻用到它；改對照檔，用別的名稱（帳本裡已封存的不能恢復使用）", area))
 	})
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/maxjkfc/maxos/app/importer/adapter/out/file"
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/filefailure"
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/mapping"
 )
 
@@ -80,7 +81,7 @@ func loadText(t *testing.T, text string) mapping.Loaded {
 
 // loadFails loads a mapping file that must be refused, and returns the failure it is,
 // which is about the file.
-func loadFails(t *testing.T, text string) *model.Failure {
+func loadFails(t *testing.T, text string) *filefailure.Failure {
 	t.Helper()
 	path := writeFile(t, t.TempDir(), "mapping.yaml", text)
 	loaded, err := file.NewMappingYAML().Load(context.Background(), path)
@@ -308,42 +309,42 @@ func TestLoadRefusesWhatIsWrong(t *testing.T) {
 	tests := []struct {
 		name     string
 		text     string
-		wantCode model.FailureCode
+		wantCode filefailure.Code
 		wantLine int
 		wantArgs []string
 	}{
-		{"an unknown section", "accounts:\n  A: {name: A}\naccountz:\n  B: {name: B}\n", model.FailureKeyUnknown, 3, unknownKey("accountz", "", sectionKeys)},
-		{"an unknown key of an account", "accounts:\n  A: {name: A, kindd: card}\n", model.FailureKeyUnknown, 2, unknownKey("kindd", "accounts.A", accountKeys)},
-		{"an unknown key of an instrument", "instruments:\n  USD: {name: x, rate: 31}\n", model.FailureKeyUnknown, 2, unknownKey("rate", "instruments.USD", instrumentKeys)},
-		{"an unknown key of a project", "projects:\n  P: {kind: area, colour: red}\n", model.FailureKeyUnknown, 2, unknownKey("colour", "projects.P", projectKeys)},
-		{"an unknown key of a category", "categories:\n  expense:\n    X: {category: Y, colour: red}\n", model.FailureKeyUnknown, 3, unknownKey("colour", "categories.expense.X", categoryKeys)},
-		{"an unknown section of categories", "categories:\n  savings: {}\n", model.FailureKeyUnknown, 2, unknownKey("savings", "categories", []string{"expense", "income"})},
-		{"an unknown default", "defaults:\n  tax_category: Tax\n", model.FailureKeyUnknown, 2, unknownKey("tax_category", "defaults", defaultsKeys)},
-		{"an unknown key of a row", "rows:\n  a: {note: x}\n", model.FailureKeyUnknown, 2, unknownKey("note", "rows.a", rowKeys)},
-		{"decimals that is not a number", "instruments:\n  USD: {name: x, kind: fiat, decimals: abc}\n", model.FailureNotWholeNumber, 2, []string{"decimals", "abc"}},
-		{"a day of the month that is not a number", "accounts:\n  A: {name: A, closing_day: five}\n", model.FailureNotWholeNumber, 2, []string{"closing_day", "five"}},
-		{"an opening date that is not a day", "accounts:\n  A: {name: A, opening_date: yesterday}\n", model.FailureNotDay, 2, []string{"opening_date", "yesterday", "2026-04-15"}},
-		{"an opening date that is not a date of the calendar", "accounts:\n  A: {name: A, opening_date: 2025-13-01}\n", model.FailureNotDay, 2, []string{"opening_date", "2025-13-01", "2026-04-15"}},
-		{"an opening date with a time of day", "accounts:\n  A: {name: A, opening_date: 2025-01-07T10:00:00Z}\n", model.FailureNotDay, 2, []string{"opening_date", "2025-01-07T10:00:00Z", "2026-04-15"}},
-		{"an opening date that is a list", "accounts:\n  A: {name: A, opening_date: [2025, 1, 7]}\n", model.FailureValueNotSingle, 2, []string{"opening_date"}},
-		{"is_currency that is not true or false", "instruments:\n  USD: {name: x, kind: fiat, is_currency: maybe}\n", model.FailureNotBoolean, 2, []string{"is_currency", "maybe"}},
-		{"a quantity that is not a number", "rows:\n  a: {quantity: lots}\n", model.FailureNotNumber, 2, []string{"quantity", "lots"}},
-		{"a key twice", "accounts:\n  A: {name: A}\n  B: {name: B}\n  A: {name: C}\n", model.FailureKeyTwice, 4, []string{"accounts", "A", "2"}},
-		{"a section twice", "accounts: {}\nparties: {}\naccounts: {}\n", model.FailureKeyTwice, 3, []string{"", "accounts", "1"}},
-		{"a key of an entry twice", "accounts:\n  A: {name: A, name: B}\n", model.FailureKeyTwice, 2, []string{"accounts.A", "name", "2"}},
-		{"an expense section twice", "categories:\n  expense: {}\n  expense: {}\n", model.FailureKeyTwice, 3, []string{"categories", "expense", "2"}},
-		{"a section that is a list", "accounts: [a, b]\n", model.FailureMustBeMapping, 1, []string{"accounts"}},
-		{"categories that is a text", "categories: x\n", model.FailureMustBeMapping, 1, []string{"categories"}},
-		{"an expense section that is a list", "categories:\n  expense: [x]\n", model.FailureMustBeMapping, 2, []string{"categories.expense"}},
-		{"defaults that is a text", "defaults: x\n", model.FailureMustBeMapping, 1, []string{"defaults"}},
-		{"an entry that is a text", "accounts:\n  A: card\n", model.FailureMustBeMapping, 2, []string{"accounts.A"}},
-		{"a name that is a mapping", "parties:\n  Zed: {a: b}\n", model.FailureValueNotSingle, 2, []string{"Zed"}},
-		{"a name that is not one value", "accounts:\n  ? [a, b]\n  : {name: x}\n", model.FailureKeyNotSingle, 2, []string{"accounts"}},
-		{"a file that is a list", "- a\n- b\n", model.FailureNotSections, 1, nil},
-		{"a file that is a text", "hello\n", model.FailureNotSections, 1, nil},
-		{"a syntax error", "accounts: [a\nparties: {}\n", model.FailureYAMLSyntax, 1, nil},
-		{"a syntax error that the library gives no line for", "parties:\n  A: \x01\n", model.FailureYAMLSyntax, 0, nil},
-		{"two documents", "accounts: {}\n---\nparties: {}\n", model.FailureSecondDocument, 3, nil},
+		{"an unknown section", "accounts:\n  A: {name: A}\naccountz:\n  B: {name: B}\n", filefailure.KeyUnknown, 3, unknownKey("accountz", "", sectionKeys)},
+		{"an unknown key of an account", "accounts:\n  A: {name: A, kindd: card}\n", filefailure.KeyUnknown, 2, unknownKey("kindd", "accounts.A", accountKeys)},
+		{"an unknown key of an instrument", "instruments:\n  USD: {name: x, rate: 31}\n", filefailure.KeyUnknown, 2, unknownKey("rate", "instruments.USD", instrumentKeys)},
+		{"an unknown key of a project", "projects:\n  P: {kind: area, colour: red}\n", filefailure.KeyUnknown, 2, unknownKey("colour", "projects.P", projectKeys)},
+		{"an unknown key of a category", "categories:\n  expense:\n    X: {category: Y, colour: red}\n", filefailure.KeyUnknown, 3, unknownKey("colour", "categories.expense.X", categoryKeys)},
+		{"an unknown section of categories", "categories:\n  savings: {}\n", filefailure.KeyUnknown, 2, unknownKey("savings", "categories", []string{"expense", "income"})},
+		{"an unknown default", "defaults:\n  tax_category: Tax\n", filefailure.KeyUnknown, 2, unknownKey("tax_category", "defaults", defaultsKeys)},
+		{"an unknown key of a row", "rows:\n  a: {note: x}\n", filefailure.KeyUnknown, 2, unknownKey("note", "rows.a", rowKeys)},
+		{"decimals that is not a number", "instruments:\n  USD: {name: x, kind: fiat, decimals: abc}\n", filefailure.NotWholeNumber, 2, []string{"decimals", "abc"}},
+		{"a day of the month that is not a number", "accounts:\n  A: {name: A, closing_day: five}\n", filefailure.NotWholeNumber, 2, []string{"closing_day", "five"}},
+		{"an opening date that is not a day", "accounts:\n  A: {name: A, opening_date: yesterday}\n", filefailure.NotDay, 2, []string{"opening_date", "yesterday", "2026-04-15"}},
+		{"an opening date that is not a date of the calendar", "accounts:\n  A: {name: A, opening_date: 2025-13-01}\n", filefailure.NotDay, 2, []string{"opening_date", "2025-13-01", "2026-04-15"}},
+		{"an opening date with a time of day", "accounts:\n  A: {name: A, opening_date: 2025-01-07T10:00:00Z}\n", filefailure.NotDay, 2, []string{"opening_date", "2025-01-07T10:00:00Z", "2026-04-15"}},
+		{"an opening date that is a list", "accounts:\n  A: {name: A, opening_date: [2025, 1, 7]}\n", filefailure.ValueNotSingle, 2, []string{"opening_date"}},
+		{"is_currency that is not true or false", "instruments:\n  USD: {name: x, kind: fiat, is_currency: maybe}\n", filefailure.NotBoolean, 2, []string{"is_currency", "maybe"}},
+		{"a quantity that is not a number", "rows:\n  a: {quantity: lots}\n", filefailure.NotNumber, 2, []string{"quantity", "lots"}},
+		{"a key twice", "accounts:\n  A: {name: A}\n  B: {name: B}\n  A: {name: C}\n", filefailure.KeyTwice, 4, []string{"accounts", "A", "2"}},
+		{"a section twice", "accounts: {}\nparties: {}\naccounts: {}\n", filefailure.KeyTwice, 3, []string{"", "accounts", "1"}},
+		{"a key of an entry twice", "accounts:\n  A: {name: A, name: B}\n", filefailure.KeyTwice, 2, []string{"accounts.A", "name", "2"}},
+		{"an expense section twice", "categories:\n  expense: {}\n  expense: {}\n", filefailure.KeyTwice, 3, []string{"categories", "expense", "2"}},
+		{"a section that is a list", "accounts: [a, b]\n", filefailure.MustBeMapping, 1, []string{"accounts"}},
+		{"categories that is a text", "categories: x\n", filefailure.MustBeMapping, 1, []string{"categories"}},
+		{"an expense section that is a list", "categories:\n  expense: [x]\n", filefailure.MustBeMapping, 2, []string{"categories.expense"}},
+		{"defaults that is a text", "defaults: x\n", filefailure.MustBeMapping, 1, []string{"defaults"}},
+		{"an entry that is a text", "accounts:\n  A: card\n", filefailure.MustBeMapping, 2, []string{"accounts.A"}},
+		{"a name that is a mapping", "parties:\n  Zed: {a: b}\n", filefailure.ValueNotSingle, 2, []string{"Zed"}},
+		{"a name that is not one value", "accounts:\n  ? [a, b]\n  : {name: x}\n", filefailure.KeyNotSingle, 2, []string{"accounts"}},
+		{"a file that is a list", "- a\n- b\n", filefailure.NotSections, 1, nil},
+		{"a file that is a text", "hello\n", filefailure.NotSections, 1, nil},
+		{"a syntax error", "accounts: [a\nparties: {}\n", filefailure.YAMLSyntax, 1, nil},
+		{"a syntax error that the library gives no line for", "parties:\n  A: \x01\n", filefailure.YAMLSyntax, 0, nil},
+		{"two documents", "accounts: {}\n---\nparties: {}\n", filefailure.SecondDocument, 3, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -359,7 +360,7 @@ func TestLoadFailureNamesTheFile(t *testing.T) {
 		t.Fatal("Load read a file with a key that is not known")
 	}
 	f := failureOf(t, err)
-	wantFailure(t, f, model.FailureKeyUnknown, 2, unknownKey("kindd", "accounts.A", accountKeys)...)
+	wantFailure(t, f, filefailure.KeyUnknown, 2, unknownKey("kindd", "accounts.A", accountKeys)...)
 	wantFile(t, f, path)
 }
 
@@ -370,7 +371,7 @@ func TestLoadOfAFileThatCannotBeRead(t *testing.T) {
 		t.Fatal("Load of a folder gave no error")
 	}
 	f := failureOf(t, err)
-	wantFailure(t, f, model.FailureFileUnreadable, 0)
+	wantFailure(t, f, filefailure.Unreadable, 0)
 	wantFile(t, f, dir)
 	if f.Err == nil {
 		t.Error("the failure has no Err: the user is told the reason of the system as it is")
@@ -450,7 +451,7 @@ func TestLoadIgnoresAnActivePeriod(t *testing.T) {
 // anything else it is a key that is not known, like any other.
 func TestLoadStillRefusesAnActivePeriodElsewhere(t *testing.T) {
 	f := loadFails(t, "accounts:\n  A: {name: A, active_period: {from: 2026-03-08, to: 2026-03-17}}\n")
-	wantFailure(t, f, model.FailureKeyUnknown, 2, unknownKey("active_period", "accounts.A", accountKeys)...)
+	wantFailure(t, f, filefailure.KeyUnknown, 2, unknownKey("active_period", "accounts.A", accountKeys)...)
 }
 
 // What a mapping may be is for the mapping to say (model.Mapping.Validate), not for

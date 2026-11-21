@@ -10,9 +10,10 @@ import (
 // confirmed when everything the plan records in it is confirmed (or voided, which is
 // the user's say), and the balance adjustments of it are made; the months are
 // looked at in order, up to the first that is not: one that has a draft, a unit not
-// recorded yet, or a unit whose confirmed version is not what the plan says now, which
-// Verify reports. It names the transactions of the import that no unit of the plan
-// accounts for as well: a confirmed one counts toward the balances, and is what the
+// recorded yet (one that a plan of instalments which is gone holds back included), or a
+// unit whose confirmed version is not what the plan says now, which Verify reports. It
+// names the transactions of the import that no unit of the plan accounts for as well,
+// on days the export covers: a confirmed one counts toward the balances, and is what the
 // differences of a month can come of.
 func (a *Importer) Verify(ctx context.Context, in usecase.VerifyInput) (usecase.VerifyOutput, error) {
 	var out usecase.VerifyOutput
@@ -34,6 +35,7 @@ func (a *Importer) Verify(ctx context.Context, in usecase.VerifyInput) (usecase.
 	for _, m := range plan.Months() {
 		stale := st.staleUnits(plan, m)
 		out.Stale = append(out.Stale, stale...)
+		out.Blocked = append(out.Blocked, st.blockedUnits(plan, m)...)
 		if drafts, notApplied, adjustments := open(plan, st, m); drafts+notApplied+adjustments > 0 || len(stale) > 0 {
 			out.Open = m
 			break

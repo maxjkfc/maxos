@@ -11,8 +11,9 @@ import (
 // the ledger lacks is recorded, what it has in the version the plan says is left, a
 // draft of an earlier version is discarded and recorded again, and a confirmed
 // earlier version is reported and left alone. A transaction of the import that no
-// unit of the plan accounts for is an orphan: a draft is discarded, a confirmed one is
-// reported.
+// unit of the plan accounts for is an orphan, if it is of a day that the export
+// covers: a draft is discarded, a confirmed one is reported. What is of a day the
+// export does not cover is told, and left alone.
 func (a *Importer) Apply(ctx context.Context, in usecase.ApplyInput) (usecase.ApplyOutput, error) {
 	ld, err := a.inputs.load(ctx, in.Files)
 	if err != nil {
@@ -47,9 +48,22 @@ func (a *Importer) Apply(ctx context.Context, in usecase.ApplyInput) (usecase.Ap
 	for _, s := range plan.Skipped {
 		out.Skipped += len(s.Rows)
 	}
+	if err := a.applyUnits(ctx, r, st, plan, &out); err != nil {
+		return out, err
+	}
+	if err := a.removeOrphans(ctx, st, &out); err != nil {
+		return out, err
+	}
+	out.Uncovered = st.uncovered()
+	return out, nil
+}
+
+// applyUnits records every unit of the plan, and says what became of each in out. A
+// unit that the ledger refuses is told and does not stop the others.
+func (a *Importer) applyUnits(ctx context.Context, r refs, st *state, plan model.Plan, out *usecase.ApplyOutput) error {
 	for _, u := range plan.Units {
 		if err := ctx.Err(); err != nil {
-			return out, err
+			return err
 		}
 		res, err := a.applyUnit(ctx, r, st, u)
 		switch {
@@ -57,6 +71,8 @@ func (a *Importer) Apply(ctx context.Context, in usecase.ApplyInput) (usecase.Ap
 			out.Failed = append(out.Failed, usecase.Failure{Unit: u, Lines: linesOf(plan, u), Err: err})
 		case res == resultStale:
 			out.Stale = append(out.Stale, usecase.StaleUnit{Unit: u, Lines: linesOf(plan, u)})
+		case res == resultBlocked:
+			out.Blocked = append(out.Blocked, usecase.BlockedUnit{Unit: u, Lines: linesOf(plan, u), Plan: st.look(u).blocker()})
 		case res == resultVoided:
 			out.Voided = append(out.Voided, usecase.VoidedUnit{Unit: u, Lines: linesOf(plan, u)})
 		case res == resultRevived:
@@ -69,9 +85,13 @@ func (a *Importer) Apply(ctx context.Context, in usecase.ApplyInput) (usecase.Ap
 			out.New[u.Kind]++
 		}
 	}
+	return nil
+}
 
-	// What no unit of the plan accounts for: the drafts are discarded, which is what
-	// the export says of them, and the confirmed ones are reported, for the user to void.
+// removeOrphans deals with what no unit of the plan accounts for, on the days the
+// export covers: the drafts are discarded, which is what the export says of them, and
+// the confirmed ones are reported, for the user to void.
+func (a *Importer) removeOrphans(ctx context.Context, st *state, out *usecase.ApplyOutput) error {
 	for _, t := range st.orphans() {
 		o := st.orphanOf(t)
 		if t.Status == "confirmed" {
@@ -79,12 +99,12 @@ func (a *Importer) Apply(ctx context.Context, in usecase.ApplyInput) (usecase.Ap
 			continue
 		}
 		if err := a.ledger.DiscardDraft.DiscardDraft(ctx, t.ID); err != nil {
-			return out, model.LedgerFailure(model.VerbDiscard, model.ThingTransaction, t.IdempotencyKey, err)
+			return usecase.StepFailure(usecase.VerbDiscard, usecase.ThingTransaction, t.IdempotencyKey, err)
 		}
 		st.discarded[t.ID] = true
 		out.Removed = append(out.Removed, o)
 	}
-	return out, nil
+	return nil
 }
 
 // result is what applying a unit came to.
@@ -105,6 +125,9 @@ const (
 	// resultStale is a unit that the ledger has in an earlier version that is
 	// confirmed, which is left alone.
 	resultStale
+	// resultBlocked is a unit that a plan of instalments that is gone, and confirmed,
+	// holds back: it is not recorded beside it.
+	resultBlocked
 	// resultVoided is a unit whose present version the user voided, which stays so.
 	resultVoided
 )
@@ -126,6 +149,8 @@ func (a *Importer) applyUnit(ctx context.Context, r refs, st *state, u model.Uni
 	switch {
 	case s == unitStale:
 		return resultStale, nil
+	case s == unitBlocked:
+		return resultBlocked, nil
 	case s == unitVoid:
 		return resultVoided, nil
 	case (s == unitDraft || s == unitConfirmed) && len(drafts) == 0:
@@ -154,7 +179,7 @@ func (a *Importer) applyUnit(ctx context.Context, r refs, st *state, u model.Uni
 		return resultRevived, nil
 	case c.New == 0 && discarded == 0:
 		return resultDuplicate, nil
-	case len(l.others) > 0:
+	case l.replaces():
 		return resultUpdated, nil
 	default:
 		return resultNew, nil

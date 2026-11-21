@@ -13,6 +13,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/filefailure"
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/rates"
 )
 
@@ -36,7 +37,7 @@ type RatesCSV struct{}
 func NewRatesCSV() *RatesCSV { return &RatesCSV{} }
 
 // Load reads the rates at path, as ParseRates does. What is wrong with the file is a
-// *model.Failure that names the path. A file that does not exist is no rates and no
+// *filefailure.Failure that names the path. A file that does not exist is no rates and no
 // error.
 func (*RatesCSV) Load(ctx context.Context, path string) (model.Rates, bool, error) {
 	if err := ctx.Err(); err != nil {
@@ -68,7 +69,7 @@ func (*RatesCSV) Load(ctx context.Context, path string) (model.Rates, bool, erro
 //   - twd_per_unit is what ONE unit of it is worth in TWD, above zero.
 //
 // A currency has one rate a day: a second is a failure that has both lines. What is
-// wrong with the file is a *model.Failure (see failAt) that has the line it is about,
+// wrong with the file is a *filefailure.Failure (see failAt) that has the line it is about,
 // and the column or the value when it is one.
 func ParseRates(r io.Reader) (model.Rates, error) {
 	table, err := openCSV(r, '#', ratesDate, ratesInstrument, ratesPerUnit)
@@ -89,31 +90,31 @@ func ParseRates(r io.Reader) (model.Rates, error) {
 
 		dayText := rec.text(ratesDate)
 		if dayText == "" {
-			return model.Rates{}, failAt(model.FailureValueEmpty, rec.line, ratesDate)
+			return model.Rates{}, failAt(filefailure.ValueEmpty, rec.line, ratesDate)
 		}
 		day, err := time.Parse(time.DateOnly, dayText)
 		if err != nil {
-			return model.Rates{}, failAt(model.FailureNotDay, rec.line, ratesDate, dayText, ratesDayExample)
+			return model.Rates{}, failAt(filefailure.NotDay, rec.line, ratesDate, dayText, ratesDayExample)
 		}
 		code := strings.ToUpper(rec.text(ratesInstrument))
 		if code == "" {
-			return model.Rates{}, failAt(model.FailureValueEmpty, rec.line, ratesInstrument)
+			return model.Rates{}, failAt(filefailure.ValueEmpty, rec.line, ratesInstrument)
 		}
 		perUnitText := rec.text(ratesPerUnit)
 		if perUnitText == "" {
-			return model.Rates{}, failAt(model.FailureValueEmpty, rec.line, ratesPerUnit)
+			return model.Rates{}, failAt(filefailure.ValueEmpty, rec.line, ratesPerUnit)
 		}
 		perUnit, err := decimal.NewFromString(perUnitText)
 		if err != nil {
-			return model.Rates{}, failAt(model.FailureNotNumber, rec.line, ratesPerUnit, perUnitText)
+			return model.Rates{}, failAt(filefailure.NotNumber, rec.line, ratesPerUnit, perUnitText)
 		}
 		if !perUnit.IsPositive() {
-			return model.Rates{}, failAt(model.FailureRateNotPositive, rec.line, ratesPerUnit, perUnitText)
+			return model.Rates{}, failAt(filefailure.RateNotPositive, rec.line, ratesPerUnit, perUnitText)
 		}
 
 		key := given{code: code, day: dayText}
 		if first, twice := lines[key]; twice {
-			return model.Rates{}, failAt(model.FailureRateTwice, rec.line, code, dayText, strconv.Itoa(first))
+			return model.Rates{}, failAt(filefailure.RateTwice, rec.line, code, dayText, strconv.Itoa(first))
 		}
 		lines[key] = rec.line
 		byCode[code] = append(byCode[code], model.Rate{Date: day, PerUnit: perUnit})

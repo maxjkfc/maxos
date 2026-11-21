@@ -36,12 +36,12 @@ func adjustmentsOf(plan model.Plan, month string) []model.Adjustment {
 
 // open tells what is left to confirm in a month: the units that are drafts or that
 // the ledger does not have in the version the plan says (a version that was voided to
-// make room for another that is gone too is not there either), and the adjustments
-// that are not confirmed.
+// make room for another that is gone too is not there either, nor is a unit that a
+// plan which is gone holds back), and the adjustments that are not confirmed.
 func open(plan model.Plan, st *state, month string) (drafts, notApplied, adjustments int) {
 	for _, u := range unitsOf(plan, month) {
 		switch s, _ := st.of(u); s {
-		case unitMissing, unitRevived:
+		case unitMissing, unitRevived, unitBlocked:
 			notApplied++
 		case unitDraft:
 			drafts++
@@ -67,33 +67,52 @@ func (a *Importer) Confirm(ctx context.Context, in usecase.ConfirmInput) (usecas
 	}
 	plan := ld.plan
 	out.Warnings = plan.Warnings
-	if plan.Blocked() {
-		return out, &usecase.BlockedError{Plan: plan}
-	}
-	if !slices.Contains(plan.Months(), in.Month) {
-		return out, fmt.Errorf("%w: %s", usecase.ErrUnknownMonth, in.Month)
+	if err := askable(plan, in.Month); err != nil {
+		return out, err
 	}
 	st, err := a.readState(ctx, plan)
 	if err != nil {
 		return out, err
 	}
+	if err := mayConfirm(plan, st, in.Month, &out); err != nil {
+		return out, err
+	}
 
+	units, adjustments := unitsOf(plan, in.Month), adjustmentsOf(plan, in.Month)
+	for _, day := range daysOf(units, adjustments) {
+		if err := a.confirmDay(ctx, plan, st, units, adjustments, day, &out); err != nil {
+			return out, err
+		}
+	}
+	out.Check, err = a.check(ctx, plan, st, in.Month)
+	return out, err
+}
+
+// askable refuses what there is nothing to confirm in: a plan that is not one to work
+// from, and a month that the export has nothing in.
+func askable(plan model.Plan, month string) error {
+	if plan.Blocked() {
+		return &usecase.BlockedError{Plan: plan}
+	}
+	if !slices.Contains(plan.Months(), month) {
+		return fmt.Errorf("%w: %s", usecase.ErrUnknownMonth, month)
+	}
+	return nil
+}
+
+// mayConfirm refuses the month while something stands in the way of confirming it: a
+// confirmed transaction that is not what the plan says, a confirmed transaction that
+// no unit of the plan accounts for, or a month before it that is not done. The drafts
+// that no unit accounts for are left alone, and told in out.
+func mayConfirm(plan model.Plan, st *state, month string, out *usecase.ConfirmOutput) error {
 	// A confirmed transaction is never changed. One that is not what the plan says
 	// stands in the way until the user voids it, and apply records the unit again.
-	var stale []usecase.StaleUnit
-	for _, m := range plan.Months() {
-		if m > in.Month {
-			break
-		}
-		stale = append(stale, st.staleUnits(plan, m)...)
+	if stale := staleUpTo(plan, st, month); len(stale) > 0 {
+		return &usecase.StaleError{Month: month, Units: stale}
 	}
-	if len(stale) > 0 {
-		return out, &usecase.StaleError{Month: in.Month, Units: stale}
-	}
-
 	// A confirmed transaction that no unit of the plan accounts for counts toward the
 	// balances all the same, and is the more of whatever replaces it: it stands in the
-	// way until the user voids it. The drafts of that kind are left alone and told.
+	// way until the user voids it.
 	var counting []usecase.Orphan
 	for _, o := range st.orphanViews() {
 		if o.Confirmed() {
@@ -103,25 +122,44 @@ func (a *Importer) Confirm(ctx context.Context, in usecase.ConfirmInput) (usecas
 		out.Orphans = append(out.Orphans, o)
 	}
 	if len(counting) > 0 {
-		return out, &usecase.OrphanError{Month: in.Month, Orphans: counting}
+		return &usecase.OrphanError{Month: month, Orphans: counting}
 	}
+	return inOrder(plan, st, month)
+}
 
-	// The months are confirmed in order: what an adjustment adds is to what the account
-	// holds, which only the months before it settle.
+// staleUpTo are the units of the month and of the months before it that the ledger has
+// in a version that is confirmed and is not the one the plan says.
+func staleUpTo(plan model.Plan, st *state, month string) []usecase.StaleUnit {
+	var stale []usecase.StaleUnit
 	for _, m := range plan.Months() {
-		if m >= in.Month {
+		if m > month {
+			break
+		}
+		stale = append(stale, st.staleUnits(plan, m)...)
+	}
+	return stale
+}
+
+// inOrder refuses a month while one before it is not done, and while it has units that
+// the ledger does not have: the months are confirmed in order, since what an adjustment
+// adds is to what the account holds, which only the months before it settle.
+func inOrder(plan model.Plan, st *state, month string) error {
+	for _, m := range plan.Months() {
+		if m >= month {
 			break
 		}
 		if drafts, notApplied, adjustments := open(plan, st, m); drafts+notApplied+adjustments > 0 {
-			return out, &usecase.MonthOrderError{Open: m, Month: in.Month, Drafts: drafts, NotApplied: notApplied, Adjustments: adjustments}
+			return &usecase.MonthOrderError{Open: m, Month: month, Drafts: drafts, NotApplied: notApplied, Adjustments: adjustments}
 		}
 	}
-	if _, notApplied, _ := open(plan, st, in.Month); notApplied > 0 {
-		return out, fmt.Errorf("%w: %s has %d, run apply", usecase.ErrNotApplied, in.Month, notApplied)
+	if _, notApplied, _ := open(plan, st, month); notApplied > 0 {
+		return fmt.Errorf("%w: %s has %d, run apply", usecase.ErrNotApplied, month, notApplied)
 	}
+	return nil
+}
 
-	units := unitsOf(plan, in.Month)
-	adjustments := adjustmentsOf(plan, in.Month)
+// daysOf are the days of a month that have a unit or an adjustment, oldest first.
+func daysOf(units []model.Unit, adjustments []model.Adjustment) []time.Time {
 	var days []time.Time
 	for _, u := range units {
 		days = append(days, u.Date)
@@ -130,46 +168,56 @@ func (a *Importer) Confirm(ctx context.Context, in usecase.ConfirmInput) (usecas
 		days = append(days, adj.Date)
 	}
 	slices.SortFunc(days, time.Time.Compare)
-	days = slices.CompactFunc(days, time.Time.Equal)
+	return slices.CompactFunc(days, time.Time.Equal)
+}
 
-	for _, day := range days {
-		var ids []uuid.UUID
-		for _, u := range units {
-			if !u.Date.Equal(day) {
-				continue
-			}
-			switch s, drafts := st.of(u); s {
-			case unitDraft:
-				ids = append(ids, drafts...)
-			case unitConfirmed:
-				out.AlreadyConfirmed++
-			}
+// confirmDay confirms what the month has on a day: the drafts of its units, and then
+// the reconciliations of its adjustments, which need everything of the day confirmed.
+func (a *Importer) confirmDay(ctx context.Context, plan model.Plan, st *state, units []model.Unit, adjustments []model.Adjustment, day time.Time, out *usecase.ConfirmOutput) error {
+	if err := a.confirmDrafts(ctx, plan, st, units, day, out); err != nil {
+		return err
+	}
+	for _, adj := range adjustments {
+		if !adj.Date.Equal(day) {
+			continue
 		}
-		if len(ids) > 0 {
-			confirmed, err := a.ledger.ConfirmTransactions.ConfirmTransactions(ctx, finance.ConfirmTransactionsInput{IDs: ids})
-			if err != nil {
-				return out, model.LedgerFailure(model.VerbConfirm, model.ThingTransaction, day.Format(time.DateOnly), err)
-			}
-			for _, t := range confirmed.Transactions {
-				st.byKey[t.IdempotencyKey] = t
-			}
-			st.index(plan)
-			out.Confirmed += len(confirmed.Transactions)
+		res, err := a.applyAdjustment(ctx, st, adj)
+		if err != nil {
+			return err
 		}
-		for _, adj := range adjustments {
-			if !adj.Date.Equal(day) {
-				continue
-			}
-			res, err := a.applyAdjustment(ctx, st, adj)
-			if err != nil {
-				return out, err
-			}
-			out.Adjustments = append(out.Adjustments, res)
+		out.Adjustments = append(out.Adjustments, res)
+	}
+	return nil
+}
+
+// confirmDrafts confirms the drafts of the units of a day, in one call to the ledger,
+// which confirms all of them or none; it counts the units that were confirmed before.
+func (a *Importer) confirmDrafts(ctx context.Context, plan model.Plan, st *state, units []model.Unit, day time.Time, out *usecase.ConfirmOutput) error {
+	var ids []uuid.UUID
+	for _, u := range units {
+		if !u.Date.Equal(day) {
+			continue
+		}
+		switch s, drafts := st.of(u); s {
+		case unitDraft:
+			ids = append(ids, drafts...)
+		case unitConfirmed:
+			out.AlreadyConfirmed++
 		}
 	}
-
-	out.Check, err = a.check(ctx, plan, st, in.Month)
-	return out, err
+	if len(ids) == 0 {
+		return nil
+	}
+	confirmed, err := a.ledger.ConfirmTransactions.ConfirmTransactions(ctx, finance.ConfirmTransactionsInput{IDs: ids})
+	if err != nil {
+		return usecase.StepFailure(usecase.VerbConfirm, usecase.ThingTransaction, day.Format(time.DateOnly), err)
+	}
+	for _, t := range confirmed.Transactions {
+		st.byKey[t.IdempotencyKey] = t
+	}
+	st.index(plan)
+	out.Confirmed += len(confirmed.Transactions)
+	return nil
 }
 
 // applyAdjustment reconciles the account of a balance adjustment to what it holds
@@ -191,7 +239,7 @@ func (a *Importer) applyAdjustment(ctx context.Context, st *state, adj model.Adj
 	accountID, instrumentID := st.accountIDs[adj.Account], st.instrumentIDs[adj.Instrument]
 	balances, err := a.ledger.GetBalances.GetBalances(ctx, finance.GetBalancesInput{AccountID: &accountID, AsOf: &adj.Date})
 	if err != nil {
-		return res, model.LedgerFailure(model.VerbGet, model.ThingBalance, adj.Account+" "+adj.Date.Format(time.DateOnly), err)
+		return res, usecase.StepFailure(usecase.VerbGet, usecase.ThingBalance, adj.Account+" "+adj.Date.Format(time.DateOnly), err)
 	}
 	recorded := model.Balances{}
 	for _, b := range balances.Balances {

@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/filefailure"
 )
 
 // A parse error of encoding/csv that is not a quote that is wrong cannot come out of
@@ -16,8 +16,8 @@ import (
 // others' and what is left is the line.
 func TestCSVFailureOfAnotherParseError(t *testing.T) {
 	f := csvFailure(&csv.ParseError{StartLine: 7, Line: 7, Column: 3, Err: csv.ErrFieldCount})
-	if f.Code != model.FailureCSVSyntax || f.Line != 7 || len(f.Args) != 0 {
-		t.Errorf("failure = %s at line %d with %q, want %s at line 7 with none", f.Code, f.Line, f.Args, model.FailureCSVSyntax)
+	if f.Code != filefailure.CSVSyntax || f.Line != 7 || len(f.Args) != 0 {
+		t.Errorf("failure = %s at line %d with %q, want %s at line 7 with none", f.Code, f.Line, f.Args, filefailure.CSVSyntax)
 	}
 }
 
@@ -25,8 +25,8 @@ func TestCSVFailureOfAnotherParseError(t *testing.T) {
 // that the failure has of its own.
 func TestCSVFailureOfAnErrorThatIsNotAboutTheText(t *testing.T) {
 	f := csvFailure(&fs.PathError{Op: "read", Path: "/tmp/export.csv", Err: syscall.EIO})
-	if f.Code != model.FailureFileUnreadable || !errors.Is(f.Err, syscall.EIO) {
-		t.Errorf("failure = %s with %v, want %s with the reason EIO", f.Code, f.Err, model.FailureFileUnreadable)
+	if f.Code != filefailure.Unreadable || !errors.Is(f.Err, syscall.EIO) {
+		t.Errorf("failure = %s with %v, want %s with the reason EIO", f.Code, f.Err, filefailure.Unreadable)
 	}
 	var pathErr *fs.PathError
 	if errors.As(f.Err, &pathErr) {
@@ -60,17 +60,17 @@ func TestReasonOfTheSystem(t *testing.T) {
 
 // inFile names the file once, on a copy: the failure it was given is not changed.
 func TestInFile(t *testing.T) {
-	loose := failAt(model.FailureFileEmpty, 0)
+	loose := failAt(filefailure.Empty, 0)
 	got := inFile("a.csv", loose)
-	var named *model.Failure
-	if !errors.As(got, &named) || named.File != "a.csv" || named.Code != model.FailureFileEmpty {
+	var named *filefailure.Failure
+	if !errors.As(got, &named) || named.File != "a.csv" || named.Code != filefailure.Empty {
 		t.Fatalf("inFile = %v, want the failure about a.csv", got)
 	}
 	if loose.File != "" {
 		t.Errorf("the failure that was given was changed: File = %q", loose.File)
 	}
 
-	already := &model.Failure{Code: model.FailureFileEmpty, File: "b.csv"}
+	already := &filefailure.Failure{Code: filefailure.Empty, File: "b.csv"}
 	if got := inFile("a.csv", already); !errors.As(got, &named) || named.File != "b.csv" {
 		t.Errorf("inFile of a failure that has its file = %v, want it to keep b.csv", got)
 	}

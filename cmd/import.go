@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -194,15 +195,7 @@ func newImportApplyCmd() *cobra.Command {
 				if err := cli.RenderApply(w, out); err != nil {
 					return err
 				}
-				switch {
-				case len(out.Failed) > 0:
-					return fmt.Errorf("有 %d 個單位被帳本拒收", len(out.Failed))
-				case len(out.Stale) > 0:
-					return fmt.Errorf("有 %d 筆已確認的交易與對照不同：作廢它們，再執行一次 apply", len(out.Stale))
-				case len(out.Orphans) > 0:
-					return fmt.Errorf("有 %d 筆已確認的交易在匯出裡找不到對應的列：作廢它們，再執行一次 apply", len(out.Orphans))
-				}
-				return nil
+				return applyEnded(out)
 			})
 		},
 	}
@@ -219,7 +212,7 @@ func newImportConfirmCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if _, err := time.Parse("2006-01", month); err != nil {
-				return fmt.Errorf("--month 要是一個月份，例如 2025-03：%w", err)
+				return errors.New("--month 要寫成 YYYY-MM，例如 2025-03")
 			}
 			resolved, err := files.resolve()
 			if err != nil {
@@ -274,20 +267,45 @@ func newImportVerifyCmd() *cobra.Command {
 				if err := cli.RenderVerify(w, out); err != nil {
 					return err
 				}
-				switch {
-				case len(out.Stale) > 0:
-					return fmt.Errorf("有 %d 筆已確認的交易與對照不同：作廢它們，執行 apply，再確認", len(out.Stale))
-				case confirmedOrphans(out.Orphans) > 0:
-					return fmt.Errorf("有 %d 筆已確認的交易在匯出裡找不到對應的列：作廢它們，再執行 apply 與 confirm", confirmedOrphans(out.Orphans))
-				case out.Unexplained > 0:
-					return fmt.Errorf("有 %d 個帳戶與標的的餘額與 CSV 不符，而且沒有東西能說明", out.Unexplained)
-				}
-				return nil
+				return verifyEnded(out)
 			})
 		},
 	}
 	files.bind(c)
 	return c
+}
+
+// applyEnded is what apply ends with when something is left that the user has to put
+// right, and nil when nothing is. The units that a plan of instalments which is gone holds
+// back are not counted with the confirmed transactions to void: the plan is what is voided.
+func applyEnded(out usecase.ApplyOutput) error {
+	switch {
+	case len(out.Failed) > 0:
+		return fmt.Errorf("有 %d 個單位被帳本拒收", len(out.Failed))
+	case len(out.Stale) > 0:
+		return fmt.Errorf("有 %d 筆已確認的交易與對照不同：作廢它們，再執行一次 apply", len(out.Stale))
+	case len(out.Orphans) > 0:
+		return fmt.Errorf("有 %d 筆已確認的交易在匯出裡找不到對應的列：作廢它們，再執行一次 apply", len(out.Orphans))
+	case len(out.Blocked) > 0:
+		return fmt.Errorf("有 %d 個單位被已不存在的計畫擋住：作廢那個計畫（%s），再執行一次 apply", len(out.Blocked), out.Blocked[0].Plan)
+	}
+	return nil
+}
+
+// verifyEnded is what verify ends with when the ledger is not what the export says, and
+// nil when it is.
+func verifyEnded(out usecase.VerifyOutput) error {
+	switch {
+	case len(out.Stale) > 0:
+		return fmt.Errorf("有 %d 筆已確認的交易與對照不同：作廢它們，執行 apply，再確認", len(out.Stale))
+	case confirmedOrphans(out.Orphans) > 0:
+		return fmt.Errorf("有 %d 筆已確認的交易在匯出裡找不到對應的列：作廢它們，再執行 apply 與 confirm", confirmedOrphans(out.Orphans))
+	case len(out.Blocked) > 0:
+		return fmt.Errorf("有 %d 個單位被已不存在的計畫擋住：作廢那個計畫（%s），再執行 apply 與 confirm", len(out.Blocked), out.Blocked[0].Plan)
+	case out.Unexplained > 0:
+		return fmt.Errorf("有 %d 個帳戶與標的的餘額與 CSV 不符，而且沒有東西能說明", out.Unexplained)
+	}
+	return nil
 }
 
 func newImportStatusCmd() *cobra.Command {

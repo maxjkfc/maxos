@@ -230,6 +230,8 @@ func TestWhatTheCommandsPrintIsInChinese(t *testing.T) {
 		{Account: "Bank", Instrument: "TWD", Ledger: dec("5"), Expected: dec("10")},
 	}}
 	stale := []usecase.StaleUnit{{Unit: unit, Lines: []int{4}}}
+	blocked := []usecase.BlockedUnit{{Unit: unit, Lines: []int{5}, Plan: "moze:plan-0123456789abcdef-1@0123456789ab"}}
+	uncovered := usecase.Uncovered{First: day("2026-01-04"), Last: day("2026-01-27"), Count: 4, From: day("2026-02-05"), To: day("2026-03-05")}
 	for name, render := range map[string]func() error{
 		"apply": func() error {
 			return cli.RenderApply(&b, usecase.ApplyOutput{
@@ -237,7 +239,7 @@ func TestWhatTheCommandsPrintIsInChinese(t *testing.T) {
 				Created:  map[string]int{usecase.CreatedAccounts: 2},
 				New:      map[model.UnitKind]int{model.KindExpense: 2}, Updated: map[model.UnitKind]int{model.KindIncome: 1},
 				Revived:   map[model.UnitKind]int{model.KindTransfer: 1},
-				Duplicate: map[model.UnitKind]int{model.KindDealing: 1}, Stale: stale,
+				Duplicate: map[model.UnitKind]int{model.KindDealing: 1}, Stale: stale, Blocked: blocked, Uncovered: uncovered,
 				Voided:             []usecase.VoidedUnit{{Unit: unit, Lines: []int{6}}},
 				Removed:            []usecase.Orphan{waiting},
 				Orphans:            []usecase.Orphan{counting},
@@ -251,12 +253,12 @@ func TestWhatTheCommandsPrintIsInChinese(t *testing.T) {
 				Adjustments: []usecase.AdjustmentResult{{State: usecase.AdjustmentBlocked, Err: errors.New("pending drafts")}, {State: usecase.AdjustmentApplied}}})
 		},
 		"verify": func() error {
-			return cli.RenderVerify(&b, usecase.VerifyOutput{Months: []model.MonthCheck{check}, Open: "2026-04", Unexplained: 1, Stale: stale,
+			return cli.RenderVerify(&b, usecase.VerifyOutput{Months: []model.MonthCheck{check}, Open: "2026-04", Unexplained: 1, Stale: stale, Blocked: blocked,
 				Orphans: []usecase.Orphan{counting, waiting}, Warnings: warnings})
 		},
 		"status": func() error {
-			return cli.RenderStatus(&b, usecase.StatusOutput{Months: []usecase.MonthStatus{{Month: "2026-03", Drafts: 1, Stale: 1}},
-				Orphans: []usecase.Orphan{counting, waiting}, Warnings: warnings})
+			return cli.RenderStatus(&b, usecase.StatusOutput{Months: []usecase.MonthStatus{{Month: "2026-03", Drafts: 1, Stale: 1, Blocked: 1}},
+				Orphans: []usecase.Orphan{counting, waiting}, Uncovered: uncovered, Warnings: warnings})
 		},
 		"warnings": func() error { return cli.RenderWarnings(&b, warnings) },
 	} {
@@ -271,6 +273,57 @@ func TestWhatTheCommandsPrintIsInChinese(t *testing.T) {
 		if m := asciiSentence.FindString(text); m != "" {
 			t.Errorf("%s has an English sentence: %q", name, m)
 		}
+	}
+}
+
+// What the ledger has of the import on days the export does not cover is said in one line,
+// with the days of the export and of those transactions; and a unit that a plan which is
+// gone holds back is said by the plan, which is what the user voids, and is not counted
+// with the confirmed transactions that differ from the plan.
+func TestTheDaysAnExportDoesNotCoverAndTheUnitsAGonePlanHoldsBackAreSaidAsTheyAre(t *testing.T) {
+	unit := model.Unit{Kind: model.KindExpense, Date: day("2026-03-05"), Description: "Noodles"}
+	const plan = "moze:plan-0123456789abcdef-1@0123456789ab"
+	uncovered := usecase.Uncovered{First: day("2026-01-04"), Last: day("2026-01-27"), Count: 4, From: day("2026-02-05"), To: day("2026-03-05")}
+
+	var b strings.Builder
+	if err := cli.RenderApply(&b, usecase.ApplyOutput{Uncovered: uncovered}); err != nil {
+		t.Fatal(err)
+	}
+	if want := "這份匯出（2026-01-04 至 2026-01-27）沒有涵蓋帳本裡 4 筆匯入的交易（日期 2026-02-05 至 2026-03-05），沒有動它們"; !strings.Contains(b.String(), want) {
+		t.Errorf("apply does not say %q:\n%s", want, b.String())
+	}
+	if got := strings.Count(b.String(), "沒有涵蓋"); got != 1 {
+		t.Errorf("apply says it %d times, want one line:\n%s", got, b.String())
+	}
+	b.Reset()
+	if err := cli.RenderStatus(&b, usecase.StatusOutput{Uncovered: uncovered}); err != nil || !strings.Contains(b.String(), "這份匯出（2026-01-04 至 2026-01-27）沒有涵蓋帳本裡 4 筆匯入的交易（日期 2026-02-05 至 2026-03-05），沒有動它們") {
+		t.Errorf("status does not say it (%v):\n%s", err, b.String())
+	}
+	b.Reset()
+	if err := cli.RenderApply(&b, usecase.ApplyOutput{Uncovered: usecase.Uncovered{Count: 4, From: day("2026-02-05"), To: day("2026-03-05")}}); err != nil || !strings.Contains(b.String(), "這份匯出沒有任何日期，沒有涵蓋帳本裡 4 筆匯入的交易（日期 2026-02-05 至 2026-03-05），沒有動它們") {
+		t.Errorf("apply of an export of no day does not say so (%v):\n%s", err, b.String())
+	}
+	b.Reset()
+	if err := cli.RenderApply(&b, usecase.ApplyOutput{}); err != nil || strings.Contains(b.String(), "沒有涵蓋") {
+		t.Errorf("apply of an export that covers all says it does not (%v):\n%s", err, b.String())
+	}
+
+	b.Reset()
+	blocked := []usecase.BlockedUnit{{Unit: unit, Lines: []int{5}, Plan: plan}, {Unit: unit, Lines: []int{7}, Plan: plan}, {Unit: unit, Lines: []int{9}, Plan: "moze:plan-fedcba9876543210-1@0123456789ab"}}
+	if err := cli.RenderApply(&b, usecase.ApplyOutput{Blocked: blocked}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"被已不存在的計畫 " + plan + " 擋住、沒有記的單位 2 筆",
+		"被已不存在的計畫 moze:plan-fedcba9876543210-1@0123456789ab 擋住、沒有記的單位 1 筆",
+		"要作廢的是這個計畫（" + plan + "），不是這些單位",
+	} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("apply does not say %q:\n%s", want, b.String())
+		}
+	}
+	if strings.Contains(b.String(), "已確認的內容與對照不同") || strings.Contains(b.String(), "把它們作廢") {
+		t.Errorf("apply tells the units held back as confirmed transactions to void:\n%s", b.String())
 	}
 }
 

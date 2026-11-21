@@ -10,7 +10,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/filefailure"
 )
 
 // Everything the tests of this package read is invented: no real account, merchant,
@@ -58,18 +58,18 @@ func readFile(t *testing.T, path string) string {
 // failureOf returns the failure that an error is, and stops the test when it is not
 // one: what is wrong with a file is told as a code and its values, so that the words
 // are the command line's alone.
-func failureOf(t *testing.T, err error) *model.Failure {
+func failureOf(t *testing.T, err error) *filefailure.Failure {
 	t.Helper()
-	var f *model.Failure
+	var f *filefailure.Failure
 	if !errors.As(err, &f) {
-		t.Fatalf("the error %q is not a *model.Failure", err)
+		t.Fatalf("the error %q is not a *filefailure.Failure", err)
 	}
 	return f
 }
 
 // wantFailure checks what a failure says: its code, the line it is about, which is
 // zero for none, and its arguments.
-func wantFailure(t *testing.T, f *model.Failure, code model.FailureCode, line int, args ...string) {
+func wantFailure(t *testing.T, f *filefailure.Failure, code filefailure.Code, line int, args ...string) {
 	t.Helper()
 	if f.Code != code || f.Line != line || !slices.Equal(f.Args, args) {
 		t.Errorf("failure %s at line %d with %q, want %s at line %d with %q", f.Code, f.Line, f.Args, code, line, args)
@@ -77,7 +77,7 @@ func wantFailure(t *testing.T, f *model.Failure, code model.FailureCode, line in
 }
 
 // wantFile checks the file a failure is about.
-func wantFile(t *testing.T, f *model.Failure, path string) {
+func wantFile(t *testing.T, f *filefailure.Failure, path string) {
 	t.Helper()
 	if f.File != path {
 		t.Errorf("failure %s is about the file %q, want %q", f.Code, f.File, path)

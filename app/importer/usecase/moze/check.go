@@ -7,6 +7,7 @@ import (
 
 	finance "github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/in/usecase"
 )
 
 // check compares, for each account and instrument of the plan, what the ledger holds
@@ -21,7 +22,7 @@ func (a *Importer) check(ctx context.Context, plan model.Plan, st *state, month 
 	}
 	balances, err := a.ledger.GetBalances.GetBalances(ctx, finance.GetBalancesInput{AsOf: &end})
 	if err != nil {
-		return model.MonthCheck{}, model.LedgerFailure(model.VerbGet, model.ThingBalance, end.Format("2006-01-02"), err)
+		return model.MonthCheck{}, usecase.StepFailure(usecase.VerbGet, usecase.ThingBalance, end.Format("2006-01-02"), err)
 	}
 
 	mine := map[string]bool{}

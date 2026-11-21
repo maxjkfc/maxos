@@ -66,7 +66,23 @@ func applyText(w *strings.Builder, out usecase.ApplyOutput) {
 	} else {
 		fmt.Fprintf(w, "參考資料：新增 %s\n", strings.Join(made, "、"))
 	}
+	writeApplied(w, out)
+	writeHeldBack(w, out)
+	writeUnaccounted(w, out)
+	for _, d := range out.ProjectDifferences {
+		fmt.Fprintf(w, "注意：專案「%s」在帳本的預設領域是「%s」，對照檔寫的是「%s」；匯入沿用帳本的，沒有改\n",
+			d.Project, orNone(d.Ledger), orNone(d.Mapping))
+	}
+	fmt.Fprintf(w, "MOZE 的餘額調整 %d 筆留到確認該月時對帳；不需記錄 %d 筆；無法記錄的列 %d 筆（見 plan 的報告）\n",
+		out.Adjustments, out.NoOps, out.Skipped)
+	for _, f := range out.Failed {
+		fmt.Fprintf(w, "失敗：%s %s（檔案第 %s 行），帳本的回覆：%v\n", kindText[f.Unit.Kind], f.Unit.Date.Format(time.DateOnly), lineList(f.Lines), f.Err)
+	}
+}
 
+// writeApplied counts the units recorded, updated, recorded again, and the ones the
+// ledger had, with what kinds they are.
+func writeApplied(w *strings.Builder, out usecase.ApplyOutput) {
 	newTotal, updatedTotal, revivedTotal, dupTotal := sum(out.New), sum(out.Updated), sum(out.Revived), sum(out.Duplicate)
 	fmt.Fprintf(w, "草稿：新增 %d 筆，已更新 %d 筆，", newTotal, updatedTotal)
 	if revivedTotal > 0 {
@@ -82,6 +98,12 @@ func applyText(w *strings.Builder, out usecase.ApplyOutput) {
 	if revivedTotal > 0 {
 		fmt.Fprintf(w, "  已重新記錄的（對照改回先前的樣子，先前的版本已作廢，所以用新的鍵重記）：%s\n", kinds(out.Revived))
 	}
+}
+
+// writeHeldBack says the units that were not recorded: those whose confirmed version is
+// not what the plan says, those that a plan which is gone holds back, and those that
+// the user voided.
+func writeHeldBack(w *strings.Builder, out usecase.ApplyOutput) {
 	if len(out.Stale) > 0 {
 		fmt.Fprintf(w, "已確認的內容與對照不同 %d 筆；不會動它們，也不會在旁邊再記一筆：\n", len(out.Stale))
 		for _, s := range out.Stale {
@@ -89,12 +111,19 @@ func applyText(w *strings.Builder, out usecase.ApplyOutput) {
 		}
 		fmt.Fprintln(w, "  把它們作廢之後再執行一次 apply，會依現在的對照重記成草稿。")
 	}
+	writeBlocked(w, out.Blocked)
 	if len(out.Voided) > 0 {
 		fmt.Fprintf(w, "這個版本已作廢 %d 筆；匯入不會再把它們記回去：\n", len(out.Voided))
 		for _, v := range out.Voided {
 			writeUnit(w, v.Unit, v.Lines)
 		}
 	}
+}
+
+// writeUnaccounted says what the ledger has of the import that no unit of the plan
+// accounts for: the drafts that were removed and the confirmed transactions that were
+// not, on the days the export covers, and what is of the days it does not.
+func writeUnaccounted(w *strings.Builder, out usecase.ApplyOutput) {
 	if len(out.Removed) > 0 {
 		fmt.Fprintf(w, "已移除 %d 筆匯入的草稿（匯出裡已經沒有對應的列）：\n", len(out.Removed))
 		writeOrphans(w, out.Removed)
@@ -104,15 +133,42 @@ func applyText(w *strings.Builder, out usecase.ApplyOutput) {
 		writeOrphans(w, out.Orphans)
 		fmt.Fprintln(w, "  把它們作廢，再執行 apply 與 confirm。")
 	}
-	for _, d := range out.ProjectDifferences {
-		fmt.Fprintf(w, "注意：專案「%s」在帳本的預設領域是「%s」，對照檔寫的是「%s」；匯入沿用帳本的，沒有改\n",
-			d.Project, orNone(d.Ledger), orNone(d.Mapping))
+	writeUncovered(w, out.Uncovered)
+}
+
+// writeBlocked says the units that a plan of instalments which is gone holds back, by
+// the plan: it is the plan that the user voids, and the units are recorded after it.
+func writeBlocked(w *strings.Builder, blocked []usecase.BlockedUnit) {
+	var plans []string
+	byPlan := map[string][]usecase.BlockedUnit{}
+	for _, b := range blocked {
+		if _, ok := byPlan[b.Plan]; !ok {
+			plans = append(plans, b.Plan)
+		}
+		byPlan[b.Plan] = append(byPlan[b.Plan], b)
 	}
-	fmt.Fprintf(w, "MOZE 的餘額調整 %d 筆留到確認該月時對帳；不需記錄 %d 筆；無法記錄的列 %d 筆（見 plan 的報告）\n",
-		out.Adjustments, out.NoOps, out.Skipped)
-	for _, f := range out.Failed {
-		fmt.Fprintf(w, "失敗：%s %s（檔案第 %s 行），帳本的回覆：%v\n", kindText[f.Unit.Kind], f.Unit.Date.Format(time.DateOnly), lineList(f.Lines), f.Err)
+	for _, plan := range plans {
+		units := byPlan[plan]
+		fmt.Fprintf(w, "被已不存在的計畫 %s 擋住、沒有記的單位 %d 筆（它還計著這些單位的利息，記在旁邊同一筆利息會算兩次）：\n", plan, len(units))
+		for _, b := range units {
+			writeUnit(w, b.Unit, b.Lines)
+		}
+		fmt.Fprintf(w, "  要作廢的是這個計畫（%s），不是這些單位；作廢之後再執行一次 apply。\n", plan)
 	}
+}
+
+// writeUncovered says, in one line, what the ledger has of the import on days that the
+// export does not cover, which was left alone; it says nothing when there is none.
+func writeUncovered(w *strings.Builder, u usecase.Uncovered) {
+	if u.Count == 0 {
+		return
+	}
+	covers := "這份匯出沒有任何日期，"
+	if !u.First.IsZero() {
+		covers = fmt.Sprintf("這份匯出（%s 至 %s）", u.First.Format(time.DateOnly), u.Last.Format(time.DateOnly))
+	}
+	fmt.Fprintf(w, "注意：%s沒有涵蓋帳本裡 %d 筆匯入的交易（日期 %s 至 %s），沒有動它們\n",
+		covers, u.Count, u.From.Format(time.DateOnly), u.To.Format(time.DateOnly))
 }
 
 // writeUnit says a unit by its kind, its day, the lines of the export it is made of and
@@ -315,6 +371,7 @@ func verifyText(w *strings.Builder, out usecase.VerifyOutput) {
 			writeUnit(w, s.Unit, s.Lines)
 		}
 	}
+	writeBlocked(w, out.Blocked)
 	if len(out.Orphans) > 0 {
 		fmt.Fprintf(w, "匯出裡沒有對應的列的交易 %d 筆（已確認的會算進餘額，作廢它們；草稿由 apply 移除）：\n", len(out.Orphans))
 		writeOrphans(w, out.Orphans)
@@ -331,14 +388,15 @@ func RenderStatus(w io.Writer, out usecase.StatusOutput) error {
 	for _, m := range out.Months {
 		rows = append(rows, []string{
 			m.Month, fmt.Sprint(m.Drafts), fmt.Sprint(m.Confirmed), fmt.Sprint(m.Skipped),
-			fmt.Sprint(m.AdjustmentsPending), fmt.Sprint(m.NotApplied), fmt.Sprint(m.Voided), fmt.Sprint(m.Stale),
+			fmt.Sprint(m.AdjustmentsPending), fmt.Sprint(m.NotApplied), fmt.Sprint(m.Voided), fmt.Sprint(m.Stale), fmt.Sprint(m.Blocked),
 		})
 	}
-	table(&b, []string{"月份", "草稿", "已確認", "略過", "待對帳", "尚未匯入", "已作廢", "已確認但與對照不同"}, rows)
+	table(&b, []string{"月份", "草稿", "已確認", "略過", "待對帳", "尚未匯入", "已作廢", "已確認但與對照不同", "被已不存在的計畫擋住"}, rows)
 	if len(out.Orphans) > 0 {
 		fmt.Fprintf(&b, "匯出裡沒有對應的列的交易 %d 筆（已確認的會算進餘額，作廢它們；草稿由 apply 移除）：\n", len(out.Orphans))
 		writeOrphans(&b, out.Orphans)
 	}
+	writeUncovered(&b, out.Uncovered)
 	return flush(w, &b)
 }
 

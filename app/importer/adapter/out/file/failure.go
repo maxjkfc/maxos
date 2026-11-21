@@ -7,10 +7,10 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/filefailure"
 )
 
-// What is wrong with a file is a *model.Failure: a code, the file and the line it is
+// What is wrong with a file is a *filefailure.Failure: a code, the file and the line it is
 // about, and the values its text fills in. It is never a sentence: the words are the
 // command line's, in the user's language, so that none of the libraries' are put in
 // front of the user. The one thing told as it is, is the reason the system gives for a
@@ -18,15 +18,15 @@ import (
 
 // failAt is a failure about a line of a file, with the values its code has; the line
 // is zero for a failure that is about no line. It leaves the file to inFile.
-func failAt(code model.FailureCode, line int, args ...string) *model.Failure {
-	return &model.Failure{Code: code, Line: line, Args: args}
+func failAt(code filefailure.Code, line int, args ...string) *filefailure.Failure {
+	return &filefailure.Failure{Code: code, Line: line, Args: args}
 }
 
 // inFile says that a failure is about the file at path. The parsers read from a reader
 // and cannot say which file it is; the stores that open the file can. An error that is
 // not a failure, or that already names its file, is returned as it is.
 func inFile(path string, err error) error {
-	var f *model.Failure
+	var f *filefailure.Failure
 	if !errors.As(err, &f) || f.File != "" {
 		return err
 	}
@@ -36,13 +36,13 @@ func inFile(path string, err error) error {
 }
 
 // unreadable is the failure for a file that cannot be opened or read.
-func unreadable(path string, err error) *model.Failure {
-	return &model.Failure{Code: model.FailureFileUnreadable, File: path, Err: reasonOf(err)}
+func unreadable(path string, err error) *filefailure.Failure {
+	return &filefailure.Failure{Code: filefailure.Unreadable, File: path, Err: reasonOf(err)}
 }
 
 // notWritten is the failure for a file that cannot be made or written.
-func notWritten(path string, err error) *model.Failure {
-	return &model.Failure{Code: model.FailureFileNotWritten, File: path, Err: reasonOf(err)}
+func notWritten(path string, err error) *filefailure.Failure {
+	return &filefailure.Failure{Code: filefailure.NotWritten, File: path, Err: reasonOf(err)}
 }
 
 // reasonOf is the reason the system gives in an error of the os package, without the
@@ -64,17 +64,17 @@ func reasonOf(err error) error {
 // wrong is told by its code, the line it is on and, when the record began on another
 // line, that line; the library's own words are left out. An error that is not about
 // the text, a file that cannot be read, is told as the reason of the system.
-func csvFailure(err error) *model.Failure {
+func csvFailure(err error) *filefailure.Failure {
 	var parseErr *csv.ParseError
 	if !errors.As(err, &parseErr) {
-		return &model.Failure{Code: model.FailureFileUnreadable, Err: reasonOf(err)}
+		return &filefailure.Failure{Code: filefailure.Unreadable, Err: reasonOf(err)}
 	}
-	f := failAt(model.FailureCSVSyntax, parseErr.Line)
+	f := failAt(filefailure.CSVSyntax, parseErr.Line)
 	switch {
 	case errors.Is(parseErr.Err, csv.ErrBareQuote):
-		f.Code = model.FailureCSVBareQuote
+		f.Code = filefailure.CSVBareQuote
 	case errors.Is(parseErr.Err, csv.ErrQuote):
-		f.Code = model.FailureCSVQuote
+		f.Code = filefailure.CSVQuote
 	}
 	if parseErr.StartLine != parseErr.Line {
 		f.Args = []string{strconv.Itoa(parseErr.StartLine)}

@@ -27,7 +27,7 @@ type refusingLedger struct {
 	err  error
 }
 
-func (r refusingLedger) refuses(verb model.Verb, thing model.Thing) bool {
+func (r refusingLedger) refuses(verb usecase.Verb, thing usecase.Thing) bool {
 	return r.step == string(verb)+" "+string(thing)
 }
 
@@ -47,112 +47,112 @@ func (r refusingLedger) ledger() moze.Ledger {
 }
 
 func (r refusingLedger) ListInstruments(ctx context.Context, in finance.ListInstrumentsInput) (finance.ListInstrumentsOutput, error) {
-	if r.refuses(model.VerbList, model.ThingInstrument) {
+	if r.refuses(usecase.VerbList, usecase.ThingInstrument) {
 		return finance.ListInstrumentsOutput{}, r.err
 	}
 	return r.fakeLedger.ListInstruments(ctx, in)
 }
 
 func (r refusingLedger) CreateInstrument(ctx context.Context, in finance.CreateInstrumentInput) (finance.Instrument, error) {
-	if r.refuses(model.VerbCreate, model.ThingInstrument) {
+	if r.refuses(usecase.VerbCreate, usecase.ThingInstrument) {
 		return finance.Instrument{}, r.err
 	}
 	return r.fakeLedger.CreateInstrument(ctx, in)
 }
 
 func (r refusingLedger) ListInstitutions(ctx context.Context, in finance.ListInstitutionsInput) (finance.ListInstitutionsOutput, error) {
-	if r.refuses(model.VerbList, model.ThingInstitution) {
+	if r.refuses(usecase.VerbList, usecase.ThingInstitution) {
 		return finance.ListInstitutionsOutput{}, r.err
 	}
 	return r.fakeLedger.ListInstitutions(ctx, in)
 }
 
 func (r refusingLedger) CreateInstitution(ctx context.Context, in finance.CreateInstitutionInput) (finance.Institution, error) {
-	if r.refuses(model.VerbCreate, model.ThingInstitution) {
+	if r.refuses(usecase.VerbCreate, usecase.ThingInstitution) {
 		return finance.Institution{}, r.err
 	}
 	return r.fakeLedger.CreateInstitution(ctx, in)
 }
 
 func (r refusingLedger) ListAccounts(ctx context.Context, in finance.ListAccountsInput) (finance.ListAccountsOutput, error) {
-	if r.refuses(model.VerbList, model.ThingAccount) {
+	if r.refuses(usecase.VerbList, usecase.ThingAccount) {
 		return finance.ListAccountsOutput{}, r.err
 	}
 	return r.fakeLedger.ListAccounts(ctx, in)
 }
 
 func (r refusingLedger) CreateAccount(ctx context.Context, in finance.CreateAccountInput) (finance.Account, error) {
-	if r.refuses(model.VerbCreate, model.ThingAccount) {
+	if r.refuses(usecase.VerbCreate, usecase.ThingAccount) {
 		return finance.Account{}, r.err
 	}
 	return r.fakeLedger.CreateAccount(ctx, in)
 }
 
 func (r refusingLedger) ListCategories(ctx context.Context, in finance.ListCategoriesInput) (finance.ListCategoriesOutput, error) {
-	if r.refuses(model.VerbList, model.ThingCategory) {
+	if r.refuses(usecase.VerbList, usecase.ThingCategory) {
 		return finance.ListCategoriesOutput{}, r.err
 	}
 	return r.fakeLedger.ListCategories(ctx, in)
 }
 
 func (r refusingLedger) CreateCategory(ctx context.Context, in finance.CreateCategoryInput) (finance.Category, error) {
-	if r.refuses(model.VerbCreate, model.ThingCategory) {
+	if r.refuses(usecase.VerbCreate, usecase.ThingCategory) {
 		return finance.Category{}, r.err
 	}
 	return r.fakeLedger.CreateCategory(ctx, in)
 }
 
 func (r refusingLedger) ListAreas(ctx context.Context, in catalog.ListAreasInput) (catalog.ListAreasOutput, error) {
-	if r.refuses(model.VerbList, model.ThingArea) {
+	if r.refuses(usecase.VerbList, usecase.ThingArea) {
 		return catalog.ListAreasOutput{}, r.err
 	}
 	return r.fakeLedger.ListAreas(ctx, in)
 }
 
 func (r refusingLedger) CreateArea(ctx context.Context, in catalog.CreateAreaInput) (catalog.Area, error) {
-	if r.refuses(model.VerbCreate, model.ThingArea) {
+	if r.refuses(usecase.VerbCreate, usecase.ThingArea) {
 		return catalog.Area{}, r.err
 	}
 	return r.fakeLedger.CreateArea(ctx, in)
 }
 
 func (r refusingLedger) ListProjects(ctx context.Context, in catalog.ListProjectsInput) (catalog.ListProjectsOutput, error) {
-	if r.refuses(model.VerbList, model.ThingProject) {
+	if r.refuses(usecase.VerbList, usecase.ThingProject) {
 		return catalog.ListProjectsOutput{}, r.err
 	}
 	return r.fakeLedger.ListProjects(ctx, in)
 }
 
 func (r refusingLedger) CreateProject(ctx context.Context, in catalog.CreateProjectInput) (catalog.Project, error) {
-	if r.refuses(model.VerbCreate, model.ThingProject) {
+	if r.refuses(usecase.VerbCreate, usecase.ThingProject) {
 		return catalog.Project{}, r.err
 	}
 	return r.fakeLedger.CreateProject(ctx, in)
 }
 
 func (r refusingLedger) ListTags(ctx context.Context, in catalog.ListTagsInput) (catalog.ListTagsOutput, error) {
-	if r.refuses(model.VerbList, model.ThingTag) {
+	if r.refuses(usecase.VerbList, usecase.ThingTag) {
 		return catalog.ListTagsOutput{}, r.err
 	}
 	return r.fakeLedger.ListTags(ctx, in)
 }
 
 func (r refusingLedger) CreateTag(ctx context.Context, in catalog.CreateTagInput) (catalog.Tag, error) {
-	if r.refuses(model.VerbCreate, model.ThingTag) {
+	if r.refuses(usecase.VerbCreate, usecase.ThingTag) {
 		return catalog.Tag{}, r.err
 	}
 	return r.fakeLedger.CreateTag(ctx, in)
 }
 
 func (r refusingLedger) ListParties(ctx context.Context, in catalog.ListPartiesInput) (catalog.ListPartiesOutput, error) {
-	if r.refuses(model.VerbList, model.ThingParty) {
+	if r.refuses(usecase.VerbList, usecase.ThingParty) {
 		return catalog.ListPartiesOutput{}, r.err
 	}
 	return r.fakeLedger.ListParties(ctx, in)
 }
 
 func (r refusingLedger) CreateParty(ctx context.Context, in catalog.CreatePartyInput) (catalog.Party, error) {
-	if r.refuses(model.VerbCreate, model.ThingParty) {
+	if r.refuses(usecase.VerbCreate, usecase.ThingParty) {
 		return catalog.Party{}, r.err
 	}
 	return r.fakeLedger.CreateParty(ctx, in)
@@ -184,12 +184,12 @@ func (rw referenceWorld) applyOn(l moze.Ledger) error {
 
 // failureAfterApply applies on the world's ledger as it is, and returns the failure it
 // stopped with.
-func (rw referenceWorld) failureAfterApply(t *testing.T) *model.Failure {
+func (rw referenceWorld) failureAfterApply(t *testing.T) *usecase.LedgerFailure {
 	t.Helper()
 	err := rw.applyOn(rw.ledger.ledger())
-	var f *model.Failure
+	var f *usecase.LedgerFailure
 	if !errors.As(err, &f) {
-		t.Fatalf("Apply = %v, want a *model.Failure", err)
+		t.Fatalf("Apply = %v, want a *usecase.LedgerFailure", err)
 	}
 	return f
 }
@@ -211,10 +211,10 @@ func madeFirst(t *testing.T) *fakeLedger {
 	return l
 }
 
-func wantFailure(t *testing.T, f *model.Failure, code model.FailureCode, args ...string) {
+func wantFailure(t *testing.T, f *usecase.LedgerFailure, code usecase.LedgerFailureCode, args ...string) {
 	t.Helper()
-	if f.Code != code || !slices.Equal(f.Args, args) || f.File != "" || f.Line != 0 {
-		t.Errorf("failure = %s with %q about %q at line %d, want %s with %q", f.Code, f.Args, f.File, f.Line, code, args)
+	if f.Code != code || !slices.Equal(f.Args, args) {
+		t.Errorf("failure = %s with %q, want %s with %q", f.Code, f.Args, code, args)
 	}
 }
 
@@ -224,37 +224,37 @@ func wantFailure(t *testing.T, f *model.Failure, code model.FailureCode, args ..
 func TestAStepTheLedgerDoesNotTakeIsAFailureThatHasItsReply(t *testing.T) {
 	plain := madeFirst(t)
 	steps := []struct {
-		verb  model.Verb
-		thing model.Thing
+		verb  usecase.Verb
+		thing usecase.Thing
 		name  string // what the step is about: none for a list
 	}{
-		{model.VerbList, model.ThingInstrument, ""},
-		{model.VerbCreate, model.ThingInstrument, plain.instruments[1].Code},
-		{model.VerbList, model.ThingInstitution, ""},
-		{model.VerbCreate, model.ThingInstitution, plain.institutions[0].Name},
-		{model.VerbList, model.ThingAccount, ""},
-		{model.VerbCreate, model.ThingAccount, plain.accounts[0].Name},
-		{model.VerbList, model.ThingCategory, ""},
-		{model.VerbCreate, model.ThingCategory, plain.categories[0].Name},
-		{model.VerbList, model.ThingArea, ""},
-		{model.VerbCreate, model.ThingArea, plain.areas[0].Name},
-		{model.VerbList, model.ThingProject, ""},
-		{model.VerbCreate, model.ThingProject, plain.projects[0].Name},
-		{model.VerbList, model.ThingTag, ""},
-		{model.VerbCreate, model.ThingTag, plain.tags[0].Name},
-		{model.VerbList, model.ThingParty, ""},
-		{model.VerbCreate, model.ThingParty, plain.parties[0].Name},
+		{usecase.VerbList, usecase.ThingInstrument, ""},
+		{usecase.VerbCreate, usecase.ThingInstrument, plain.instruments[1].Code},
+		{usecase.VerbList, usecase.ThingInstitution, ""},
+		{usecase.VerbCreate, usecase.ThingInstitution, plain.institutions[0].Name},
+		{usecase.VerbList, usecase.ThingAccount, ""},
+		{usecase.VerbCreate, usecase.ThingAccount, plain.accounts[0].Name},
+		{usecase.VerbList, usecase.ThingCategory, ""},
+		{usecase.VerbCreate, usecase.ThingCategory, plain.categories[0].Name},
+		{usecase.VerbList, usecase.ThingArea, ""},
+		{usecase.VerbCreate, usecase.ThingArea, plain.areas[0].Name},
+		{usecase.VerbList, usecase.ThingProject, ""},
+		{usecase.VerbCreate, usecase.ThingProject, plain.projects[0].Name},
+		{usecase.VerbList, usecase.ThingTag, ""},
+		{usecase.VerbCreate, usecase.ThingTag, plain.tags[0].Name},
+		{usecase.VerbList, usecase.ThingParty, ""},
+		{usecase.VerbCreate, usecase.ThingParty, plain.parties[0].Name},
 	}
 	for _, st := range steps {
 		t.Run(string(st.verb)+" "+string(st.thing), func(t *testing.T) {
 			rw := newReferenceWorld(t)
 			refusing := refusingLedger{fakeLedger: rw.ledger, step: string(st.verb) + " " + string(st.thing), err: errReply}
 			err := rw.applyOn(refusing.ledger())
-			var f *model.Failure
+			var f *usecase.LedgerFailure
 			if !errors.As(err, &f) {
-				t.Fatalf("Apply = %v, want a *model.Failure", err)
+				t.Fatalf("Apply = %v, want a *usecase.LedgerFailure", err)
 			}
-			wantFailure(t, f, model.FailureLedger, string(st.verb), string(st.thing), st.name)
+			wantFailure(t, f, usecase.LedgerStepFailed, string(st.verb), string(st.thing), st.name)
 			if !errors.Is(f.Err, errReply) || f.Err.Error() != errReply.Error() {
 				t.Errorf("Err = %v, want the reply of the ledger as it was given", f.Err)
 			}
@@ -268,46 +268,46 @@ func TestReferenceDataTheLedgerHasArchivedIsAFailureThatNamesIt(t *testing.T) {
 	plain := madeFirst(t)
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	tests := []struct {
-		thing model.Thing
+		thing usecase.Thing
 		name  string
 		seed  func(l *fakeLedger) // puts it in the ledger, archived
 	}{
-		{model.ThingInstrument, plain.instruments[1].Code, func(l *fakeLedger) {
+		{usecase.ThingInstrument, plain.instruments[1].Code, func(l *fakeLedger) {
 			i := plain.instruments[1]
 			i.ArchivedAt = &when
 			l.instruments = append(l.instruments, i)
 		}},
-		{model.ThingInstitution, plain.institutions[0].Name, func(l *fakeLedger) {
+		{usecase.ThingInstitution, plain.institutions[0].Name, func(l *fakeLedger) {
 			i := plain.institutions[0]
 			i.ArchivedAt = &when
 			l.institutions = append(l.institutions, i)
 		}},
-		{model.ThingAccount, plain.accounts[0].Name, func(l *fakeLedger) {
+		{usecase.ThingAccount, plain.accounts[0].Name, func(l *fakeLedger) {
 			a := plain.accounts[0]
 			a.ArchivedAt = &when
 			l.accounts = append(l.accounts, a)
 		}},
-		{model.ThingCategory, plain.categories[0].Name, func(l *fakeLedger) {
+		{usecase.ThingCategory, plain.categories[0].Name, func(l *fakeLedger) {
 			c := plain.categories[0]
 			c.ArchivedAt = &when
 			l.categories = append(l.categories, c)
 		}},
-		{model.ThingArea, plain.areas[0].Name, func(l *fakeLedger) {
+		{usecase.ThingArea, plain.areas[0].Name, func(l *fakeLedger) {
 			a := plain.areas[0]
 			a.ArchivedAt = &when
 			l.areas = append(l.areas, a)
 		}},
-		{model.ThingProject, plain.projects[0].Name, func(l *fakeLedger) {
+		{usecase.ThingProject, plain.projects[0].Name, func(l *fakeLedger) {
 			p := plain.projects[0]
 			p.ArchivedAt = &when
 			l.projects = append(l.projects, p)
 		}},
-		{model.ThingTag, plain.tags[0].Name, func(l *fakeLedger) {
+		{usecase.ThingTag, plain.tags[0].Name, func(l *fakeLedger) {
 			tag := plain.tags[0]
 			tag.ArchivedAt = &when
 			l.tags = append(l.tags, tag)
 		}},
-		{model.ThingParty, plain.parties[0].Name, func(l *fakeLedger) {
+		{usecase.ThingParty, plain.parties[0].Name, func(l *fakeLedger) {
 			p := plain.parties[0]
 			p.ArchivedAt = &when
 			l.parties = append(l.parties, p)
@@ -317,7 +317,7 @@ func TestReferenceDataTheLedgerHasArchivedIsAFailureThatNamesIt(t *testing.T) {
 		t.Run(string(tt.thing), func(t *testing.T) {
 			rw := newReferenceWorld(t)
 			tt.seed(rw.ledger)
-			wantFailure(t, rw.failureAfterApply(t), model.FailureArchived, string(tt.thing), tt.name)
+			wantFailure(t, rw.failureAfterApply(t), usecase.LedgerArchived, string(tt.thing), tt.name)
 		})
 	}
 }
@@ -355,7 +355,7 @@ func TestAnInstrumentOrAnAccountTheLedgerHasOtherwiseIsAFailureThatSaysBoth(t *t
 			other := mapped
 			tt.change(&other)
 			rw.ledger.instruments = append(rw.ledger.instruments, other)
-			wantFailure(t, rw.failureAfterApply(t), model.FailureInstrumentDiffers, instrument(other)...)
+			wantFailure(t, rw.failureAfterApply(t), usecase.LedgerInstrumentDiffers, instrument(other)...)
 		})
 	}
 	t.Run("an account of another kind", func(t *testing.T) {
@@ -363,6 +363,6 @@ func TestAnInstrumentOrAnAccountTheLedgerHasOtherwiseIsAFailureThatSaysBoth(t *t
 		other := plain.accounts[0]
 		other.Kind = "boat"
 		rw.ledger.accounts = append(rw.ledger.accounts, other)
-		wantFailure(t, rw.failureAfterApply(t), model.FailureAccountKindDiffers, other.Name, "boat", plain.accounts[0].Kind)
+		wantFailure(t, rw.failureAfterApply(t), usecase.LedgerAccountKindDiffers, other.Name, "boat", plain.accounts[0].Kind)
 	})
 }

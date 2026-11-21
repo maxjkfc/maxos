@@ -11,6 +11,7 @@ import (
 
 	"github.com/maxjkfc/maxos/app/importer/adapter/out/file"
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/filefailure"
 )
 
 // guessedAll is a mapping with entries in every section, to be added.
@@ -96,7 +97,7 @@ func appendTo(t *testing.T, path string, guessed model.Mapping) {
 
 // appendFails appends what must be refused, and returns the failure it is, which is
 // about the file.
-func appendFails(t *testing.T, path string, guessed model.Mapping) *model.Failure {
+func appendFails(t *testing.T, path string, guessed model.Mapping) *filefailure.Failure {
 	t.Helper()
 	err := file.NewMappingYAML().Append(context.Background(), path, guessed)
 	if err == nil {
@@ -691,7 +692,7 @@ func TestAppendRefusesAFileBetweenBraces(t *testing.T) {
 
 	t.Run("that has to be added to", func(t *testing.T) {
 		f := appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed", "Amy": "Amy"}})
-		wantFailure(t, f, model.FailureBraces, 1, "parties")
+		wantFailure(t, f, filefailure.Braces, 1, "parties")
 		wantUntouched(t, path, text, old)
 	})
 	t.Run("that has what is to be added already", func(t *testing.T) {
@@ -701,13 +702,13 @@ func TestAppendRefusesAFileBetweenBraces(t *testing.T) {
 	t.Run("a section of the categories", func(t *testing.T) {
 		path := writeFile(t, t.TempDir(), "categories.yaml", "categories:\n  expense: {A: B}\n")
 		f := appendFails(t, path, model.Mapping{Expense: map[string]model.CategoryMap{"C": {Category: "C"}}})
-		wantFailure(t, f, model.FailureBraces, 2, "categories.expense")
+		wantFailure(t, f, filefailure.Braces, 2, "categories.expense")
 	})
 	t.Run("a file that is one mapping between braces", func(t *testing.T) {
 		whole := "{accounts: {A: {name: A}}}\n"
 		path := writeFile(t, t.TempDir(), "whole.yaml", whole)
 		old := setOld(t, path)
-		wantFailure(t, appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}}), model.FailureBraces, 1, "")
+		wantFailure(t, appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}}), filefailure.Braces, 1, "")
 		wantUntouched(t, path, whole, old)
 		// With nothing to add it is no error.
 		appendTo(t, path, model.Mapping{Accounts: map[string]model.AccountMap{"A": {Name: "A"}}})
@@ -715,7 +716,7 @@ func TestAppendRefusesAFileBetweenBraces(t *testing.T) {
 	})
 	t.Run("a file that is {}", func(t *testing.T) {
 		path := writeFile(t, t.TempDir(), "empty.yaml", "{}\n")
-		wantFailure(t, appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}}), model.FailureBraces, 1, "")
+		wantFailure(t, appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}}), filefailure.Braces, 1, "")
 	})
 }
 
@@ -727,13 +728,13 @@ func TestAppendRefusesALayoutItCannotAddTo(t *testing.T) {
 		path := writeFile(t, t.TempDir(), "mapping.yaml", text)
 		old := setOld(t, path)
 		f := appendFails(t, path, model.Mapping{Accounts: map[string]model.AccountMap{"A": {Name: "A"}}})
-		wantFailure(t, f, model.FailureLayout, 1, "accounts")
+		wantFailure(t, f, filefailure.Layout, 1, "accounts")
 		wantUntouched(t, path, text, old)
 	})
 	t.Run("a section of the categories", func(t *testing.T) {
 		path := writeFile(t, t.TempDir(), "mapping.yaml", "categories:\n  expense:\n    {}\n")
 		f := appendFails(t, path, model.Mapping{Expense: map[string]model.CategoryMap{"C": {Category: "C"}}})
-		wantFailure(t, f, model.FailureLayout, 2, "categories.expense")
+		wantFailure(t, f, filefailure.Layout, 2, "categories.expense")
 	})
 }
 
@@ -742,7 +743,7 @@ func TestAppendRefusesAFileItCannotRead(t *testing.T) {
 	path := writeFile(t, t.TempDir(), "mapping.yaml", text)
 	old := setOld(t, path)
 	f := appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}})
-	wantFailure(t, f, model.FailureKeyUnknown, 2, unknownKey("nme", "accounts.A", accountKeys)...)
+	wantFailure(t, f, filefailure.KeyUnknown, 2, unknownKey("nme", "accounts.A", accountKeys)...)
 	wantUntouched(t, path, text, old)
 }
 
@@ -752,7 +753,7 @@ func TestAppendFailsWithTheReasonOfTheSystem(t *testing.T) {
 	t.Run("a file that cannot be read", func(t *testing.T) {
 		dir := t.TempDir() // a folder is there, and it is not a mapping
 		f := appendFails(t, dir, model.Mapping{Parties: map[string]string{"Zed": "Zed"}})
-		wantFailure(t, f, model.FailureFileUnreadable, 0)
+		wantFailure(t, f, filefailure.Unreadable, 0)
 		if f.Err == nil {
 			t.Error("the failure has no Err: the user is told the reason of the system as it is")
 		}
@@ -768,7 +769,7 @@ func TestAppendFailsWithTheReasonOfTheSystem(t *testing.T) {
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 		path := filepath.Join(dir, "mapping.yaml")
 		f := appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}})
-		wantFailure(t, f, model.FailureFileNotWritten, 0)
+		wantFailure(t, f, filefailure.NotWritten, 0)
 		if f.Err == nil {
 			t.Error("the failure has no Err: the user is told the reason of the system as it is")
 		}
@@ -783,7 +784,7 @@ func TestAppendRefusesAFileWhoseNewTextCannotBeRead(t *testing.T) {
 	path := writeFile(t, t.TempDir(), "mapping.yaml", text)
 	old := setOld(t, path)
 	f := appendFails(t, path, model.Mapping{Accounts: map[string]model.AccountMap{"B": {Name: "B"}}})
-	wantFailure(t, f, model.FailureWouldReadDifferently, 0)
+	wantFailure(t, f, filefailure.WouldReadDifferently, 0)
 	wantUntouched(t, path, text, old)
 }
 
@@ -881,7 +882,7 @@ func TestAppendRefusesToChangeWhatAnEntrySays(t *testing.T) {
 			path := writeFile(t, t.TempDir(), "mapping.yaml", tt.text)
 			old := setOld(t, path)
 			f := appendFails(t, path, tt.guessed)
-			wantFailure(t, f, model.FailureWouldReadDifferently, 0, tt.wantArgs...)
+			wantFailure(t, f, filefailure.WouldReadDifferently, 0, tt.wantArgs...)
 			wantUntouched(t, path, tt.text, old)
 		})
 	}
@@ -898,7 +899,7 @@ func TestAppendRefusesAnOpeningDateItCannotKeep(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "mapping.yaml")
 			guessed := model.Mapping{Accounts: map[string]model.AccountMap{"A": {Name: "A", Kind: "bank", OpeningDate: opening}}}
-			wantFailure(t, appendFails(t, path, guessed), model.FailureWouldReadDifferently, 0, "accounts", "A")
+			wantFailure(t, appendFails(t, path, guessed), filefailure.WouldReadDifferently, 0, "accounts", "A")
 			if _, err := os.Stat(path); !os.IsNotExist(err) {
 				t.Errorf("Stat = %v, want no file to be made of what it cannot keep", err)
 			}
@@ -930,11 +931,11 @@ func TestAppendRefusesNamesThatCannotBeOneLine(t *testing.T) {
 			text := "accounts:\n  A: {name: A}\n"
 			path := writeFile(t, t.TempDir(), "mapping.yaml", text)
 			old := setOld(t, path)
-			wantFailure(t, appendFails(t, path, guessed), model.FailureEntryNotWritable, 0, "accounts", key)
+			wantFailure(t, appendFails(t, path, guessed), filefailure.EntryNotWritable, 0, "accounts", key)
 			wantUntouched(t, path, text, old)
 
 			made := filepath.Join(t.TempDir(), "mapping.yaml")
-			wantFailure(t, appendFails(t, made, guessed), model.FailureEntryNotWritable, 0, "accounts", key)
+			wantFailure(t, appendFails(t, made, guessed), filefailure.EntryNotWritable, 0, "accounts", key)
 			if _, err := os.Stat(made); !os.IsNotExist(err) {
 				t.Errorf("Stat = %v, want no file to be made of what cannot be written", err)
 			}
