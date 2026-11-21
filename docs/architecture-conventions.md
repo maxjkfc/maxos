@@ -16,7 +16,7 @@ maxos 的分層、依賴規則與技術選型。所有開發（含 subagent 派�
 ```
 main.go                          只呼叫 cmd.Execute()
 cmd/                             Cobra 子指令與 FX 組裝
-  root.go  serve.go  mcp_stdio.go  migrate.go
+  root.go  serve.go  mcp_stdio.go  migrate.go  import.go
   dp.go                          所有 FX module 的組裝
   web.go                         網頁的 FX module（WebModule）
 app/
@@ -30,7 +30,7 @@ app/
         in/usecase/              use case 介面與 Input / Output
         out/<kind>/              對外介面：repo、pricefeed 等
     adapter/
-      in/<transport>/            mcp（工具）、web（頁面）
+      in/<transport>/            mcp（工具）、web（頁面）、cli（指令；目前只有 importer）
       out/
         persistence/postgres/    repo 實作、sqlc 查詢與產生碼
         <kind>/                  其他對外實作
@@ -48,7 +48,8 @@ docs/
 |---|---|---|
 | `inbox` | 所有外部輸入的原始紀錄與冪等 | M0 |
 | `catalog` | 領域、專案、對象、標籤；link（種類不固定的多對多關聯） | M0 建表，M1a 起有程式 |
-| `finance` | 帳本、匯入、報表、投資 | M1 起（M1a 有標的、機構、帳戶、類別與帳本核心：支出、收入、轉帳、換匯、草稿與確認、餘額） |
+| `finance` | 帳本、報表、投資 | M1 起（M1a 有標的、機構、帳戶、類別與帳本核心：支出、收入、轉帳、換匯、草稿與確認、餘額） |
+| `importer` | 把別的系統的匯出匯進帳本（M2：MOZE CSV）；只經 `finance`、`catalog` 的 `usecase/port/in`；沒有資料表、沒有 MCP 工具，入口是 `maxos import` 指令 | M2 |
 | `health` | 待定 | M6 之後 |
 | `project` | 待定；可能是外部系統，以外部參照對接（欄位待定） | 待評估 |
 
@@ -119,7 +120,7 @@ adapter  →  usecase  →  domain
 - **手寫 SQL 的例外**：有可選篩選條件的動態查詢，可以在同一個 adapter 裡手寫，集中在 `queries.go`。
 - **交易邊界**由 use case 決定，repo 不自行開交易。唯一的例外是需要用同一份快照讀好幾條語句的唯讀 repo 方法，它可以用 `DB.WithinSnapshot` 開唯讀的 `REPEATABLE READ` 交易（目前是 finance 的 `TransactionRepo.List` 與 `TransactionRepo.Statement`）；寫入一律由 use case 決定。
   - `pkg/postgres` 的 `DB` 是 repo 執行 SQL 的入口（`dbgen.New(postgres.NewDB(pool))`）：語句會自動加入 context 帶著的交易，沒有交易就直接走連線池，所以 repo 不需要知道交易的存在。
-  - `DB.WithinTx(ctx, fn)` 開啟交易，並把交易放進傳給 `fn` 的 context；`fn` 回傳 `nil` 才提交，回傳錯誤或 panic 就回滾；`fn` 內再呼叫 `WithinTx` 會用 savepoint，內層回傳錯誤時（含 context 在提交前已結束，以及 `fn` 忽略失敗的語句後回傳 `nil`），內層的寫入一律還原，外層交易仍可繼續使用。
+  - `DB.WithinTx(ctx, fn)` 開啟交易，並把交易放進傳給 `fn` 的 context；`fn` 回傳 `nil` 才提交，回傳錯誤或 panic 就回滾。**use case 不巢狀**：`fn` 裡不呼叫別的會開交易的 use case；傳給 `WithinTx` 的 context 已帶著交易時，它回傳 `ErrNestedTx`，不執行 `fn`、不送任何語句，開著的交易照舊。呼叫它的 `fn` 把這個錯誤原樣回傳，整個交易回滾：這是寫錯程式的訊號，不是要處理的情況。
   - use case 不能 import `pkg/`：需要交易的 use case 在自己 context 的 `usecase/port/out/` 宣告只有 `WithinTx(ctx context.Context, fn func(ctx context.Context) error) error` 的介面（finance 的是 `usecase/port/out/tx` 的 `Transactor`），由 `cmd/` 把 `*postgres.DB` 注入。
   - 一筆資料分多條語句寫入、且資料庫有延遲到提交才檢查的約束時（例如 finance 的分錄平衡檢查），該 repo 方法必須在資料庫交易內呼叫；repo 的 port 要寫明這點。
 
@@ -167,6 +168,10 @@ adapter  →  usecase  →  domain
 5. 需要對外的動作，在 `adapter/in/mcp` 註冊工具；需要頁面，在 `adapter/in/web` 登記頁面（第 11 節）。
 6. 更新第 2 節的 context 清單。
 7. 在 `.golangci.yml` 加上該 context 的 depguard 規則（複製 `inbox-*` 各條，改成該 context 的名稱與路徑）。
+
+沒有資料表的 context（例如 `importer`：寫入都經別的 context 的 use case，入口是 `maxos import` 指令，沒有 MCP 工具也沒有頁面）不做第 2、3 步（migration 與 sqlc），也沒有 `adapter/out/persistence`；它的 `adapter/out` 是它讀的檔案（`importer` 的是 `adapter/out/file`），輸入端是 `adapter/in/cli`，第 5 步用不到。
+
+給使用者看的文字（訊息、用語、失敗的說明）屬於輸入端 adapter：domain、use case、port 與檔案 adapter 回代碼與值（`importer` 的 `model.Problem` 與 `model.Reason`，port 的 `filefailure.Failure` 與 `usecase.StepFailure`），由 `adapter/in/*` 對成字；下層不寫給使用者看的句子。
 
 ## 11. 輸入端 adapter：MCP 與網頁
 

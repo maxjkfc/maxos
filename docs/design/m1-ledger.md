@@ -203,7 +203,7 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 
 固定扣款的例外在 M3 處理。
 
-交易邊界由 use case 決定：每個 Record*、確認、捨棄、作廢（含驗證所需的讀取與冪等鍵查詢）在同一個資料庫交易內完成，repo 不自行開交易，唯一的例外是 `TransactionRepo.List` 與 `TransactionRepo.Statement` 的唯讀快照。需要一個 `pkg/postgres` 的交易輔助（透過 context 傳遞 `pgx.Tx`）；use case 經 `usecase/port/out/tx.Transactor`（只有 `WithinTx`）使用它，由 `cmd/` 注入 `*postgres.DB`。巢狀的 `WithinTx` 用 savepoint（明確下 `SAVEPOINT`、`RELEASE SAVEPOINT`、`ROLLBACK TO SAVEPOINT`）：內層回傳錯誤時，內層的寫入一律還原，外層交易仍可繼續使用；這包括內層的 context 在提交前已結束，以及內層忽略失敗的語句後回傳 nil（交易已在失敗狀態，savepoint 放不掉）。`TransactionRepo.Insert` 以多條語句寫入交易、分錄與標籤，必須在資料庫交易內呼叫，否則平衡檢查會在第一條語句提交時拒絕。
+交易邊界由 use case 決定：每個 Record*、確認、捨棄、作廢（含驗證所需的讀取與冪等鍵查詢）在同一個資料庫交易內完成，repo 不自行開交易，唯一的例外是 `TransactionRepo.List` 與 `TransactionRepo.Statement` 的唯讀快照。需要一個 `pkg/postgres` 的交易輔助（透過 context 傳遞 `pgx.Tx`）；use case 經 `usecase/port/out/tx.Transactor`（只有 `WithinTx`）使用它，由 `cmd/` 注入 `*postgres.DB`。`WithinTx` 不巢狀：use case 不互相呼叫，每個 Record*、確認、捨棄、作廢都是自己最外層的交易；傳給 `WithinTx` 的 context 已帶著交易時，它回傳 `ErrNestedTx`，不執行 `fn`、不送任何語句，開著的交易照舊，呼叫它的 `fn` 把錯誤回傳，整個交易回滾。`TransactionRepo.Insert` 以多條語句寫入交易、分錄與標籤，必須在資料庫交易內呼叫，否則平衡檢查會在第一條語句提交時拒絕。
 
 ### 帳本（M1b，`app/finance`）
 
@@ -354,7 +354,7 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 - domain：分錄產生與不變條件（每個種類、外幣、多類別、不平衡時拒絕）。
 - use case：以假的 port 測驗證規則與冪等。
 - postgres adapter：整合測試，含 CHECK 限制、平衡檢查（不平衡的交易在提交時被拒絕）、餘額查詢只計已確認、草稿確認後餘額改變、作廢後餘額還原、捨棄草稿連分錄一起刪、全有或全無、併發重複冪等鍵。冪等與全有或全無的測試在 repo 層（`WithinTx` 加 `TransactionRepo`）：adapter 依 depguard 不能 import use case。
-- `pkg/postgres`：`WithinTx` 的整合測試，含巢狀 savepoint 的各種失敗（內層回傳錯誤、內層 context 在提交前已結束、內層忽略失敗的語句後回傳 nil、panic、多層）：內層的寫入還原，外層交易仍可繼續使用；`WithinSnapshot` 讀到的是開始時已提交的資料。
+- `pkg/postgres`：`WithinTx` 的整合測試：提交、回滾（錯誤與 panic）、context 已帶著交易時回傳 `ErrNestedTx`（`fn` 不執行、開著的交易照常提交；`fn` 把錯誤回傳時整個回滾，連線乾淨地回到連線池）；`WithinSnapshot` 讀到的是開始時已提交的資料。
 - `TransactionRepo.List` 的快照：以 pgx tracer 在列 id 的語句之後、讀列的語句之前，從另一條連線刪除或改狀態，驗證頁面仍是列 id 時看到的那一頁；不用 sleep，所以每次執行都一樣。
 - M1b domain：第 3 節 M1b 表的每一種分錄（逐筆比對分錄），外幣分攤；拒絕的情形（對象重複、兩種付款人、別人付時有分攤、沒有自己的行、非支出的折扣、手續費用收入類別、系統類別、系統類別底下的子類別、非幣別的往來、分攤或別人代付用非幣別標的（沒有分攤的非幣別支出仍可以）、對帳的 `DifferenceBaseAmount`）；手續費與主金額一樣大時仍認得出手續費；`Validate` 對新種類與新分錄的各種錯誤。
 - M1b use case：以假的 port 測驗證（對象經 catalog、手續費各自載入）、冪等、對帳的各個分支（差額 0、少、多、非幣別、缺本位幣金額、有草稿在等）與以日期計的餘額、`GetDealings` 的順序，以及給對象時只用 `VerifyReferences` 問那一個對象（找不到回 `ErrNotFound` 且不讀 repo，已封存的可以，catalog 的其他錯誤不當成找不到；假的 catalog 照真的回 `*ReferenceError`，以 `Archived` 分出找不到與已封存）；對帳先鎖帳戶、再查鍵、再數草稿與讀餘額（假的 repo 與假的帳戶共用一份呼叫紀錄，驗證順序），鎖失敗就停，用過的鍵不管帳戶存不存在都先回答。假的 repo 的 `Balances`、`PendingDrafts` 依記憶體裡的交易照真實語意計算，所以「對帳草稿確認後餘額等於實際餘額」在 use case 層就能驗證。

@@ -168,6 +168,33 @@ func TestApplyBuildsTheInputsTheLedgerTakes(t *testing.T) {
 	}
 }
 
+// What was paid for the company is one dealing of all that left the account: the price of
+// the row and its fee, which is no expense of its own and is said in the description. The
+// months agree with the file all the same, the account having paid the same.
+func TestWhatWasPaidForTheCompanyIsOneDealingOfAllThatLeftTheAccount(t *testing.T) {
+	w := newWorld(t, fixture(), fixtureMapping()).reviewed()
+	w.apply()
+
+	var lunch finance.RecordDealingInput
+	dealings := 0
+	for _, c := range w.ledger.calls {
+		if in, ok := c.(finance.RecordDealingInput); ok && strings.HasPrefix(in.Description, "Team lunch") {
+			lunch, dealings = in, dealings+1
+		}
+	}
+	if dealings != 1 || !lunch.Amount.Equal(d("505")) || lunch.Direction != "paid_out" || len(lunch.Fees) != 0 || !strings.Contains(lunch.Description, "手續費 5 TWD") {
+		t.Errorf("dealings of the lunch = %d, %+v, want one of 505 (the 500 and the fee of 5), paid out, with no fee of its own and the fee in its description", dealings, lunch)
+	}
+
+	for _, m := range []string{"2026-01", "2026-02", "2026-03", "2026-04"} {
+		w.mustConfirm(m)
+	}
+	v, err := w.imp.Verify(context.Background(), usecase.VerifyInput{Files: w.files})
+	if err != nil || v.Unexplained != 0 || len(v.Months) != 4 {
+		t.Errorf("verify = %d months, %d unexplained, %v, want four months that agree with the file", len(v.Months), v.Unexplained, err)
+	}
+}
+
 func TestApplyMakesTheReferenceDataOnce(t *testing.T) {
 	w := newWorld(t, fixture(), fixtureMapping()).reviewed()
 	first := w.apply()
