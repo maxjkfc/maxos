@@ -3,7 +3,6 @@ package file_test
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,14 +20,14 @@ func parseRates(t *testing.T, text string) model.Rates {
 	return r
 }
 
-// ratesFail parses a rates file that must be refused, and returns what it says.
-func ratesFail(t *testing.T, text string) string {
+// ratesFail parses a rates file that must be refused, and returns the failure it is.
+func ratesFail(t *testing.T, text string) *model.Failure {
 	t.Helper()
 	_, err := file.ParseRates(strings.NewReader(text))
 	if err == nil {
 		t.Fatalf("ParseRates read text that is wrong:\n%s", text)
 	}
-	return err.Error()
+	return failureOf(t, err)
 }
 
 // wantRate checks the rate a lookup finds: the one with the given per unit, or none.
@@ -108,50 +107,51 @@ func TestParseRatesBOM(t *testing.T) {
 func TestParseRatesNoRates(t *testing.T) {
 	// A header alone is no rates.
 	wantRate(t, parseRates(t, "date,instrument,twd_per_unit\n"), "USD", "2026-04-01", "")
-	mustSay(t, ratesFail(t, ""), "empty")
-	mustSay(t, ratesFail(t, "# only a comment\n"), "empty")
+	wantFailure(t, ratesFail(t, ""), model.FailureFileEmpty, 0)
+	wantFailure(t, ratesFail(t, "# only a comment\n"), model.FailureFileEmpty, 0)
 }
 
 func TestParseRatesRefusesTwoRatesForADay(t *testing.T) {
-	message := ratesFail(t, `date,instrument,twd_per_unit
+	f := ratesFail(t, `date,instrument,twd_per_unit
 2026-04-01,USD,31.50
 2026-04-01,JPY,0.21
 2026-04-02,USD,31.60
 2026-04-01,usd,31.55
 `)
-	mustSay(t, message, "line 5", "USD", "2026-04-01", "line 2")
+	wantFailure(t, f, model.FailureRateTwice, 5, "USD", "2026-04-01", "2")
 }
 
 func TestParseRatesRefusesBadRows(t *testing.T) {
 	tests := []struct {
-		name    string
-		row     string
-		wantErr []string
+		name     string
+		row      string
+		wantCode model.FailureCode
+		wantArgs []string
 	}{
-		{"zero", "2026-04-01,USD,0", []string{"line 2", "twd_per_unit", `"0"`}},
-		{"negative", "2026-04-01,USD,-31.5", []string{"line 2", "twd_per_unit", "-31.5"}},
-		{"text", "2026-04-01,USD,abc", []string{"line 2", "twd_per_unit", "abc"}},
-		{"nothing", "2026-04-01,USD,", []string{"line 2", "twd_per_unit"}},
-		{"another form of day", "2026/04/01,USD,31.5", []string{"line 2", "date", "2026/04/01"}},
-		{"no day", ",USD,31.5", []string{"line 2", "date"}},
-		{"no instrument", "2026-04-01, ,31.5", []string{"line 2", "instrument"}},
-		{"short", "2026-04-01,USD", []string{"line 2", "2 fields"}},
+		{"zero", "2026-04-01,USD,0", model.FailureRateNotPositive, []string{"twd_per_unit", "0"}},
+		{"negative", "2026-04-01,USD,-31.5", model.FailureRateNotPositive, []string{"twd_per_unit", "-31.5"}},
+		{"text", "2026-04-01,USD,abc", model.FailureNotNumber, []string{"twd_per_unit", "abc"}},
+		{"nothing", "2026-04-01,USD,", model.FailureValueEmpty, []string{"twd_per_unit"}},
+		{"another form of day", "2026/04/01,USD,31.5", model.FailureNotDay, []string{"date", "2026/04/01", "2026-03-10"}},
+		{"no day", ",USD,31.5", model.FailureValueEmpty, []string{"date"}},
+		{"no instrument", "2026-04-01, ,31.5", model.FailureValueEmpty, []string{"instrument"}},
+		{"short", "2026-04-01,USD", model.FailureFieldCount, []string{"2", "3"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mustSay(t, ratesFail(t, "date,instrument,twd_per_unit\n"+tt.row+"\n"), tt.wantErr...)
+			wantFailure(t, ratesFail(t, "date,instrument,twd_per_unit\n"+tt.row+"\n"), tt.wantCode, 2, tt.wantArgs...)
 		})
 	}
 	t.Run("the line is the line of the file", func(t *testing.T) {
 		text := "# comment\ndate,instrument,twd_per_unit\n\n2026-04-01,USD,31.5\n# another\n2026-04-02,USD,0\n"
-		mustSay(t, ratesFail(t, text), "line 6")
+		wantFailure(t, ratesFail(t, text), model.FailureRateNotPositive, 6, "twd_per_unit", "0")
 	})
 }
 
 func TestParseRatesRefusesAHeaderThatIsWrong(t *testing.T) {
-	mustSay(t, ratesFail(t, "date,instrument\n2026-04-01,USD\n"), "line 1", "twd_per_unit")
-	mustSay(t, ratesFail(t, "# comment\ninstrument,rate\nUSD,31.5\n"), "line 2", "date", "twd_per_unit")
-	mustSay(t, ratesFail(t, "date,date,instrument,twd_per_unit\n"), "date", "twice")
+	wantFailure(t, ratesFail(t, "date,instrument\n2026-04-01,USD\n"), model.FailureColumnsMissing, 1, "twd_per_unit")
+	wantFailure(t, ratesFail(t, "# comment\ninstrument,rate\nUSD,31.5\n"), model.FailureColumnsMissing, 2, "date", "twd_per_unit")
+	wantFailure(t, ratesFail(t, "date,date,instrument,twd_per_unit\n"), model.FailureColumnTwice, 1, "date")
 }
 
 func TestRatesCSVLoad(t *testing.T) {
@@ -180,12 +180,21 @@ func TestRatesCSVLoad(t *testing.T) {
 		if err == nil || exists {
 			t.Fatalf("Load = %v, %v, want an error", exists, err)
 		}
-		mustSay(t, err.Error(), path, "line 2")
+		f := failureOf(t, err)
+		wantFailure(t, f, model.FailureRateNotPositive, 2, "twd_per_unit", "0")
+		wantFile(t, f, path)
 	})
-	t.Run("what cannot be read", func(t *testing.T) {
+	t.Run("what cannot be read gives the reason of the system", func(t *testing.T) {
 		// A folder is there, and it is not a file of rates.
-		if _, _, err := store.Load(ctx, dir); err == nil || errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("Load of a folder = %v, want an error that is not about a file that is missing", err)
+		_, _, err := store.Load(ctx, dir)
+		if err == nil {
+			t.Fatal("Load of a folder gave no error")
+		}
+		f := failureOf(t, err)
+		wantFailure(t, f, model.FailureFileUnreadable, 0)
+		wantFile(t, f, dir)
+		if f.Err == nil {
+			t.Error("the failure has no Err: the user is told the reason of the system as it is")
 		}
 	})
 	t.Run("a context that is done", func(t *testing.T) {

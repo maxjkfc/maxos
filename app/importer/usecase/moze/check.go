@@ -2,7 +2,6 @@ package moze
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/shopspring/decimal"
 
@@ -18,11 +17,11 @@ import (
 func (a *Importer) check(ctx context.Context, plan model.Plan, st *state, month string) (model.MonthCheck, error) {
 	end, err := model.MonthEnd(month)
 	if err != nil {
-		return model.MonthCheck{}, fmt.Errorf("month %q: %w", month, err)
+		return model.MonthCheck{}, err
 	}
 	balances, err := a.ledger.GetBalances.GetBalances(ctx, finance.GetBalancesInput{AsOf: &end})
 	if err != nil {
-		return model.MonthCheck{}, fmt.Errorf("get the balances at %s: %w", end.Format("2006-01-02"), err)
+		return model.MonthCheck{}, model.LedgerFailure(model.VerbGet, model.ThingBalance, end.Format("2006-01-02"), err)
 	}
 
 	mine := map[string]bool{}

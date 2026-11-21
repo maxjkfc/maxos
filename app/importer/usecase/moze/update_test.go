@@ -110,8 +110,8 @@ func TestAnOverrideAfterApplyReachesTheLedger(t *testing.T) {
 	if err != nil || v.Unexplained != 0 || len(v.Stale) != 0 {
 		t.Errorf("verify = %+v, %v", v, err)
 	}
-	if st, _ := w.imp.Status(context.Background(), usecase.StatusInput{Files: w.files}); st.Orphans != 0 {
-		t.Errorf("orphans = %d: the draft that was replaced is not one", st.Orphans)
+	if st, _ := w.imp.Status(context.Background(), usecase.StatusInput{Files: w.files}); len(st.Orphans) != 0 {
+		t.Errorf("orphans = %+v: the draft that was replaced is not one", st.Orphans)
 	}
 }
 

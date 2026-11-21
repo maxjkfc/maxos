@@ -146,7 +146,7 @@ func TestSplitCategory(t *testing.T) {
 	}
 }
 
-func TestUnitKeyIsMadeOfTheRowsAndTheVersion(t *testing.T) {
+func TestUnitKeyIsMadeOfTheRowsTheVersionAndTheAttempt(t *testing.T) {
 	u := model.Unit{Kind: model.KindExpenseReward, ID: "abc-1", Version: "0123456789ab"}
 	if got, want := u.Key(), "moze:abc-1@0123456789ab"; got != want {
 		t.Errorf("Key = %q, want %q", got, want)
@@ -154,18 +154,32 @@ func TestUnitKeyIsMadeOfTheRowsAndTheVersion(t *testing.T) {
 	if got := u.Keys(); len(got) != 2 || got[1] != "moze:abc-1@0123456789ab#reward" {
 		t.Errorf("Keys = %v, want the key and the key of the reward", got)
 	}
+	if got, want := u.KeyAt(1), u.Key(); got != want {
+		t.Errorf("KeyAt(1) = %q, want the key of the first attempt, %q", got, want)
+	}
+	if got, want := u.KeyAt(3), "moze:abc-1@0123456789ab~3"; got != want {
+		t.Errorf("KeyAt(3) = %q, want %q", got, want)
+	}
+	if got := u.KeysAt(2); len(got) != 2 || got[0] != "moze:abc-1@0123456789ab~2" || got[1] != "moze:abc-1@0123456789ab~2#reward" {
+		t.Errorf("KeysAt(2) = %v, want the key of the attempt and the key of its reward", got)
+	}
 
 	for _, tt := range []struct {
 		key  string
 		want model.ParsedKey
 		ok   bool
 	}{
-		{"moze:abc-1@0123456789ab", model.ParsedKey{ID: "abc-1", Version: "0123456789ab"}, true},
-		{"moze:abc-1@0123456789ab#reward", model.ParsedKey{ID: "abc-1", Version: "0123456789ab", Reward: true}, true},
-		{"moze:abc-1+def-2@ffffffffffff", model.ParsedKey{ID: "abc-1+def-2", Version: "ffffffffffff"}, true},
-		{"moze:plan-abc-1@ffffffffffff", model.ParsedKey{ID: "plan-abc-1", Version: "ffffffffffff"}, true},
-		{"moze:abc-1", model.ParsedKey{ID: "abc-1"}, true},
-		{"moze:abc-1#reward", model.ParsedKey{ID: "abc-1", Reward: true}, true},
+		{"moze:abc-1@0123456789ab", model.ParsedKey{ID: "abc-1", Version: "0123456789ab", Attempt: 1}, true},
+		{"moze:abc-1@0123456789ab#reward", model.ParsedKey{ID: "abc-1", Version: "0123456789ab", Attempt: 1, Reward: true}, true},
+		{"moze:abc-1@0123456789ab~2", model.ParsedKey{ID: "abc-1", Version: "0123456789ab", Attempt: 2}, true},
+		{"moze:abc-1@0123456789ab~12#reward", model.ParsedKey{ID: "abc-1", Version: "0123456789ab", Attempt: 12, Reward: true}, true},
+		// A mark that is not followed by a number of an attempt after the first is not one.
+		{"moze:abc-1@0123456789ab~x", model.ParsedKey{ID: "abc-1", Version: "0123456789ab~x", Attempt: 1}, true},
+		{"moze:abc-1@0123456789ab~1", model.ParsedKey{ID: "abc-1", Version: "0123456789ab~1", Attempt: 1}, true},
+		{"moze:abc-1+def-2@ffffffffffff", model.ParsedKey{ID: "abc-1+def-2", Version: "ffffffffffff", Attempt: 1}, true},
+		{"moze:plan-abc-1@ffffffffffff", model.ParsedKey{ID: "plan-abc-1", Version: "ffffffffffff", Attempt: 1}, true},
+		{"moze:abc-1", model.ParsedKey{ID: "abc-1", Attempt: 1}, true},
+		{"moze:abc-1#reward", model.ParsedKey{ID: "abc-1", Attempt: 1, Reward: true}, true},
 		{"instalment:abc", model.ParsedKey{}, false},
 		{"moze:", model.ParsedKey{}, false},
 		{"", model.ParsedKey{}, false},
@@ -175,61 +189,20 @@ func TestUnitKeyIsMadeOfTheRowsAndTheVersion(t *testing.T) {
 			t.Errorf("ParseKey(%q) = %+v, %v, want %+v, %v", tt.key, got, ok, tt.want, tt.ok)
 		}
 	}
-}
 
-func TestFingerprintChangesWithWhatIsRecordedAndNotWithTheOrderOfTags(t *testing.T) {
-	base := func() model.Unit {
-		cents := d("5")
-		return model.Unit{
-			Kind: model.KindExpense, ID: "abc-1", Date: day("2026-03-10"), Clock: "12:00",
-			Description: "Noodles", Merchant: "Stall", Area: "Life", Project: "Trip", Tags: []string{"a", "b"},
-			Main:  model.Leg{Account: "Cash", Instrument: "TWD", Amount: d("100")},
-			Lines: []model.Line{{Category: "Food/Lunch", Amount: d("100"), Discount: &cents, Memo: "m"}},
-			Fees:  []model.Fee{{Account: "Cash", Instrument: "TWD", Category: "Fees", Amount: d("1")}},
+	// What a unit writes, ParseKey reads back.
+	for attempt := 1; attempt <= 3; attempt++ {
+		for i, key := range u.KeysAt(attempt) {
+			got, ok := model.ParseKey(key)
+			if !ok || got.ID != u.ID || got.Version != u.Version || got.Attempt != attempt || got.Reward != (i == 1) {
+				t.Errorf("ParseKey(%q) = %+v, %v, want the unit's ID and version, attempt %d, and the reward for the second", key, got, ok, attempt)
+			}
 		}
 	}
-	want := base().Fingerprint()
-	if len(want) != 12 {
-		t.Fatalf("Fingerprint = %q, want 12 hex characters", want)
-	}
-	if got := base().Fingerprint(); got != want {
-		t.Errorf("the same unit has the fingerprints %q and %q", want, got)
-	}
-	reordered := base()
-	reordered.Tags = []string{"b", "a"}
-	if got := reordered.Fingerprint(); got != want {
-		t.Errorf("the order of the tags changes the fingerprint")
-	}
-	sameNumber := base()
-	sameNumber.Main.Amount = d("100.00")
-	if got := sameNumber.Fingerprint(); got != want {
-		t.Errorf("the form of an amount changes the fingerprint")
-	}
 
-	for name, change := range map[string]func(u *model.Unit){
-		"kind":        func(u *model.Unit) { u.Kind = model.KindIncome },
-		"day":         func(u *model.Unit) { u.Date = day("2026-03-11") },
-		"time":        func(u *model.Unit) { u.Clock = "12:01" },
-		"description": func(u *model.Unit) { u.Description = "Rice" },
-		"merchant":    func(u *model.Unit) { u.Merchant = "Shop" },
-		"area":        func(u *model.Unit) { u.Area = "Work" },
-		"project":     func(u *model.Unit) { u.Project = "" },
-		"tags":        func(u *model.Unit) { u.Tags = []string{"a"} },
-		"account":     func(u *model.Unit) { u.Main.Account = "Bank" },
-		"amount":      func(u *model.Unit) { u.Main.Amount = d("101") },
-		"category":    func(u *model.Unit) { u.Lines[0].Category = "Food/Dinner" },
-		"memo":        func(u *model.Unit) { u.Lines[0].Memo = "n" },
-		"discount":    func(u *model.Unit) { u.Lines[0].Discount = nil },
-		"fee":         func(u *model.Unit) { u.Fees[0].Amount = d("2") },
-		"party":       func(u *model.Unit) { u.Party = "Amy" },
-		"other leg":   func(u *model.Unit) { u.Other = &model.Leg{Account: "Bank", Instrument: "TWD", Amount: d("1")} },
-		"period":      func(u *model.Unit) { u.Periods = []model.Period{{DueOn: day("2026-04-01"), Principal: d("1")}} },
-	} {
-		u := base()
-		change(&u)
-		if got := u.Fingerprint(); got == want {
-			t.Errorf("a change of the %s does not change the fingerprint", name)
-		}
+	plan := model.ParsedKey{ID: model.PlanIDPrefix + "abc-1"}
+	if got := plan.Rows(); !plan.IsPlan() || len(got) != 1 || got[0] != "abc-1" {
+		t.Errorf("a plan is %v, with the rows %v, want it to be one, of its first row", plan.IsPlan(), got)
 	}
 }
 

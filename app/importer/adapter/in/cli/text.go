@@ -288,6 +288,11 @@ func warningText(w model.Warning) string {
 		text = "這一列是分期計畫的一部分，不接受單獨指定處理方式，這個項目沒有作用"
 	case model.WarningRowUnknown:
 		text = "檔案裡沒有 key 是這個的列"
+	case model.WarningActivePeriodIgnored:
+		text = "`active_period` 已不再使用，已忽略（專案不設定進行期間）"
+		if len(w.Args) > 0 {
+			text += "；檔案第 " + w.Args[0] + " 行"
+		}
 	default:
 		text = string(w.Code)
 	}

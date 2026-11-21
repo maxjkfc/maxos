@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"maps"
@@ -31,11 +30,11 @@ const (
 	pathIncome  = model.SectionIncome
 )
 
-// newFileHeader is what a mapping file begins with when the import creates it. It
-// must not say "# guessed" anywhere: that is what Load counts.
-const newFileHeader = `# maxos import moze 的對應表：MOZE 匯出檔裡的帳戶、類別、專案、對象與標籤，在帳本裡各是什麼。
+// newFileHeader is what a mapping file begins with when the import creates it. It is
+// comments of lines of their own, which are not the mark of an entry that Load counts.
+const newFileHeader = `# maxos import moze 的對照檔：MOZE 匯出檔裡的帳戶、類別、專案、對象與標籤，在帳本裡各是什麼。
 #
-# 行尾註解為 guessed 的項目是程式猜的：請逐項確認，要改就直接改，確認後把行尾的註解刪掉。
+# 行尾標了 # guessed 的項目是程式猜的：請逐項確認，要改就直接改，確認後把行尾的標記刪掉。
 # 程式只會補上檔案裡還沒有的項目；你寫的內容、註解和順序都不會被動到。
 #
 # 個別幾列有例外時，把那一列的 key 寫在 rows: 底下覆寫它，例如：
@@ -62,18 +61,23 @@ const newFileHeader = `# maxos import moze 的對應表：MOZE 匯出檔裡的�
 //
 // Before anything is written the new text is read back, and what it says of every
 // entry has to be what the file said, and, of the entries put in, what was asked,
-// value for value. When it is not, Append returns an error that names the first entry
-// that would read differently and writes nothing. That is how a layout it cannot put
-// lines into is found out: a block scalar that has a line like a comment in it, which
-// a new entry would cut short.
+// value for value. When it is not, Append fails with FailureWouldReadDifferently,
+// which names the first entry that would read differently, and writes nothing. That is
+// how a layout it cannot put lines into is found out: a block scalar that has a line
+// like a comment in it, which a new entry would cut short.
 //
 // A section that is written between braces with entries in it, {a: b}, cannot be
-// added to: that is an error, and the file is left as it is. {} with nothing in it
-// is made the key of a section of lines.
+// added to: that is FailureBraces, and the file is left as it is. {} with nothing in
+// it is made the key of a section of lines.
+//
+// What goes wrong is a *model.Failure that names the file: what the file says, as Load
+// finds it; an entry that cannot be written as a line; a layout that lines cannot be
+// added to; a file that cannot be read or written, with the reason of the system.
 func (*MappingYAML) Append(ctx context.Context, path string, guessed model.Mapping) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	given := path // the file the user knows, which is the one a failure names
 	if target, err := filepath.EvalSymlinks(path); err == nil {
 		path = target // a link to the file stays a link, and the file it points to is written
 	}
@@ -84,22 +88,25 @@ func (*MappingYAML) Append(ctx context.Context, path string, guessed model.Mappi
 	case created:
 		data, perm = []byte(newFileHeader), 0o600
 	case err != nil:
-		return err
+		return unreadable(given, err)
 	}
 
 	updated, changed, err := extend(data, guessed)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return inFile(given, err)
 	}
 	if !changed {
 		return nil
 	}
 	if created {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return err
+			return notWritten(given, err)
 		}
 	}
-	return writeFileAtomic(path, updated, perm)
+	if err := writeFileAtomic(path, updated, perm); err != nil {
+		return notWritten(given, err)
+	}
+	return nil
 }
 
 // readFile reads a file and returns its permission bits.
@@ -151,11 +158,10 @@ func writeFileAtomic(path string, data []byte, perm fs.FileMode) (err error) {
 // entry is an entry to write.
 type entry struct {
 	key string
-	// text is the entry as one line of YAML, "key: value", with no indentation.
+	// text is the entry as one line of YAML, "key: value", with no indentation. It is
+	// empty when the entry cannot be written as one line, which is a failure only when
+	// it has to be: an entry that the file has already is not written.
 	text string
-	// err is why the entry cannot be written, which is an error only when it has to
-	// be: an entry that the file has already is not written.
-	err error
 }
 
 // additions are the entries to add, by the path of their section: "accounts", or
@@ -179,15 +185,15 @@ func renderAdditions(g model.Mapping) additions {
 }
 
 // pick returns the entries of the section at path whose keys are not in have: what
-// is to be added, or the error of the first of them that cannot be written.
+// is to be added, or the failure for the first of them that cannot be written.
 func (a additions) pick(path string, have map[string]bool) ([]entry, error) {
 	var out []entry
 	for _, e := range a[path] {
 		if have[e.key] {
 			continue
 		}
-		if e.err != nil {
-			return nil, fmt.Errorf("%s %q: %w", path, e.key, e.err)
+		if e.text == "" {
+			return nil, failAt(model.FailureEntryNotWritable, 0, path, e.key)
 		}
 		out = append(out, e)
 	}
@@ -195,18 +201,17 @@ func (a additions) pick(path string, have map[string]bool) ([]entry, error) {
 }
 
 // renderAll writes the entries of a section in the order of their keys.
-func renderAll[V any](entries map[string]V, render func(key string, v V) (string, error)) []entry {
+func renderAll[V any](entries map[string]V, render func(key string, v V) string) []entry {
 	out := make([]entry, 0, len(entries))
 	for _, key := range slices.Sorted(maps.Keys(entries)) {
-		text, err := render(key, entries[key])
-		out = append(out, entry{key: key, text: text, err: err})
+		out = append(out, entry{key: key, text: render(key, entries[key])})
 	}
 	return out
 }
 
 // renderInstrument writes an instrument. Its kind, is_currency and decimals are
 // always written, the rest when it has them.
-func renderInstrument(code string, in model.InstrumentMap) (string, error) {
+func renderInstrument(code string, in model.InstrumentMap) string {
 	m := newFlow()
 	putText(m, keyName, in.Name)
 	put(m, keyKind, textNode(in.Kind))
@@ -218,7 +223,7 @@ func renderInstrument(code string, in model.InstrumentMap) (string, error) {
 
 // renderAccount writes an account, with what it has of the keys; an opening date is
 // written as a date, which is not quoted.
-func renderAccount(name string, a model.AccountMap) (string, error) {
+func renderAccount(name string, a model.AccountMap) string {
 	m := newFlow()
 	putText(m, keyName, a.Name)
 	putText(m, keyKind, a.Kind)
@@ -230,7 +235,7 @@ func renderAccount(name string, a model.AccountMap) (string, error) {
 }
 
 // renderProject writes a project, with what it has of the keys.
-func renderProject(value string, p model.ProjectMap) (string, error) {
+func renderProject(value string, p model.ProjectMap) string {
 	m := newFlow()
 	putText(m, keyKind, p.Kind)
 	putText(m, keyName, p.Name)
@@ -241,7 +246,7 @@ func renderProject(value string, p model.ProjectMap) (string, error) {
 
 // renderCategory writes a category entry: the path of the ledger category alone when
 // that is all it is, or the keys it has.
-func renderCategory(key string, c model.CategoryMap) (string, error) {
+func renderCategory(key string, c model.CategoryMap) string {
 	if c.Treatment == "" && c.Party == "" && c.Tag == "" {
 		return entryLine(key, textNode(c.Category))
 	}
@@ -254,13 +259,13 @@ func renderCategory(key string, c model.CategoryMap) (string, error) {
 }
 
 // renderName writes a party or a tag: the name MOZE has, and the one of the ledger.
-func renderName(key, name string) (string, error) {
+func renderName(key, name string) string {
 	return entryLine(key, textNode(name))
 }
 
 // renderRow writes the override of a row, with what it has of the keys. The quantity
 // is text, which is what keeps it from being read as a float.
-func renderRow(key string, o model.RowOverride) (string, error) {
+func renderRow(key string, o model.RowOverride) string {
 	m := newFlow()
 	putText(m, keyTreatment, o.Treatment)
 	putText(m, keyCategory, o.Category)
@@ -288,8 +293,7 @@ func renderDefaults(d model.Defaults) []entry {
 		if f.value == "" {
 			continue
 		}
-		text, err := entryLine(f.key, textNode(f.value))
-		out = append(out, entry{key: f.key, text: text, err: err})
+		out = append(out, entry{key: f.key, text: entryLine(f.key, textNode(f.value))})
 	}
 	return out
 }
@@ -298,21 +302,22 @@ func renderDefaults(d model.Defaults) []entry {
 // has to be quoted: a key such as 2025, true, "a: b" or "#x" stays the text it
 // is, and so does a value inside a flow mapping, which has more to be quoted for
 // than a key has. What cannot be written on one line, a key of more than 128
-// characters or with a line break in it, is an error.
-func entryLine(key string, value *yaml.Node) (string, error) {
+// characters or with a line break in it, and what the encoder does not take, text that
+// is not UTF-8, is the empty text.
+func entryLine(key string, value *yaml.Node) string {
 	out, err := yaml.Marshal(&yaml.Node{
 		Kind:    yaml.MappingNode,
 		Tag:     "!!map",
 		Content: []*yaml.Node{textNode(key), value},
 	})
 	if err != nil {
-		return "", err
+		return ""
 	}
 	line := strings.TrimSuffix(string(out), "\n")
 	if strings.Contains(line, "\n") {
-		return "", errors.New("it cannot be written on one line")
+		return ""
 	}
-	return line, nil
+	return line
 }
 
 // newFlow returns a mapping node that is written between braces, on one line.
@@ -382,22 +387,21 @@ func extend(data []byte, guessed model.Mapping) (updated []byte, changed bool, e
 		return data, false, nil
 	}
 	if ed.flowRoot {
-		return nil, false, errors.New("the file is written between braces, {...}; write its sections as lines so that entries can be added")
+		return nil, false, failAt(model.FailureBraces, doc.root.Line, "")
 	}
 	updated = ed.text()
 
 	// What is written has to read back as the file with the entries put in, whatever
 	// the layout of the file, and value for value: a layout that the editing does not
-	// understand is an error here, with the file as it was, and not a file whose
+	// understand is a failure here, with the file as it was, and not a file whose
 	// entries have lost what they said.
-	const cannot = "the entries cannot be added to the file as it is laid out; nothing is written"
 	back, err := parseDocument(updated)
 	if err != nil {
-		return nil, false, fmt.Errorf("%s (%w)", cannot, err)
+		return nil, false, failAt(model.FailureWouldReadDifferently, 0)
 	}
 	want := doc.content.Merge(addedOf(guessed, ed.added))
 	if ref, differs := firstDifference(back.content, want); differs {
-		return nil, false, fmt.Errorf("%s (%s would read differently)", cannot, ref)
+		return nil, false, failAt(model.FailureWouldReadDifferently, 0, ref.Section, ref.Key)
 	}
 	return updated, true, nil
 }
@@ -542,7 +546,7 @@ func newEditor(data []byte, root *yaml.Node) (*editor, error) {
 		return ed, nil
 	}
 	ed.flowRoot = root.Style&yaml.FlowStyle != 0
-	sections, err := entriesOf(root, "the file")
+	sections, err := entriesOf(root, "")
 	if err != nil {
 		return nil, err
 	}
@@ -579,7 +583,7 @@ func (ed *editor) section(name string, adds additions) error {
 		return err
 	}
 	if has {
-		after, indent, err := ed.room(s, ed.topStarts)
+		after, indent, err := ed.room(s, name, ed.topStarts)
 		if err != nil {
 			return err
 		}
@@ -626,7 +630,7 @@ func (ed *editor) categories(adds additions) error {
 		switch {
 		case len(entries) == 0:
 		case exists:
-			after, indent, err := ed.room(child, ed.allStarts)
+			after, indent, err := ed.room(child, path, ed.allStarts)
 			if err != nil {
 				return err
 			}
@@ -651,7 +655,7 @@ func (ed *editor) categories(adds additions) error {
 		return lines
 	}
 	if has {
-		after, indent, err := ed.room(cats, ed.topStarts)
+		after, indent, err := ed.room(cats, secCategories, ed.topStarts)
 		if err != nil {
 			return err
 		}
@@ -678,19 +682,19 @@ func (ed *editor) categories(adds additions) error {
 // room finds where the lines of a section that the file has are added: the index of
 // the line they come after, and how far in they are written. It makes a section
 // that has no entries, and has {} or ~ written beside its key, into the key alone,
-// to be followed by its lines. starts are where the sections that can follow it
-// begin.
-func (ed *editor) room(s field, starts []int) (after, indent int, err error) {
+// to be followed by its lines. where is the name of the section, as a failure says
+// it; starts are where the sections that can follow it begin.
+func (ed *editor) room(s field, where string, starts []int) (after, indent int, err error) {
 	switch shapeOf(s.val) {
 	case shapeEmpty:
-		if err := ed.clearValue(s); err != nil {
+		if err := ed.clearValue(s, where); err != nil {
 			return 0, 0, err
 		}
 		return s.at.Line - 1, s.at.Column - 1 + indentStep, nil
 	case shapeBlock:
 		return ed.contentEnd(s, starts), s.val.Content[0].Column - 1, nil
 	}
-	return 0, 0, fmt.Errorf("line %d: %s is written between braces, {...}; write its entries as lines so that entries can be added", s.at.Line, s.key)
+	return 0, 0, failAt(model.FailureBraces, s.at.Line, where)
 }
 
 // contentEnd is the index of the last line of a section that has something on it:
@@ -727,8 +731,9 @@ func lastLine(n *yaml.Node) int {
 
 // clearValue rewrites the line of a section that has an empty value beside its key,
 // "accounts: {}" or "accounts: ~", as the key alone, "accounts:". A comment at the
-// end of the line stays.
-func (ed *editor) clearValue(s field) error {
+// end of the line stays. A section whose empty value is written on a line of its own,
+// or whose braces have anything in them, is a layout that cannot be added to.
+func (ed *editor) clearValue(s field, where string) error {
 	if s.val.Kind == yaml.ScalarNode && s.val.Value == "" {
 		return nil // nothing is written beside the key
 	}
@@ -736,7 +741,7 @@ func (ed *editor) clearValue(s field) error {
 	line := ed.lines[i]
 	start := s.val.Column - 1
 	if s.val.Line != s.at.Line || start < 0 || start > len(line) {
-		return layoutError(s)
+		return failAt(model.FailureLayout, s.at.Line, where)
 	}
 	rest := line[start:]
 	var width int
@@ -746,11 +751,11 @@ func (ed *editor) clearValue(s field) error {
 	case s.val.Kind == yaml.MappingNode && strings.HasPrefix(rest, "{"):
 		end := strings.IndexByte(rest, '}')
 		if end < 0 || strings.TrimSpace(rest[1:end]) != "" {
-			return layoutError(s)
+			return failAt(model.FailureLayout, s.at.Line, where)
 		}
 		width = end + 1
 	default:
-		return layoutError(s)
+		return failAt(model.FailureLayout, s.at.Line, where)
 	}
 	head := strings.TrimRight(line[:start], " ")
 	tail := line[start+width:]
@@ -759,10 +764,6 @@ func (ed *editor) clearValue(s field) error {
 	}
 	ed.changed[i] = head + tail
 	return nil
-}
-
-func layoutError(s field) error {
-	return fmt.Errorf("line %d: cannot add entries to %s as it is written; write its entries as lines below its key", s.at.Line, s.key)
 }
 
 // addAfter adds lines after the line of the index, after those that are there.

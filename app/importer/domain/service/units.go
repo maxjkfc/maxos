@@ -53,9 +53,11 @@ func (b *builder) context(r model.Row) rowContext {
 	return c
 }
 
-// The words of the descriptions that the import writes itself, and the labels of the
-// lines that keep what a unit has no place for: the merchant or the 專案 of a row,
-// where another row's was taken.
+// The words that the import writes into its descriptions around the words of the
+// rows: the descriptions of an opening balance and of an adjustment, and the labels
+// of the lines that say a note. They are no part of the version of a unit; to change
+// one is to change what the import writes for the same inputs, which is for
+// model.FormatVersion to say.
 const (
 	openingDescription    = "期初金額"
 	adjustmentDescription = "對帳（MOZE 的餘額調整）"
@@ -63,19 +65,41 @@ const (
 	projectLabel          = "專案："
 )
 
+// noteLine is the line of a description that says a note: the label of its kind, and
+// what it says.
+func noteLine(n model.Note) string {
+	switch n.Kind {
+	case model.NoteMerchant:
+		return merchantLabel + n.Value
+	case model.NoteProject:
+		return projectLabel + n.Value
+	}
+	return n.Value
+}
+
+// noteLines are the lines of a description that say the notes, in their order.
+func noteLines(notes []model.Note) []string {
+	lines := make([]string, len(notes))
+	for i, n := range notes {
+		lines[i] = noteLine(n)
+	}
+	return lines
+}
+
 // joined is what the rows that make one unit say of themselves, where the unit has
 // only one place for each thing: the first merchant, area and project that any of them
 // has, in the order of the rows, and the tags of all of them. What another row says
-// differently has no place, and is kept as a line of the description.
+// differently has no place, and is a note of the unit.
 type joined struct {
 	rowContext
 	merchant string
-	notes    []string
+	notes    []model.Note
 }
 
-func (j *joined) note(line string) {
-	if !slices.Contains(j.notes, line) {
-		j.notes = append(j.notes, line)
+// note adds a note to the notes, unless they have it already.
+func (j *joined) note(n model.Note) {
+	if !slices.Contains(j.notes, n) {
+		j.notes = append(j.notes, n)
 	}
 }
 
@@ -102,37 +126,35 @@ func (b *builder) join(rows ...model.Row) joined {
 			j.addTag(t)
 		}
 		if take(&j.merchant, r.Merchant) {
-			j.note(merchantLabel + r.Merchant)
+			j.note(model.Note{Kind: model.NoteMerchant, Value: r.Merchant})
 		}
 		// The area and the project both come of the 專案 of the row, which is what the
-		// line says when either is another's.
+		// note says when either is another's.
 		areaClash, projectClash := take(&j.area, ctx.area), take(&j.project, ctx.project)
 		if areaClash || projectClash {
-			j.note(projectLabel + r.Project)
+			j.note(model.Note{Kind: model.NoteProject, Value: r.Project})
 		}
 	}
 	return j
 }
 
-// addLine adds a line to a text of lines, unless it has it already.
-func addLine(text, line string) string {
-	if slices.Contains(strings.Split(text, "\n"), line) {
-		return text
-	}
-	return joinNonEmpty("\n", text, line)
-}
-
-// keepProjectsOfParties says, in the description of a unit, the 專案 of its rows that
-// is paid for a party, where the unit is not a dealing with that party: it has no place
-// for it, as the party is all the mapping makes of it.
+// keepProjectsOfParties gives a unit the note of the 專案 of each of its rows that is
+// paid for a party, where the unit is not a dealing with that party: it has no place
+// for it, as the party is all the mapping makes of it. The description says it as it
+// says the other notes.
 func (b *builder) keepProjectsOfParties() {
 	rows := b.plan.RowIndex()
 	for i := range b.plan.Units {
 		u := &b.plan.Units[i]
 		for _, k := range u.Rows {
 			r := rows[k]
-			if p := b.m.Projects[r.Project]; r.Project != "" && p.Kind == model.ProjectDealings && p.Party != u.Party {
-				u.Description = addLine(u.Description, projectLabel+r.Project)
+			p := b.m.Projects[r.Project]
+			if r.Project == "" || p.Kind != model.ProjectDealings || p.Party == u.Party {
+				continue
+			}
+			if n := (model.Note{Kind: model.NoteProject, Value: r.Project}); !slices.Contains(u.Notes, n) {
+				u.Notes = append(u.Notes, n)
+				u.Description = joinNonEmpty("\n", u.Description, noteLine(n))
 			}
 		}
 	}

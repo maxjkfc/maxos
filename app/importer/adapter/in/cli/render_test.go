@@ -199,6 +199,9 @@ func TestEverythingThePlanReportSaysIsInChinese(t *testing.T) {
 
 func TestWhatTheCommandsPrintIsInChinese(t *testing.T) {
 	unit := model.Unit{Kind: model.KindExpense, Date: day("2026-03-05"), Description: "Noodles"}
+	counting := usecase.Orphan{Key: "moze:k9-1@0123456789ab", Status: "confirmed", Kind: "expense", Date: day("2026-03-02"), Account: "Cash", Instrument: "TWD", Amount: dec("-300"), Description: "Noodles"}
+	waiting := usecase.Orphan{Key: "moze:k8-1@0123456789ab", Status: "draft", Kind: "reconciliation", Date: day("2026-03-03"), Account: "Bank", Instrument: "USD", Amount: dec("2.5")}
+	warnings := []model.Warning{{Code: model.WarningActivePeriodIgnored, Subject: "projects.Trip", Args: []string{"12"}}}
 	plan := everything()
 	plan.Guessed = model.Mapping{Accounts: map[string]model.AccountMap{"Cash": {Name: "Cash"}}, Defaults: model.Defaults{RefundCategory: "Refunds"}}
 
@@ -207,6 +210,7 @@ func TestWhatTheCommandsPrintIsInChinese(t *testing.T) {
 		&usecase.BlockedError{Plan: plan, Guessed: 3},
 		&usecase.MonthOrderError{Open: "2026-01", Month: "2026-03", Drafts: 2},
 		&usecase.StaleError{Month: "2026-03", Units: []usecase.StaleUnit{{Unit: unit, Lines: []int{4}}}},
+		&usecase.OrphanError{Month: "2026-03", Orphans: []usecase.Orphan{counting}},
 	} {
 		got := cli.Refusal(&b, err)
 		if got == nil || asciiSentence.MatchString(got.Error()) {
@@ -229,24 +233,32 @@ func TestWhatTheCommandsPrintIsInChinese(t *testing.T) {
 	for name, render := range map[string]func() error{
 		"apply": func() error {
 			return cli.RenderApply(&b, usecase.ApplyOutput{
-				Created: map[string]int{usecase.CreatedAccounts: 2},
-				New:     map[model.UnitKind]int{model.KindExpense: 2}, Updated: map[model.UnitKind]int{model.KindIncome: 1},
+				Warnings: warnings,
+				Created:  map[string]int{usecase.CreatedAccounts: 2},
+				New:      map[model.UnitKind]int{model.KindExpense: 2}, Updated: map[model.UnitKind]int{model.KindIncome: 1},
+				Revived:   map[model.UnitKind]int{model.KindTransfer: 1},
 				Duplicate: map[model.UnitKind]int{model.KindDealing: 1}, Stale: stale,
+				Voided:             []usecase.VoidedUnit{{Unit: unit, Lines: []int{6}}},
+				Removed:            []usecase.Orphan{waiting},
+				Orphans:            []usecase.Orphan{counting},
 				Failed:             []usecase.Failure{{Unit: unit, Lines: []int{4}, Err: errors.New("ledger refuses")}},
 				ProjectDifferences: []usecase.ProjectDifference{{Project: "Trip", Mapping: "Fun", Ledger: ""}},
 				Adjustments:        3, NoOps: 1, Skipped: 2,
 			})
 		},
 		"confirm": func() error {
-			return cli.RenderConfirm(&b, usecase.ConfirmOutput{Month: "2026-03", Confirmed: 2, Check: check, Orphans: 1,
+			return cli.RenderConfirm(&b, usecase.ConfirmOutput{Month: "2026-03", Confirmed: 2, Check: check, Orphans: []usecase.Orphan{waiting}, Warnings: warnings,
 				Adjustments: []usecase.AdjustmentResult{{State: usecase.AdjustmentBlocked, Err: errors.New("pending drafts")}, {State: usecase.AdjustmentApplied}}})
 		},
 		"verify": func() error {
-			return cli.RenderVerify(&b, usecase.VerifyOutput{Months: []model.MonthCheck{check}, Open: "2026-04", Unexplained: 1, Stale: stale})
+			return cli.RenderVerify(&b, usecase.VerifyOutput{Months: []model.MonthCheck{check}, Open: "2026-04", Unexplained: 1, Stale: stale,
+				Orphans: []usecase.Orphan{counting, waiting}, Warnings: warnings})
 		},
 		"status": func() error {
-			return cli.RenderStatus(&b, usecase.StatusOutput{Months: []usecase.MonthStatus{{Month: "2026-03", Drafts: 1, Stale: 1}}, Orphans: 2})
+			return cli.RenderStatus(&b, usecase.StatusOutput{Months: []usecase.MonthStatus{{Month: "2026-03", Drafts: 1, Stale: 1}},
+				Orphans: []usecase.Orphan{counting, waiting}, Warnings: warnings})
 		},
+		"warnings": func() error { return cli.RenderWarnings(&b, warnings) },
 	} {
 		b.Reset()
 		if err := render(); err != nil {

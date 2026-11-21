@@ -94,14 +94,17 @@ func appendTo(t *testing.T, path string, guessed model.Mapping) {
 	}
 }
 
-// appendFails appends what must be refused, and returns what it says.
-func appendFails(t *testing.T, path string, guessed model.Mapping) string {
+// appendFails appends what must be refused, and returns the failure it is, which is
+// about the file.
+func appendFails(t *testing.T, path string, guessed model.Mapping) *model.Failure {
 	t.Helper()
 	err := file.NewMappingYAML().Append(context.Background(), path, guessed)
 	if err == nil {
 		t.Fatal("Append added to a file it cannot add to")
 	}
-	return err.Error()
+	f := failureOf(t, err)
+	wantFile(t, f, path)
+	return f
 }
 
 // setOld gives the file a time of modification long ago, to tell whether it is
@@ -687,19 +690,24 @@ func TestAppendRefusesAFileBetweenBraces(t *testing.T) {
 	old := setOld(t, path)
 
 	t.Run("that has to be added to", func(t *testing.T) {
-		message := appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed", "Amy": "Amy"}})
-		mustSay(t, message, path, "line 1", "parties", "braces")
+		f := appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed", "Amy": "Amy"}})
+		wantFailure(t, f, model.FailureBraces, 1, "parties")
 		wantUntouched(t, path, text, old)
 	})
 	t.Run("that has what is to be added already", func(t *testing.T) {
 		appendTo(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}})
 		wantUntouched(t, path, text, old)
 	})
+	t.Run("a section of the categories", func(t *testing.T) {
+		path := writeFile(t, t.TempDir(), "categories.yaml", "categories:\n  expense: {A: B}\n")
+		f := appendFails(t, path, model.Mapping{Expense: map[string]model.CategoryMap{"C": {Category: "C"}}})
+		wantFailure(t, f, model.FailureBraces, 2, "categories.expense")
+	})
 	t.Run("a file that is one mapping between braces", func(t *testing.T) {
 		whole := "{accounts: {A: {name: A}}}\n"
 		path := writeFile(t, t.TempDir(), "whole.yaml", whole)
 		old := setOld(t, path)
-		mustSay(t, appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}}), "braces")
+		wantFailure(t, appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}}), model.FailureBraces, 1, "")
 		wantUntouched(t, path, whole, old)
 		// With nothing to add it is no error.
 		appendTo(t, path, model.Mapping{Accounts: map[string]model.AccountMap{"A": {Name: "A"}}})
@@ -707,7 +715,25 @@ func TestAppendRefusesAFileBetweenBraces(t *testing.T) {
 	})
 	t.Run("a file that is {}", func(t *testing.T) {
 		path := writeFile(t, t.TempDir(), "empty.yaml", "{}\n")
-		mustSay(t, appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}}), "braces")
+		wantFailure(t, appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}}), model.FailureBraces, 1, "")
+	})
+}
+
+// A section whose empty value is not written beside its key cannot be made the key of
+// lines without moving things the file says: the user lays it out.
+func TestAppendRefusesALayoutItCannotAddTo(t *testing.T) {
+	t.Run("a section", func(t *testing.T) {
+		text := "accounts:\n  {}\n"
+		path := writeFile(t, t.TempDir(), "mapping.yaml", text)
+		old := setOld(t, path)
+		f := appendFails(t, path, model.Mapping{Accounts: map[string]model.AccountMap{"A": {Name: "A"}}})
+		wantFailure(t, f, model.FailureLayout, 1, "accounts")
+		wantUntouched(t, path, text, old)
+	})
+	t.Run("a section of the categories", func(t *testing.T) {
+		path := writeFile(t, t.TempDir(), "mapping.yaml", "categories:\n  expense:\n    {}\n")
+		f := appendFails(t, path, model.Mapping{Expense: map[string]model.CategoryMap{"C": {Category: "C"}}})
+		wantFailure(t, f, model.FailureLayout, 2, "categories.expense")
 	})
 }
 
@@ -715,20 +741,91 @@ func TestAppendRefusesAFileItCannotRead(t *testing.T) {
 	text := "accounts:\n  A: {nme: A}\n"
 	path := writeFile(t, t.TempDir(), "mapping.yaml", text)
 	old := setOld(t, path)
-	message := appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}})
-	mustSay(t, message, path, "line 2", `"nme"`)
+	f := appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}})
+	wantFailure(t, f, model.FailureKeyUnknown, 2, unknownKey("nme", "accounts.A", accountKeys)...)
 	wantUntouched(t, path, text, old)
 }
 
-// A file from before the active period left the mapping is refused as it is read, and
-// left as it is: the user takes the key out.
-func TestAppendRefusesAFileThatHasAnActivePeriod(t *testing.T) {
-	text := "projects:\n  Trip: {kind: project, name: Trip, active_period: {from: 2026-04-15, to: 2026-04-22}}\n"
+// The reason of the system is what the user is told, as it is, when a file cannot be
+// read or written.
+func TestAppendFailsWithTheReasonOfTheSystem(t *testing.T) {
+	t.Run("a file that cannot be read", func(t *testing.T) {
+		dir := t.TempDir() // a folder is there, and it is not a mapping
+		f := appendFails(t, dir, model.Mapping{Parties: map[string]string{"Zed": "Zed"}})
+		wantFailure(t, f, model.FailureFileUnreadable, 0)
+		if f.Err == nil {
+			t.Error("the failure has no Err: the user is told the reason of the system as it is")
+		}
+	})
+	t.Run("a file that cannot be written", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root writes where it is told not to")
+		}
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		path := filepath.Join(dir, "mapping.yaml")
+		f := appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}})
+		wantFailure(t, f, model.FailureFileNotWritten, 0)
+		if f.Err == nil {
+			t.Error("the failure has no Err: the user is told the reason of the system as it is")
+		}
+	})
+}
+
+// The text with the entries put in is read back before anything is written. When it
+// cannot even be read, because of the way the file ends, the failure is the same one
+// as when it reads differently, with no entry to name.
+func TestAppendRefusesAFileWhoseNewTextCannotBeRead(t *testing.T) {
+	text := "accounts:\n  A: {name: A}\n...\n"
 	path := writeFile(t, t.TempDir(), "mapping.yaml", text)
 	old := setOld(t, path)
-	message := appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}})
-	mustSay(t, message, path, "line 2", `unknown key "active_period"`)
+	f := appendFails(t, path, model.Mapping{Accounts: map[string]model.AccountMap{"B": {Name: "B"}}})
+	wantFailure(t, f, model.FailureWouldReadDifferently, 0)
 	wantUntouched(t, path, text, old)
+}
+
+// A file that has an active period on a project is added to like any other: what it
+// has is left as it is, the period too, and only the new entries are put in.
+func TestAppendLeavesAnActivePeriodAlone(t *testing.T) {
+	text := `# my mapping
+projects:
+  Trip: {kind: project, name: Trip, default_area: Daily, active_period: {from: 2026-03-08, to: 2026-03-17}}  # guessed
+  Hike:
+    kind: project
+    active_period:
+      from: 2026-04-01
+      to: 2026-04-02
+parties:
+  Zed: Zed
+`
+	t.Run("to add to", func(t *testing.T) {
+		path := writeFile(t, t.TempDir(), "mapping.yaml", text)
+		appendTo(t, path, model.Mapping{
+			Projects: map[string]model.ProjectMap{"Camp": {Kind: "project", Name: "Camp"}},
+			Parties:  map[string]string{"Amy": "Amy"},
+		})
+		inserted, ok := insertedLines(text, readFile(t, path))
+		if !ok {
+			t.Errorf("a line of the file was changed or is gone:\n%s", readFile(t, path))
+		}
+		want := []string{"  Camp: {kind: project, name: Camp}  # guessed\n", "  Amy: Amy  # guessed\n"}
+		if !slices.Equal(inserted, want) {
+			t.Errorf("lines put in: %q, want %q", inserted, want)
+		}
+		loaded := load(t, path)
+		if loaded.Guessed != 3 || len(loaded.Warnings) != 2 {
+			t.Errorf("Guessed = %d, Warnings = %d, want 3 and 2: the period is still there, and still ignored", loaded.Guessed, len(loaded.Warnings))
+		}
+	})
+	t.Run("nothing to add", func(t *testing.T) {
+		path := writeFile(t, t.TempDir(), "mapping.yaml", text)
+		old := setOld(t, path)
+		appendTo(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}})
+		wantUntouched(t, path, text, old)
+	})
 }
 
 // What is written has to read back as the file with the entries put in, value for
@@ -740,51 +837,51 @@ func TestAppendRefusesToChangeWhatAnEntrySays(t *testing.T) {
 	tests := []struct {
 		name, text string
 		guessed    model.Mapping
-		wantEntry  string // the entry the error names: the first one that would read differently
+		wantArgs   []string // the section and the key of the entry the failure names: the first one that would read differently
 	}{
 		{
 			"a block scalar that ends with a line like a comment",
 			"parties:\n  Zed: |\n    first line\n    # looks like a comment\n",
 			model.Mapping{Parties: map[string]string{"Amy": "Amy"}},
-			"parties.Zed",
+			[]string{"parties", "Zed"},
 		},
 		{
 			"the same with a section after it",
 			"parties:\n  Zed: |\n    first line\n    # looks like a comment\ntags:\n  t: T\n",
 			model.Mapping{Parties: map[string]string{"Amy": "Amy"}},
-			"parties.Zed",
+			[]string{"parties", "Zed"},
 		},
 		{
 			"a block scalar of the expense categories, and an expense category to add",
 			"categories:\n  expense:\n    Food/Lunch: |\n      lunch\n      # looks like a comment\n",
 			model.Mapping{Expense: map[string]model.CategoryMap{"A/B": {Category: "A/B"}}},
-			"categories.expense.Food/Lunch",
+			[]string{"categories.expense", "Food/Lunch"},
 		},
 		{
 			"a block scalar of the expense categories, and an income section to add",
 			"categories:\n  expense:\n    Food/Lunch: |\n      lunch\n      # looks like a comment\nparties:\n  Zed: Zed\n",
 			model.Mapping{Income: map[string]model.CategoryMap{"X/Y": {Category: "X/Y"}}},
-			"categories.expense.Food/Lunch",
+			[]string{"categories.expense", "Food/Lunch"},
 		},
 		{
 			"a block scalar that keeps the blank lines after it",
 			"parties:\n  Zed: |+\n    first line\n\ntags:\n  t: T\n",
 			model.Mapping{Parties: map[string]string{"Amy": "Amy"}},
-			"parties.Zed",
+			[]string{"parties", "Zed"},
 		},
 		{
 			"a double-quoted scalar of several lines",
 			"parties:\n  Zed: \"first line\n    # not a comment\"\n",
 			model.Mapping{Parties: map[string]string{"Amy": "Amy"}},
-			"parties.Amy",
+			[]string{"parties", "Amy"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := writeFile(t, t.TempDir(), "mapping.yaml", tt.text)
 			old := setOld(t, path)
-			message := appendFails(t, path, tt.guessed)
-			mustSay(t, message, path, tt.wantEntry, "nothing is written")
+			f := appendFails(t, path, tt.guessed)
+			wantFailure(t, f, model.FailureWouldReadDifferently, 0, tt.wantArgs...)
 			wantUntouched(t, path, tt.text, old)
 		})
 	}
@@ -801,7 +898,7 @@ func TestAppendRefusesAnOpeningDateItCannotKeep(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "mapping.yaml")
 			guessed := model.Mapping{Accounts: map[string]model.AccountMap{"A": {Name: "A", Kind: "bank", OpeningDate: opening}}}
-			mustSay(t, appendFails(t, path, guessed), "accounts.A", "nothing is written")
+			wantFailure(t, appendFails(t, path, guessed), model.FailureWouldReadDifferently, 0, "accounts", "A")
 			if _, err := os.Stat(path); !os.IsNotExist(err) {
 				t.Errorf("Stat = %v, want no file to be made of what it cannot keep", err)
 			}
@@ -825,18 +922,19 @@ func TestAppendKeepsANumberThatIsWrittenAnotherWay(t *testing.T) {
 
 func TestAppendRefusesNamesThatCannotBeOneLine(t *testing.T) {
 	long := strings.Repeat("k", 200)
-	for name, key := range map[string]string{"a line break": "two\nlines", "more than 128 characters": long} {
+	keys := map[string]string{"a line break": "two\nlines", "more than 128 characters": long, "not UTF-8": "bad\xffname"}
+	for name, key := range keys {
 		t.Run(name, func(t *testing.T) {
 			guessed := model.Mapping{Accounts: map[string]model.AccountMap{key: {Name: "x"}}}
 
 			text := "accounts:\n  A: {name: A}\n"
 			path := writeFile(t, t.TempDir(), "mapping.yaml", text)
 			old := setOld(t, path)
-			mustSay(t, appendFails(t, path, guessed), "one line")
+			wantFailure(t, appendFails(t, path, guessed), model.FailureEntryNotWritable, 0, "accounts", key)
 			wantUntouched(t, path, text, old)
 
 			made := filepath.Join(t.TempDir(), "mapping.yaml")
-			appendFails(t, made, guessed)
+			wantFailure(t, appendFails(t, made, guessed), model.FailureEntryNotWritable, 0, "accounts", key)
 			if _, err := os.Stat(made); !os.IsNotExist(err) {
 				t.Errorf("Stat = %v, want no file to be made of what cannot be written", err)
 			}

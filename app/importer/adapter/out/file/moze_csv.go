@@ -6,8 +6,8 @@ package file
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"slices"
 	"strings"
@@ -54,27 +54,35 @@ var (
 	mozeClockLayouts = []string{"15:04", "15:04:05"}
 )
 
+// mozeDateExample is a day written the way MOZE writes it: a failure for a text that is
+// not a day shows it, so that the user sees what is meant.
+const mozeDateExample = "2026/03/10"
+
 // MozeCSV reads the CSV file that MOZE exports.
 type MozeCSV struct{}
 
 // NewMozeCSV returns a reader of MOZE exports.
 func NewMozeCSV() *MozeCSV { return &MozeCSV{} }
 
-// Rows reads the export at path, as ParseMozeCSV does; an error about its contents
-// begins with the path.
+// Rows reads the export at path, as ParseMozeCSV does. What is wrong with it is a
+// *model.Failure that names the path: a file that is not there, one that cannot be
+// read, or a failure of its contents.
 func (*MozeCSV) Rows(ctx context.Context, path string) ([]model.Row, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, &model.Failure{Code: model.FailureFileMissing, File: path}
+	}
 	if err != nil {
-		return nil, err
+		return nil, unreadable(path, err)
 	}
 	defer func() { _ = f.Close() }()
 
 	rows, err := ParseMozeCSV(f)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, inFile(path, err)
 	}
 	return rows, nil
 }
@@ -82,13 +90,14 @@ func (*MozeCSV) Rows(ctx context.Context, path string) ([]model.Row, error) {
 // ParseMozeCSV reads the rows of a MOZE export: a UTF-8 file, with or without a byte
 // order mark, with LF or CRLF line endings. Its columns are found by the names of
 // the header, in any order, and a column that is not one of the 16 of MOZE is left
-// out; a column that is missing is an error. The rows come in the order of the
+// out; a column that is missing is a failure. The rows come in the order of the
 // file, each with its keys (model.AssignKeys). A file that has a header and no
-// row has no rows; a file with no header is an error.
+// row has no rows; a file with no header is a failure.
 //
 // What a row says is kept as the file has it: its numbers with their signs, its
 // record type whatever it is (the plan tells of those the import does not know).
-// Every error begins with the line it is about.
+// What is wrong with the file is a *model.Failure (see failAt) that has the line it
+// is about, and the column or the value when it is one.
 func ParseMozeCSV(r io.Reader) ([]model.Row, error) {
 	table, err := openCSV(r, 0, mozeColumns...)
 	if err != nil {
@@ -158,7 +167,7 @@ func mozeDecimal(rec csvRecord, col string) (decimal.Decimal, error) {
 	}
 	d, err := decimal.NewFromString(text)
 	if err != nil {
-		return decimal.Zero, fmt.Errorf("line %d: %s %q: %w", rec.line, col, text, err)
+		return decimal.Zero, failAt(model.FailureNotNumber, rec.line, col, text)
 	}
 	return d, nil
 }
@@ -171,14 +180,14 @@ func mozeDate(rec csvRecord, typ model.RecordType) (time.Time, error) {
 		if typ == model.TypeInitial {
 			return time.Time{}, nil
 		}
-		return time.Time{}, fmt.Errorf("line %d: %s is empty", rec.line, colDate)
+		return time.Time{}, failAt(model.FailureValueEmpty, rec.line, colDate)
 	}
 	for _, layout := range mozeDateLayouts {
 		if day, err := time.Parse(layout, text); err == nil {
 			return day, nil
 		}
 	}
-	return time.Time{}, fmt.Errorf("line %d: %s %q is not a day like 2026/03/10", rec.line, colDate, text)
+	return time.Time{}, failAt(model.FailureNotDay, rec.line, colDate, text, mozeDateExample)
 }
 
 // mozeClock reads 時間 as "15:04"; the seconds, if it has any, are left out.
@@ -192,7 +201,7 @@ func mozeClock(rec csvRecord) (string, error) {
 			return t.Format("15:04"), nil
 		}
 	}
-	return "", fmt.Errorf("line %d: %s %q is not a time like 15:04", rec.line, colTime, text)
+	return "", failAt(model.FailureNotTime, rec.line, colTime, text)
 }
 
 // mozeTags reads 標籤, "#家庭;#公司", as the words of the tags: without their "#", in

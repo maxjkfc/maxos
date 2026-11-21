@@ -2,7 +2,8 @@ package moze
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"slices"
 
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
 	"github.com/maxjkfc/maxos/app/importer/domain/service"
@@ -17,21 +18,36 @@ type loaded struct {
 	ratesFound bool
 }
 
+// fileFailure is what a port's error comes to when it is about a file. The adapters
+// give a *model.Failure that names the file, and that is returned as it is, and so is
+// the end of the context, which is not the fault of the file. An error that is neither
+// is made the failure of the file with that code, with the error as its reason: no
+// sentence of this layer is put in front of the user.
+func fileFailure(code model.FailureCode, file string, err error) error {
+	var failure *model.Failure
+	if errors.As(err, &failure) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return &model.Failure{Code: code, File: file, Err: err}
+}
+
 // load reads the export, the mapping and the rates and makes the plan of them.
 func (in Inputs) load(ctx context.Context, files usecase.Files) (loaded, error) {
 	rows, err := in.Source.Rows(ctx, files.Export)
 	if err != nil {
-		return loaded{}, fmt.Errorf("read the export %s: %w", files.Export, err)
+		return loaded{}, fileFailure(model.FailureFileUnreadable, files.Export, err)
 	}
 	m, err := in.Mapping.Load(ctx, files.Mapping)
 	if err != nil {
-		return loaded{}, fmt.Errorf("read the mapping %s: %w", files.Mapping, err)
+		return loaded{}, fileFailure(model.FailureFileUnreadable, files.Mapping, err)
 	}
 	r, found, err := in.Rates.Load(ctx, files.Rates)
 	if err != nil {
-		return loaded{}, fmt.Errorf("read the rates %s: %w", files.Rates, err)
+		return loaded{}, fileFailure(model.FailureFileUnreadable, files.Rates, err)
 	}
 	plan := service.BuildPlan(service.PlanInput{Rows: rows, Mapping: m.Mapping, Rates: r})
+	// What the file says that is odd comes before what the plan says of its rows.
+	plan.Warnings = slices.Concat(m.Warnings, plan.Warnings)
 	return loaded{plan: plan, mapping: m, ratesFound: found}, nil
 }
 
@@ -47,7 +63,7 @@ func (p *Planner) Plan(ctx context.Context, in usecase.PlanInput) (usecase.PlanO
 		return out, nil
 	}
 	if err := p.inputs.Mapping.Append(ctx, in.Mapping, ld.plan.Guessed); err != nil {
-		return usecase.PlanOutput{}, fmt.Errorf("add the guesses to the mapping %s: %w", in.Mapping, err)
+		return usecase.PlanOutput{}, fileFailure(model.FailureFileNotWritten, in.Mapping, err)
 	}
 	out.MappingCreated = !ld.mapping.Exists
 	out.MappingAdded = ld.plan.Guessed.Entries()

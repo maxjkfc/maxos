@@ -189,6 +189,7 @@ func (b *builder) pair(o, i model.Row) {
 		Area:        j.area,
 		Project:     j.project,
 		Tags:        j.tags,
+		Notes:       j.notes,
 	}
 	var made bool
 	switch {
@@ -293,7 +294,7 @@ func (b *builder) trade(u *model.Unit, o, i model.Row, given *decimal.Decimal) b
 
 // pairDescription is what the two halves say of themselves: the name of each, what
 // they say, what the unit has no place for, and the category each had.
-func pairDescription(o, i model.Row, notes []string) string {
+func pairDescription(o, i model.Row, notes []model.Note) string {
 	name := o.Name
 	if i.Name != "" && i.Name != o.Name {
 		name = joinNonEmpty(" / ", o.Name, i.Name)
@@ -302,7 +303,7 @@ func pairDescription(o, i model.Row, notes []string) string {
 	if i.Description != "" && i.Description != o.Description {
 		details = append(details, i.Description)
 	}
-	details = append(details, notes...)
+	details = append(details, noteLines(notes)...)
 	details = append(details, categoryNote(o))
 	if categoryNote(i) != categoryNote(o) {
 		details = append(details, categoryNote(i))

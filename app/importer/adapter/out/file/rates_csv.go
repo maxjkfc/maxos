@@ -3,10 +3,10 @@ package file
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,14 +25,19 @@ const (
 	ratesPerUnit    = "twd_per_unit"
 )
 
+// ratesDayExample is a day written the way a rates file has it: a failure for a text
+// that is not a day shows it, so that the user sees what is meant.
+const ratesDayExample = "2026-03-10"
+
 // RatesCSV reads the rates the user keeps in a CSV file.
 type RatesCSV struct{}
 
 // NewRatesCSV returns a reader of rates files.
 func NewRatesCSV() *RatesCSV { return &RatesCSV{} }
 
-// Load reads the rates at path, as ParseRates does; an error about its contents
-// begins with the path. A file that does not exist is no rates and no error.
+// Load reads the rates at path, as ParseRates does. What is wrong with the file is a
+// *model.Failure that names the path. A file that does not exist is no rates and no
+// error.
 func (*RatesCSV) Load(ctx context.Context, path string) (model.Rates, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return model.Rates{}, false, err
@@ -42,13 +47,13 @@ func (*RatesCSV) Load(ctx context.Context, path string) (model.Rates, bool, erro
 		return model.Rates{}, false, nil
 	}
 	if err != nil {
-		return model.Rates{}, false, err
+		return model.Rates{}, false, unreadable(path, err)
 	}
 	defer func() { _ = f.Close() }()
 
 	r, err := ParseRates(f)
 	if err != nil {
-		return model.Rates{}, false, fmt.Errorf("%s: %w", path, err)
+		return model.Rates{}, false, inFile(path, err)
 	}
 	return r, true, nil
 }
@@ -62,8 +67,9 @@ func (*RatesCSV) Load(ctx context.Context, path string) (model.Rates, bool, erro
 //   - instrument is the code of the currency, which is read in upper case.
 //   - twd_per_unit is what ONE unit of it is worth in TWD, above zero.
 //
-// A currency has one rate a day: a second is an error that names both lines. Every
-// error begins with the line it is about.
+// A currency has one rate a day: a second is a failure that has both lines. What is
+// wrong with the file is a *model.Failure (see failAt) that has the line it is about,
+// and the column or the value when it is one.
 func ParseRates(r io.Reader) (model.Rates, error) {
 	table, err := openCSV(r, '#', ratesDate, ratesInstrument, ratesPerUnit)
 	if err != nil {
@@ -82,26 +88,32 @@ func ParseRates(r io.Reader) (model.Rates, error) {
 		}
 
 		dayText := rec.text(ratesDate)
+		if dayText == "" {
+			return model.Rates{}, failAt(model.FailureValueEmpty, rec.line, ratesDate)
+		}
 		day, err := time.Parse(time.DateOnly, dayText)
 		if err != nil {
-			return model.Rates{}, fmt.Errorf("line %d: %s %q is not a day like 2026-03-10", rec.line, ratesDate, dayText)
+			return model.Rates{}, failAt(model.FailureNotDay, rec.line, ratesDate, dayText, ratesDayExample)
 		}
 		code := strings.ToUpper(rec.text(ratesInstrument))
 		if code == "" {
-			return model.Rates{}, fmt.Errorf("line %d: %s is empty", rec.line, ratesInstrument)
+			return model.Rates{}, failAt(model.FailureValueEmpty, rec.line, ratesInstrument)
 		}
 		perUnitText := rec.text(ratesPerUnit)
+		if perUnitText == "" {
+			return model.Rates{}, failAt(model.FailureValueEmpty, rec.line, ratesPerUnit)
+		}
 		perUnit, err := decimal.NewFromString(perUnitText)
 		if err != nil {
-			return model.Rates{}, fmt.Errorf("line %d: %s %q: %w", rec.line, ratesPerUnit, perUnitText, err)
+			return model.Rates{}, failAt(model.FailureNotNumber, rec.line, ratesPerUnit, perUnitText)
 		}
 		if !perUnit.IsPositive() {
-			return model.Rates{}, fmt.Errorf("line %d: %s %q is not above zero", rec.line, ratesPerUnit, perUnitText)
+			return model.Rates{}, failAt(model.FailureRateNotPositive, rec.line, ratesPerUnit, perUnitText)
 		}
 
 		key := given{code: code, day: dayText}
 		if first, twice := lines[key]; twice {
-			return model.Rates{}, fmt.Errorf("line %d: %s has a rate for %s already, on line %d", rec.line, code, dayText, first)
+			return model.Rates{}, failAt(model.FailureRateTwice, rec.line, code, dayText, strconv.Itoa(first))
 		}
 		lines[key] = rec.line
 		byCode[code] = append(byCode[code], model.Rate{Date: day, PerUnit: perUnit})

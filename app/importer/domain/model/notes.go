@@ -13,6 +13,12 @@ const (
 	WarningOverrideUnused WarningCode = "override_unused"
 	// WarningRowUnknown is an override of a row that the export does not have.
 	WarningRowUnknown WarningCode = "row_unknown"
+	// WarningActivePeriodIgnored is a project of the mapping file that has an
+	// active_period, which the import no longer sets: it never gives a project a
+	// period, since the ledger puts every transaction that has no project into the
+	// project that is active on its day. The key is left in the file and ignored.
+	// Subject: the entry, as "projects.<key>". Args: the line of the key.
+	WarningActivePeriodIgnored WarningCode = "active_period_ignored"
 )
 
 // Warning is something odd that does not stop anything.

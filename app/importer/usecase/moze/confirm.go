@@ -35,12 +35,13 @@ func adjustmentsOf(plan model.Plan, month string) []model.Adjustment {
 }
 
 // open tells what is left to confirm in a month: the units that are drafts or that
-// the ledger does not have in the version the plan says, and the adjustments that are
-// not confirmed.
+// the ledger does not have in the version the plan says (a version that was voided to
+// make room for another that is gone too is not there either), and the adjustments
+// that are not confirmed.
 func open(plan model.Plan, st *state, month string) (drafts, notApplied, adjustments int) {
 	for _, u := range unitsOf(plan, month) {
 		switch s, _ := st.of(u); s {
-		case unitMissing:
+		case unitMissing, unitRevived:
 			notApplied++
 		case unitDraft:
 			drafts++
@@ -65,6 +66,7 @@ func (a *Importer) Confirm(ctx context.Context, in usecase.ConfirmInput) (usecas
 		return out, err
 	}
 	plan := ld.plan
+	out.Warnings = plan.Warnings
 	if plan.Blocked() {
 		return out, &usecase.BlockedError{Plan: plan}
 	}
@@ -89,6 +91,21 @@ func (a *Importer) Confirm(ctx context.Context, in usecase.ConfirmInput) (usecas
 		return out, &usecase.StaleError{Month: in.Month, Units: stale}
 	}
 
+	// A confirmed transaction that no unit of the plan accounts for counts toward the
+	// balances all the same, and is the more of whatever replaces it: it stands in the
+	// way until the user voids it. The drafts of that kind are left alone and told.
+	var counting []usecase.Orphan
+	for _, o := range st.orphanViews() {
+		if o.Confirmed() {
+			counting = append(counting, o)
+			continue
+		}
+		out.Orphans = append(out.Orphans, o)
+	}
+	if len(counting) > 0 {
+		return out, &usecase.OrphanError{Month: in.Month, Orphans: counting}
+	}
+
 	// The months are confirmed in order: what an adjustment adds is to what the account
 	// holds, which only the months before it settle.
 	for _, m := range plan.Months() {
@@ -102,7 +119,6 @@ func (a *Importer) Confirm(ctx context.Context, in usecase.ConfirmInput) (usecas
 	if _, notApplied, _ := open(plan, st, in.Month); notApplied > 0 {
 		return out, fmt.Errorf("%w: %s has %d, run apply", usecase.ErrNotApplied, in.Month, notApplied)
 	}
-	out.Orphans = len(st.orphans(plan))
 
 	units := unitsOf(plan, in.Month)
 	adjustments := adjustmentsOf(plan, in.Month)
@@ -132,7 +148,7 @@ func (a *Importer) Confirm(ctx context.Context, in usecase.ConfirmInput) (usecas
 		if len(ids) > 0 {
 			confirmed, err := a.ledger.ConfirmTransactions.ConfirmTransactions(ctx, finance.ConfirmTransactionsInput{IDs: ids})
 			if err != nil {
-				return out, fmt.Errorf("confirm the drafts of %s: %w", day.Format(time.DateOnly), err)
+				return out, model.LedgerFailure(model.VerbConfirm, model.ThingTransaction, day.Format(time.DateOnly), err)
 			}
 			for _, t := range confirmed.Transactions {
 				st.byKey[t.IdempotencyKey] = t
@@ -175,7 +191,7 @@ func (a *Importer) applyAdjustment(ctx context.Context, st *state, adj model.Adj
 	accountID, instrumentID := st.accountIDs[adj.Account], st.instrumentIDs[adj.Instrument]
 	balances, err := a.ledger.GetBalances.GetBalances(ctx, finance.GetBalancesInput{AccountID: &accountID, AsOf: &adj.Date})
 	if err != nil {
-		return res, fmt.Errorf("get the balance of %s on %s: %w", adj.Account, adj.Date.Format(time.DateOnly), err)
+		return res, model.LedgerFailure(model.VerbGet, model.ThingBalance, adj.Account+" "+adj.Date.Format(time.DateOnly), err)
 	}
 	recorded := model.Balances{}
 	for _, b := range balances.Balances {

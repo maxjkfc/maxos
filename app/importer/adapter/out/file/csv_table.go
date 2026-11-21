@@ -5,11 +5,12 @@ import (
 	"bytes"
 	"encoding/csv"
 	"errors"
-	"fmt"
 	"io"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/maxjkfc/maxos/app/importer/domain/model"
 )
 
 // utf8BOM is the byte order mark that some programs put at the start of a UTF-8 file.
@@ -35,7 +36,8 @@ type csvRecord struct {
 
 // openCSV reads the header of r, a UTF-8 file with or without a byte order mark,
 // and checks that it has every column of required. Lines that begin with comment
-// are left out, unless it is zero. A file with no header is an error.
+// are left out, unless it is zero. A file with no header is a failure, and so is a
+// header that has a column twice or lacks one that is required.
 func openCSV(r io.Reader, comment rune, required ...string) (*csvTable, error) {
 	br := bufio.NewReader(r)
 	if head, err := br.Peek(len(utf8BOM)); err == nil && bytes.Equal(head, utf8BOM) {
@@ -49,10 +51,10 @@ func openCSV(r io.Reader, comment rune, required ...string) (*csvTable, error) {
 
 	header, err := rd.Read()
 	if errors.Is(err, io.EOF) {
-		return nil, errors.New("the file is empty: it has no header")
+		return nil, failAt(model.FailureFileEmpty, 0)
 	}
 	if err != nil {
-		return nil, csvError(err)
+		return nil, csvFailure(err)
 	}
 	line, _ := rd.FieldPos(0)
 
@@ -63,35 +65,35 @@ func openCSV(r io.Reader, comment rune, required ...string) (*csvTable, error) {
 			continue // a column that is not used
 		}
 		if _, twice := cols[name]; twice {
-			return nil, fmt.Errorf("line %d: the header has the column %q twice", line, name)
+			return nil, failAt(model.FailureColumnTwice, line, name)
 		}
 		cols[name] = i
 	}
 	var missing []string
 	for _, name := range required {
 		if _, ok := cols[name]; !ok {
-			missing = append(missing, strconv.Quote(name))
+			missing = append(missing, name)
 		}
 	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("line %d: the header has no column %s", line, strings.Join(missing, ", "))
+		return nil, failAt(model.FailureColumnsMissing, line, missing...)
 	}
 	return &csvTable{rd: rd, cols: cols, size: len(header)}, nil
 }
 
 // next returns the next record, or io.EOF after the last. A record that has not as
-// many fields as the header is an error.
+// many fields as the header is a failure.
 func (t *csvTable) next() (csvRecord, error) {
 	fields, err := t.rd.Read()
 	if errors.Is(err, io.EOF) {
 		return csvRecord{}, io.EOF
 	}
 	if err != nil {
-		return csvRecord{}, csvError(err)
+		return csvRecord{}, csvFailure(err)
 	}
 	line, _ := t.rd.FieldPos(0)
 	if len(fields) != t.size {
-		return csvRecord{}, fmt.Errorf("line %d: the record has %d fields, the header has %d", line, len(fields), t.size)
+		return csvRecord{}, failAt(model.FailureFieldCount, line, strconv.Itoa(len(fields)), strconv.Itoa(t.size))
 	}
 	return csvRecord{line: line, fields: fields, cols: t.cols}, nil
 }
@@ -100,18 +102,4 @@ func (t *csvTable) next() (csvRecord, error) {
 // the line endings inside it as "\n".
 func (r csvRecord) text(col string) string {
 	return strings.TrimSpace(strings.ReplaceAll(r.fields[r.cols[col]], "\r\n", "\n"))
-}
-
-// csvError gives an error of encoding/csv the form of the others of the adapters,
-// "line N: ...". It names the line where the record begins when that is not the
-// line the problem is on.
-func csvError(err error) error {
-	var pe *csv.ParseError
-	if !errors.As(err, &pe) {
-		return err
-	}
-	if pe.StartLine != pe.Line {
-		return fmt.Errorf("line %d: %w (in the record that begins on line %d)", pe.Line, pe.Err, pe.StartLine)
-	}
-	return fmt.Errorf("line %d: %w", pe.Line, pe.Err)
 }

@@ -8,7 +8,8 @@ import (
 
 // Status counts, for each month, the units that are drafts, confirmed, voided, stale
 // and not recorded yet, the rows that are not recorded at all, and the adjustments
-// that are still to make.
+// that are still to make; and names the transactions of the import that no unit of the
+// plan accounts for.
 func (a *Importer) Status(ctx context.Context, in usecase.StatusInput) (usecase.StatusOutput, error) {
 	var out usecase.StatusOutput
 	ld, err := a.inputs.load(ctx, in.Files)
@@ -16,6 +17,7 @@ func (a *Importer) Status(ctx context.Context, in usecase.StatusInput) (usecase.
 		return out, err
 	}
 	plan := ld.plan
+	out.Warnings = plan.Warnings
 	if plan.Blocked() {
 		return out, &usecase.BlockedError{Plan: plan}
 	}
@@ -36,7 +38,7 @@ func (a *Importer) Status(ctx context.Context, in usecase.StatusInput) (usecase.
 		ms := usecase.MonthStatus{Month: m, Skipped: skipped[m]}
 		for _, u := range unitsOf(plan, m) {
 			switch s, _ := st.of(u); s {
-			case unitMissing:
+			case unitMissing, unitRevived:
 				ms.NotApplied++
 			case unitDraft:
 				ms.Drafts++
@@ -51,6 +53,6 @@ func (a *Importer) Status(ctx context.Context, in usecase.StatusInput) (usecase.
 		_, _, ms.AdjustmentsPending = open(plan, st, m)
 		out.Months = append(out.Months, ms)
 	}
-	out.Orphans = len(st.orphans(plan))
+	out.Orphans = st.orphanViews()
 	return out, nil
 }

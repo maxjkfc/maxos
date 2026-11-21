@@ -68,6 +68,9 @@ type fakeLedger struct {
 	// pageSize makes ListTransactions return pages of this size at most; 0 is as asked.
 	pageSize int
 	created  map[string]int
+	// ticks is the clock of the ledger: every creation and every void is a second later
+	// than the one before.
+	ticks int
 }
 
 func newFakeLedger() *fakeLedger {
@@ -76,6 +79,12 @@ func newFakeLedger() *fakeLedger {
 }
 
 func (f *fakeLedger) id() uuid.UUID { return uuid.Must(uuid.NewV7()) }
+
+// now is the moment of the next thing that happens in the ledger.
+func (f *fakeLedger) now() time.Time {
+	f.ticks++
+	return time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(f.ticks) * time.Second)
+}
 
 func (f *fakeLedger) ledger() moze.Ledger {
 	return moze.Ledger{
@@ -211,12 +220,16 @@ func (f *fakeLedger) record(kind string, d finance.RecordDetails, deltas []delta
 		Transaction: finance.Transaction{
 			ID: f.id(), Kind: kind, Status: "draft", OccurredOn: d.OccurredOn, OccurredAt: d.OccurredAt,
 			Description: d.Description, Merchant: d.Merchant, ProjectID: d.ProjectID, AreaID: d.AreaID,
-			IdempotencyKey: d.IdempotencyKey, TagIDs: d.TagIDs,
+			IdempotencyKey: d.IdempotencyKey, TagIDs: d.TagIDs, CreatedAt: f.now(),
 		},
 		deltas: deltas,
 	}
 	for i := range t.deltas {
 		t.deltas[i].on = d.OccurredOn
+		acc := t.deltas[i].account
+		t.Postings = append(t.Postings, finance.Posting{
+			Seq: i + 1, Book: "account", AccountID: &acc, InstrumentID: t.deltas[i].instrument, Quantity: t.deltas[i].quantity,
+		})
 	}
 	f.txns = append(f.txns, t)
 	return finance.RecordOutput{Transaction: t.Transaction}, nil
@@ -408,6 +421,8 @@ func (f *fakeLedger) void(keyStart string) int {
 	for _, t := range f.txns {
 		if strings.HasPrefix(t.IdempotencyKey, keyStart) && t.Status == "confirmed" {
 			t.Status = "void"
+			at := f.now()
+			t.VoidedAt = &at
 			n++
 		}
 	}

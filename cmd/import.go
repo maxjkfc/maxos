@@ -15,6 +15,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/maxjkfc/maxos/app/importer/adapter/in/cli"
+	"github.com/maxjkfc/maxos/app/importer/domain/model"
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/pkg/config"
 )
@@ -88,7 +89,7 @@ func newImportPlanCmd() *cobra.Command {
 			}
 			out, err := plan.Plan(cmd.Context(), usecase.PlanInput{Files: resolved})
 			if err != nil {
-				return err
+				return cli.Refusal(cmd.OutOrStdout(), err)
 			}
 			if report == "" {
 				return cli.RenderPlan(cmd.OutOrStdout(), out)
@@ -153,6 +154,27 @@ func runImport(cmd *cobra.Command, work func(ctx context.Context, w io.Writer, u
 	return workErr
 }
 
+// refuse says why a command that has read the mapping stopped: what is odd in the
+// mapping first, since it is true whatever came after, and then the refusal.
+func refuse(w io.Writer, warnings []model.Warning, err error) error {
+	if werr := cli.RenderWarnings(w, warnings); werr != nil {
+		return werr
+	}
+	return cli.Refusal(w, err)
+}
+
+// confirmedOrphans counts the orphans that are confirmed: they count toward the
+// balances, and the user voids them.
+func confirmedOrphans(orphans []usecase.Orphan) int {
+	n := 0
+	for _, o := range orphans {
+		if o.Confirmed() {
+			n++
+		}
+	}
+	return n
+}
+
 func newImportApplyCmd() *cobra.Command {
 	var files importFiles
 	c := &cobra.Command{
@@ -167,7 +189,7 @@ func newImportApplyCmd() *cobra.Command {
 			return runImport(cmd, func(ctx context.Context, w io.Writer, uc importDeps) error {
 				out, err := uc.Apply.Apply(ctx, usecase.ApplyInput{Files: resolved})
 				if err != nil {
-					return cli.Refusal(w, err)
+					return refuse(w, out.Warnings, err)
 				}
 				if err := cli.RenderApply(w, out); err != nil {
 					return err
@@ -177,6 +199,8 @@ func newImportApplyCmd() *cobra.Command {
 					return fmt.Errorf("有 %d 個單位被帳本拒收", len(out.Failed))
 				case len(out.Stale) > 0:
 					return fmt.Errorf("有 %d 筆已確認的交易與對照不同：作廢它們，再執行一次 apply", len(out.Stale))
+				case len(out.Orphans) > 0:
+					return fmt.Errorf("有 %d 筆已確認的交易在匯出裡找不到對應的列：作廢它們，再執行一次 apply", len(out.Orphans))
 				}
 				return nil
 			})
@@ -204,7 +228,7 @@ func newImportConfirmCmd() *cobra.Command {
 			return runImport(cmd, func(ctx context.Context, w io.Writer, uc importDeps) error {
 				out, err := uc.Confirm.Confirm(ctx, usecase.ConfirmInput{Files: resolved, Month: month})
 				if err != nil {
-					return cli.Refusal(w, err)
+					return refuse(w, out.Warnings, err)
 				}
 				if err := cli.RenderConfirm(w, out); err != nil {
 					return err
@@ -245,7 +269,7 @@ func newImportVerifyCmd() *cobra.Command {
 			return runImport(cmd, func(ctx context.Context, w io.Writer, uc importDeps) error {
 				out, err := uc.Verify.Verify(ctx, usecase.VerifyInput{Files: resolved})
 				if err != nil {
-					return cli.Refusal(w, err)
+					return refuse(w, out.Warnings, err)
 				}
 				if err := cli.RenderVerify(w, out); err != nil {
 					return err
@@ -253,6 +277,8 @@ func newImportVerifyCmd() *cobra.Command {
 				switch {
 				case len(out.Stale) > 0:
 					return fmt.Errorf("有 %d 筆已確認的交易與對照不同：作廢它們，執行 apply，再確認", len(out.Stale))
+				case confirmedOrphans(out.Orphans) > 0:
+					return fmt.Errorf("有 %d 筆已確認的交易在匯出裡找不到對應的列：作廢它們，再執行 apply 與 confirm", confirmedOrphans(out.Orphans))
 				case out.Unexplained > 0:
 					return fmt.Errorf("有 %d 個帳戶與標的的餘額與 CSV 不符，而且沒有東西能說明", out.Unexplained)
 				}
@@ -278,7 +304,7 @@ func newImportStatusCmd() *cobra.Command {
 			return runImport(cmd, func(ctx context.Context, w io.Writer, uc importDeps) error {
 				out, err := uc.Status.Status(ctx, usecase.StatusInput{Files: resolved})
 				if err != nil {
-					return cli.Refusal(w, err)
+					return refuse(w, out.Warnings, err)
 				}
 				return cli.RenderStatus(w, out)
 			})

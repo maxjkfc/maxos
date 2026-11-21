@@ -4,14 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/shopspring/decimal"
 	"go.yaml.in/yaml/v3"
@@ -25,12 +27,13 @@ var _ mapping.Store = (*MappingYAML)(nil)
 // MappingYAML keeps the mapping in a YAML file that the user reads and edits.
 //
 // The file has these sections, each of them optional, with these keys; a key that
-// is not one of them is an error, and so is a key that is there twice:
+// is not one of them is a failure, and so is a key that is there twice:
 //
 //	instruments:  # by currency code: name, kind, is_currency, decimals, rate_as
 //	accounts:     # by MOZE account name: name, kind, institution, closing_day, payment_due_day,
 //	              # opening_date (a day, 2026-04-15)
-//	projects:     # by value of 專案: kind, name, default_area, party
+//	projects:     # by value of 專案: kind, name, default_area, party; active_period is
+//	              # ignored, see below
 //	categories:   # expense and income, each by "主類別/子類別": a category path, or
 //	              # {category, treatment, party, tag}
 //	parties:      # MOZE name: ledger name
@@ -42,6 +45,13 @@ var _ mapping.Store = (*MappingYAML)(nil)
 // text "2025". The file says what the entries are, not whether that is right; the
 // mapping is validated by model.Mapping.Validate.
 //
+// A project may have an active_period, which the first version of the import wrote. It
+// is read and ignored, whatever it is written as, and Load has a warning for each, with
+// the line of its key. Neither Load nor Append changes the file for it.
+//
+// What is wrong with a file is a *model.Failure that has the file, the line and the
+// values of its code, never a sentence: the words are the command line's.
+//
 // An entry that the import added ends with the comment "# guessed" until the user
 // has looked at it and taken the comment away.
 type MappingYAML struct{}
@@ -51,6 +61,10 @@ func NewMappingYAML() *MappingYAML { return &MappingYAML{} }
 
 // guessedMark is the comment that ends the line of an entry the import has guessed.
 const guessedMark = "# guessed"
+
+// mappingDayExample is a day written the way the mapping has it: a failure for a text
+// that is not a day shows it, so that the user sees what is meant.
+const mappingDayExample = "2026-04-15"
 
 // The sections of the file, and the keys of what they hold. The sections that are the
 // model's, and the keys of its defaults, have the names the model gives them: they
@@ -80,6 +94,7 @@ const (
 	keyOpeningDate      = "opening_date"
 	keyDefaultArea      = "default_area"
 	keyParty            = "party"
+	keyActivePeriod     = "active_period"
 	keyCategory         = "category"
 	keyTreatment        = "treatment"
 	keyTag              = "tag"
@@ -101,7 +116,7 @@ var categorySections = []string{secExpense, secIncome}
 var (
 	instrumentKeys = []string{keyName, keyKind, keyIsCurrency, keyDecimals, keyRateAs}
 	accountKeys    = []string{keyName, keyKind, keyInstitution, keyClosingDay, keyPaymentDueDay, keyOpeningDate}
-	projectKeys    = []string{keyKind, keyName, keyDefaultArea, keyParty}
+	projectKeys    = []string{keyKind, keyName, keyDefaultArea, keyParty, keyActivePeriod}
 	categoryKeys   = []string{keyCategory, keyTreatment, keyParty, keyTag}
 	defaultsKeys   = []string{keyFeeCategory, keyInterestCategory, keyRefundCategory}
 	rowKeys        = []string{keyTreatment, keyCategory, keyParty, keyTag, keyQuantity}
@@ -109,7 +124,9 @@ var (
 
 // Load reads the mapping at path. A file that does not exist is an empty mapping
 // that does not exist; one that has nothing in it is an empty mapping that does.
-// Guessed is the number of lines of the file that say "# guessed".
+// Guessed is the number of entries that end with the mark "# guessed": see
+// countGuessed. Warnings has what is odd in the file and stops nothing. Load writes
+// nothing. What is wrong with the file is a *model.Failure that names it.
 func (*MappingYAML) Load(ctx context.Context, path string) (mapping.Loaded, error) {
 	if err := ctx.Err(); err != nil {
 		return mapping.Loaded{}, err
@@ -119,24 +136,73 @@ func (*MappingYAML) Load(ctx context.Context, path string) (mapping.Loaded, erro
 		return mapping.Loaded{}, nil
 	}
 	if err != nil {
-		return mapping.Loaded{}, err
+		return mapping.Loaded{}, unreadable(path, err)
 	}
 	doc, err := parseDocument(data)
 	if err != nil {
-		return mapping.Loaded{}, fmt.Errorf("%s: %w", path, err)
+		return mapping.Loaded{}, inFile(path, err)
 	}
-	return mapping.Loaded{Mapping: doc.content, Exists: true, Guessed: countGuessed(data)}, nil
+	return mapping.Loaded{Mapping: doc.content, Exists: true, Guessed: doc.guessed, Warnings: doc.warnings}, nil
 }
 
-// countGuessed counts the lines of the file that are marked as guessed.
-func countGuessed(data []byte) int {
+// countGuessed counts the entries of the sections that end with the mark of a guess,
+// "# guessed": the line comment after the value of the entry, or after its key when
+// the entry goes on below it. What is not an entry's own comment is not the mark: a
+// comment of a line of its own, the comment of a section or of the start of the file,
+// one inside an entry, and the text of a value, which is not a comment. A comment is
+// the mark when it begins with "# guessed" and the word ends there, so that
+// "# guessed: not sure" is one and "# guessedly" and "#guessed" are not.
+func countGuessed(root *yaml.Node) int {
 	n := 0
-	for line := range bytes.Lines(data) {
-		if bytes.Contains(line, []byte(guessedMark)) {
+	for _, section := range pairsOf(root) {
+		if section.key.Value != secCategories {
+			n += markedIn(pairsOf(section.val))
+			continue
+		}
+		for _, sub := range pairsOf(section.val) {
+			n += markedIn(pairsOf(sub.val))
+		}
+	}
+	return n
+}
+
+// pair is a key of a mapping node and its value.
+type pair struct{ key, val *yaml.Node }
+
+// pairsOf lists the keys of a mapping node, and their values, in the order of the file;
+// it is none for a node that is not a mapping.
+func pairsOf(n *yaml.Node) []pair {
+	n = resolved(n)
+	if n.Kind != yaml.MappingNode {
+		return nil
+	}
+	pairs := make([]pair, 0, len(n.Content)/2)
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		pairs = append(pairs, pair{key: resolved(n.Content[i]), val: resolved(n.Content[i+1])})
+	}
+	return pairs
+}
+
+// markedIn counts the entries among the pairs that end with the mark. The comment of
+// an entry is on its value, or on its key when the value is below or is not there.
+func markedIn(entries []pair) int {
+	n := 0
+	for _, e := range entries {
+		if isMark(e.key.LineComment) || isMark(e.val.LineComment) {
 			n++
 		}
 	}
 	return n
+}
+
+// isMark tells whether a line comment is the mark of a guess.
+func isMark(comment string) bool {
+	rest, ok := strings.CutPrefix(comment, guessedMark)
+	if !ok {
+		return false
+	}
+	next, _ := utf8.DecodeRuneInString(rest)
+	return rest == "" || (!unicode.IsLetter(next) && !unicode.IsDigit(next) && next != '_')
 }
 
 // document is a mapping file as it was parsed: what it says, and the nodes of its
@@ -145,6 +211,10 @@ type document struct {
 	// root is the mapping at the top of the file, nil for a file with no content.
 	root    *yaml.Node
 	content model.Mapping
+	// guessed is how many entries of it end with the mark of a guess.
+	guessed int
+	// warnings are what is odd in it and stops nothing.
+	warnings []model.Warning
 }
 
 // parseDocument reads a mapping file. A file with nothing in it but comments and
@@ -156,20 +226,20 @@ func parseDocument(data []byte) (document, error) {
 		if errors.Is(err, io.EOF) {
 			return document{}, nil
 		}
-		return document{}, yamlError(err)
+		return document{}, yamlFailure(err)
 	}
 	// Whatever is in a second document would be left out without a word.
 	var next yaml.Node
 	switch err := dec.Decode(&next); {
 	case errors.Is(err, io.EOF):
 	case err != nil:
-		return document{}, yamlError(err)
+		return document{}, yamlFailure(err)
 	default:
 		line := next.Line
 		if len(next.Content) > 0 {
 			line = next.Content[0].Line
 		}
-		return document{}, fmt.Errorf("line %d: the file has a second YAML document; it may have only one", line)
+		return document{}, failAt(model.FailureSecondDocument, line)
 	}
 
 	if len(doc.Content) == 0 {
@@ -180,47 +250,63 @@ func parseDocument(data []byte) (document, error) {
 		return document{}, nil
 	}
 	if root.Kind != yaml.MappingNode {
-		return document{}, fmt.Errorf("line %d: the file must be a mapping of sections", root.Line)
+		return document{}, failAt(model.FailureNotSections, root.Line)
 	}
-	content, err := decodeMapping(root)
+	d := &decoder{}
+	content, err := d.mapping(root)
 	if err != nil {
 		return document{}, err
 	}
-	return document{root: root, content: content}, nil
+	return document{root: root, content: content, warnings: d.warnings, guessed: countGuessed(root)}, nil
 }
 
-// yamlError makes an error of the YAML library read like the others of the adapter.
-func yamlError(err error) error {
-	return errors.New(strings.TrimPrefix(err.Error(), "yaml: "))
+// yamlLine finds the line in the message of an error of the YAML library, which begins
+// "yaml: line 3: " when it has one.
+var yamlLine = regexp.MustCompile(`^yaml: line (\d+):`)
+
+// yamlFailure is the failure that an error of the YAML library comes to: the line it
+// names, when it names one, and none of its words, which are not the user's.
+func yamlFailure(err error) error {
+	line := 0
+	if m := yamlLine.FindStringSubmatch(err.Error()); m != nil {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			line = n
+		}
+	}
+	return failAt(model.FailureYAMLSyntax, line)
 }
 
-// decodeMapping reads the mapping from the node at the top of the file, walking the
-// nodes and not decoding into types, so that every key is known, every error has
-// its line and the text of a name is the text that is written.
-func decodeMapping(root *yaml.Node) (model.Mapping, error) {
+// decoder reads a mapping from the nodes of a file, walking them and not decoding into
+// types, so that every key is known, every error has its line and the text of a name
+// is the text that is written. What is odd in the file and stops nothing is kept as
+// warnings, in the order of the file.
+type decoder struct{ warnings []model.Warning }
+
+// mapping reads the mapping from the node at the top of the file.
+func (d *decoder) mapping(root *yaml.Node) (model.Mapping, error) {
 	var m model.Mapping
-	sections, err := objectOf(root, "the file", sectionOrder)
+	sections, err := objectOf(root, "", sectionOrder)
 	if err != nil {
 		return model.Mapping{}, err
 	}
 	for _, s := range sections {
 		switch s.key {
 		case secInstruments:
-			m.Instruments, err = decodeSection(s, decodeInstrument)
+			m.Instruments, err = decodeSection(s, s.key, decodeInstrument)
 		case secAccounts:
-			m.Accounts, err = decodeSection(s, decodeAccount)
+			m.Accounts, err = decodeSection(s, s.key, decodeAccount)
 		case secProjects:
-			m.Projects, err = decodeSection(s, decodeProject)
+			m.Projects, err = decodeSection(s, s.key, d.project)
 		case secCategories:
 			m.Expense, m.Income, err = decodeCategories(s)
 		case secParties:
-			m.Parties, err = decodeSection(s, field.text)
+			m.Parties, err = decodeSection(s, s.key, decodeName)
 		case secTags:
-			m.Tags, err = decodeSection(s, field.text)
+			m.Tags, err = decodeSection(s, s.key, decodeName)
 		case secDefaults:
 			m.Defaults, err = decodeDefaults(s)
 		case secRows:
-			m.Rows, err = decodeSection(s, decodeRow)
+			m.Rows, err = decodeSection(s, s.key, decodeRow)
 		}
 		if err != nil {
 			return model.Mapping{}, err
@@ -230,16 +316,18 @@ func decodeMapping(root *yaml.Node) (model.Mapping, error) {
 }
 
 // decodeSection reads a section, which is a mapping from a name to its entry, with
-// decode, which makes the entry of the node of its value. A section that has no
-// entry is nil.
-func decodeSection[V any](section field, decode func(field) (V, error)) (map[string]V, error) {
-	entries, err := entriesOf(section.val, section.key)
+// decode, which makes the entry of the node of its value and is given where it is. A
+// section that has no entry is nil. The where of a section is its name in the file,
+// "accounts" or "categories.expense", and that of an entry, "accounts.Name": how the
+// subject of a problem is written.
+func decodeSection[V any](section field, where string, decode func(f field, where string) (V, error)) (map[string]V, error) {
+	entries, err := entriesOf(section.val, where)
 	if err != nil || len(entries) == 0 {
 		return nil, err
 	}
 	out := make(map[string]V, len(entries))
 	for _, e := range entries {
-		v, err := decode(e)
+		v, err := decode(e, where+"."+e.key)
 		if err != nil {
 			return nil, err
 		}
@@ -248,9 +336,12 @@ func decodeSection[V any](section field, decode func(field) (V, error)) (map[str
 	return out, nil
 }
 
-func decodeInstrument(f field) (model.InstrumentMap, error) {
+// decodeName reads a party or a tag: the name of the ledger.
+func decodeName(f field, _ string) (string, error) { return f.text() }
+
+func decodeInstrument(f field, where string) (model.InstrumentMap, error) {
 	var in model.InstrumentMap
-	fields, err := objectOf(f.val, "an instrument", instrumentKeys)
+	fields, err := objectOf(f.val, where, instrumentKeys)
 	if err != nil {
 		return in, err
 	}
@@ -274,9 +365,9 @@ func decodeInstrument(f field) (model.InstrumentMap, error) {
 	return in, nil
 }
 
-func decodeAccount(f field) (model.AccountMap, error) {
+func decodeAccount(f field, where string) (model.AccountMap, error) {
 	var a model.AccountMap
-	fields, err := objectOf(f.val, "an account", accountKeys)
+	fields, err := objectOf(f.val, where, accountKeys)
 	if err != nil {
 		return a, err
 	}
@@ -302,9 +393,13 @@ func decodeAccount(f field) (model.AccountMap, error) {
 	return a, nil
 }
 
-func decodeProject(f field) (model.ProjectMap, error) {
+// project reads a project. An active_period is read and ignored: the import never sets
+// the active period of a project, but a mapping that an earlier version of it wrote
+// has some, and is not refused for it. The key stays in the file; the warning says
+// where it is.
+func (d *decoder) project(f field, where string) (model.ProjectMap, error) {
 	var pm model.ProjectMap
-	fields, err := objectOf(f.val, "a project", projectKeys)
+	fields, err := objectOf(f.val, where, projectKeys)
 	if err != nil {
 		return pm, err
 	}
@@ -318,6 +413,12 @@ func decodeProject(f field) (model.ProjectMap, error) {
 			pm.DefaultArea, err = p.text()
 		case keyParty:
 			pm.Party, err = p.text()
+		case keyActivePeriod:
+			d.warnings = append(d.warnings, model.Warning{
+				Code:    model.WarningActivePeriodIgnored,
+				Subject: where,
+				Args:    []string{strconv.Itoa(p.at.Line)},
+			})
 		}
 		if err != nil {
 			return pm, err
@@ -336,9 +437,9 @@ func decodeCategories(f field) (expense, income map[string]model.CategoryMap, er
 	for _, s := range sections {
 		switch s.key {
 		case secExpense:
-			expense, err = decodeSection(s, decodeCategory)
+			expense, err = decodeSection(s, model.SectionExpense, decodeCategory)
 		case secIncome:
-			income, err = decodeSection(s, decodeCategory)
+			income, err = decodeSection(s, model.SectionIncome, decodeCategory)
 		}
 		if err != nil {
 			return nil, nil, err
@@ -349,14 +450,14 @@ func decodeCategories(f field) (expense, income map[string]model.CategoryMap, er
 
 // decodeCategory reads a category entry: the path of a ledger category alone, or the
 // keys of what is made of the rows.
-func decodeCategory(f field) (model.CategoryMap, error) {
+func decodeCategory(f field, where string) (model.CategoryMap, error) {
 	var c model.CategoryMap
 	if f.val.Kind == yaml.ScalarNode {
 		var err error
 		c.Category, err = f.text()
 		return c, err
 	}
-	fields, err := objectOf(f.val, "a category", categoryKeys)
+	fields, err := objectOf(f.val, where, categoryKeys)
 	if err != nil {
 		return c, err
 	}
@@ -400,9 +501,9 @@ func decodeDefaults(f field) (model.Defaults, error) {
 	return d, nil
 }
 
-func decodeRow(f field) (model.RowOverride, error) {
+func decodeRow(f field, where string) (model.RowOverride, error) {
 	var o model.RowOverride
-	fields, err := objectOf(f.val, "a row", rowKeys)
+	fields, err := objectOf(f.val, where, rowKeys)
 	if err != nil {
 		return o, err
 	}
@@ -446,25 +547,25 @@ func resolved(n *yaml.Node) *yaml.Node {
 func isNull(n *yaml.Node) bool { return n.Kind == yaml.ScalarNode && n.Tag == "!!null" }
 
 // entriesOf lists the entries of a mapping node, in the order of the file, with any
-// key; what is the name of the node is for the messages. No value is a mapping with
-// no entries.
-func entriesOf(n *yaml.Node, what string) ([]field, error) {
+// key; where is the name of the node, which is how a failure says what it is about. No
+// value is a mapping with no entries.
+func entriesOf(n *yaml.Node, where string) ([]field, error) {
 	n = resolved(n)
 	if isNull(n) {
 		return nil, nil
 	}
 	if n.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("line %d: %s must be a mapping", n.Line, what)
+		return nil, failAt(model.FailureMustBeMapping, n.Line, where)
 	}
 	fields := make([]field, 0, len(n.Content)/2)
 	lines := make(map[string]int, len(n.Content)/2) // the line each key is on
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		k, v := resolved(n.Content[i]), resolved(n.Content[i+1])
 		if k.Kind != yaml.ScalarNode {
-			return nil, fmt.Errorf("line %d: a key of %s must be a single value", k.Line, what)
+			return nil, failAt(model.FailureKeyNotSingle, k.Line, where)
 		}
 		if first, twice := lines[k.Value]; twice {
-			return nil, fmt.Errorf("line %d: %s has the key %q twice, the first on line %d", k.Line, what, k.Value, first)
+			return nil, failAt(model.FailureKeyTwice, k.Line, where, k.Value, strconv.Itoa(first))
 		}
 		lines[k.Value] = k.Line
 		fields = append(fields, field{key: k.Value, at: k, val: v})
@@ -472,15 +573,16 @@ func entriesOf(n *yaml.Node, what string) ([]field, error) {
 	return fields, nil
 }
 
-// objectOf lists the entries of a mapping node whose keys are only those of known.
-func objectOf(n *yaml.Node, what string, known []string) ([]field, error) {
-	fields, err := entriesOf(n, what)
+// objectOf lists the entries of a mapping node whose keys are only those of known; a
+// key that is not one is a failure that lists the keys that are.
+func objectOf(n *yaml.Node, where string, known []string) ([]field, error) {
+	fields, err := entriesOf(n, where)
 	if err != nil {
 		return nil, err
 	}
 	for _, f := range fields {
 		if !slices.Contains(known, f.key) {
-			return nil, fmt.Errorf("line %d: unknown key %q in %s; it has %s", f.at.Line, f.key, what, strings.Join(known, ", "))
+			return nil, failAt(model.FailureKeyUnknown, f.at.Line, append([]string{f.key, where}, known...)...)
 		}
 	}
 	return fields, nil
@@ -493,7 +595,7 @@ func (f field) text() (string, error) {
 		return "", nil
 	}
 	if f.val.Kind != yaml.ScalarNode {
-		return "", fmt.Errorf("line %d: %s must be a single value", f.val.Line, f.key)
+		return "", failAt(model.FailureValueNotSingle, f.val.Line, f.key)
 	}
 	return f.val.Value, nil
 }
@@ -506,7 +608,7 @@ func (f field) integer() (int, error) {
 	}
 	n, err := strconv.Atoi(text)
 	if err != nil {
-		return 0, fmt.Errorf("line %d: %s %q is not a whole number", f.val.Line, f.key, text)
+		return 0, failAt(model.FailureNotWholeNumber, f.val.Line, f.key, text)
 	}
 	return n, nil
 }
@@ -523,7 +625,7 @@ func (f field) boolean() (bool, error) {
 	case "true":
 		return true, nil
 	}
-	return false, fmt.Errorf("line %d: %s %q is not true or false", f.val.Line, f.key, text)
+	return false, failAt(model.FailureNotBoolean, f.val.Line, f.key, text)
 }
 
 // day is the value as a day at midnight UTC, written 2006-01-02; no value is the
@@ -535,7 +637,7 @@ func (f field) day() (time.Time, error) {
 	}
 	day, err := time.Parse(time.DateOnly, text)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("line %d: %s %q is not a day like 2026-04-15", f.val.Line, f.key, text)
+		return time.Time{}, failAt(model.FailureNotDay, f.val.Line, f.key, text, mappingDayExample)
 	}
 	return day, nil
 }
@@ -549,7 +651,7 @@ func (f field) quantity() (*decimal.Decimal, error) {
 	}
 	d, err := decimal.NewFromString(text)
 	if err != nil {
-		return nil, fmt.Errorf("line %d: %s %q is not a number", f.val.Line, f.key, text)
+		return nil, failAt(model.FailureNotNumber, f.val.Line, f.key, text)
 	}
 	return &d, nil
 }

@@ -8,6 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
+
+	"github.com/shopspring/decimal"
 
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
 )
@@ -68,7 +71,14 @@ type PlanOutput struct {
 //     recorded again;
 //   - a unit that the ledger has in an earlier version that is confirmed is left
 //     alone and reported as stale, and so are the units that are made of the rows of
-//     one that is: the user voids it, and the next run records the unit again.
+//     one that is: the user voids it, and the next run records the unit again;
+//   - a unit whose present version the user voided is left as it is when the void is
+//     theirs to keep, and recorded again, under a key of its own, when the void was
+//     what made room for another version that is gone too (the plan went back to
+//     what it said before);
+//   - a transaction of the import that no unit of the plan accounts for any more (its
+//     row was edited, which makes it another row, or deleted, or is left out now) is
+//     an orphan: a draft is discarded, a confirmed one is reported and left alone.
 //
 // A unit that the ledger refuses is reported and does not stop the others.
 type Apply interface {
@@ -82,18 +92,30 @@ type ApplyInput struct {
 
 // ApplyOutput says what Apply did.
 type ApplyOutput struct {
+	// Warnings are what is odd in the mapping, which the plan tells too.
+	Warnings []model.Warning
 	// Created is how much reference data was made, by what it is.
 	Created map[string]int
-	// New, Updated and Duplicate count the units recorded now, the units whose draft
-	// of an earlier version was discarded and recorded again, and the units the ledger
+	// New, Updated, Revived and Duplicate count the units recorded now, the units whose
+	// draft of an earlier version was discarded and recorded again, the units whose
+	// present version had been voided and were recorded again, and the units the ledger
 	// already had, by kind.
 	New       map[model.UnitKind]int
 	Updated   map[model.UnitKind]int
+	Revived   map[model.UnitKind]int
 	Duplicate map[model.UnitKind]int
 	// Failed are the units the ledger refused.
 	Failed []Failure
 	// Stale are the units whose confirmed version is not what the plan says now.
 	Stale []StaleUnit
+	// Voided are the units whose present version the user voided, which stay as they
+	// are.
+	Voided []VoidedUnit
+	// Removed are the drafts of the import that no unit of the plan accounts for any
+	// more, which were discarded; Orphans are the confirmed transactions of the import
+	// that none does, which are left alone and which the user voids.
+	Removed []Orphan
+	Orphans []Orphan
 	// ProjectDifferences are the projects the ledger already had, which are used as
 	// they are, whose default area is not the one the mapping says.
 	ProjectDifferences []ProjectDifference
@@ -121,6 +143,39 @@ type StaleUnit struct {
 	Lines []int
 }
 
+// VoidedUnit is a unit whose present version the user voided: the ledger has it, and
+// it counts toward nothing.
+type VoidedUnit struct {
+	Unit model.Unit
+	// Lines are the lines of the export the unit is made of.
+	Lines []int
+}
+
+// Orphan is a transaction the import recorded that no unit of the plan accounts for
+// any more: the row it came of was edited (an edited row is another row, with another
+// key), or deleted, or is left out now.
+type Orphan struct {
+	// Key is the idempotency key it was recorded under.
+	Key string
+	// Status is "draft" or "confirmed"; a void one is not an orphan.
+	Status string
+	// Kind is the kind of transaction of the ledger.
+	Kind string
+	// Date is the day it happened.
+	Date time.Time
+	// Account and Instrument are by name and by code: what it does to the first account
+	// it moves, which Amount says with its sign.
+	Account    string
+	Instrument string
+	Amount     decimal.Decimal
+	// Description is what it says of itself.
+	Description string
+}
+
+// Confirmed tells whether the orphan is a confirmed transaction, which counts toward
+// the balances until the user voids it.
+func (o Orphan) Confirmed() bool { return o.Status == "confirmed" }
+
 // ProjectDifference is a project that the ledger had already, whose default area is
 // not what the mapping says it is. Names are of areas, empty for none.
 type ProjectDifference struct {
@@ -134,8 +189,10 @@ type ProjectDifference struct {
 // its account and instrument up to its day is confirmed, by reconciling the account
 // to what it held plus what the adjustment adds. It refuses when a month before it
 // still has a draft of the import to confirm, or an adjustment, so that the months
-// are confirmed in order, and when a unit of that month or of an earlier one is stale
-// (a *StaleError). It touches nothing the import did not record.
+// are confirmed in order, when a unit of that month or of an earlier one is stale
+// (a *StaleError), and while the ledger has a confirmed transaction of the import that
+// no unit of the plan accounts for (an *OrphanError). It touches nothing the import did
+// not record.
 type Confirm interface {
 	Confirm(ctx context.Context, in ConfirmInput) (ConfirmOutput, error)
 }
@@ -151,15 +208,17 @@ type ConfirmInput struct {
 // month against what the export says.
 type ConfirmOutput struct {
 	Month string
+	// Warnings are what is odd in the mapping, which the plan tells too.
+	Warnings []model.Warning
 	// Confirmed is how many transactions were confirmed, and AlreadyConfirmed how many
 	// units of the month were confirmed before.
 	Confirmed        int
 	AlreadyConfirmed int
 	// Adjustments says what became of each balance adjustment of the month.
 	Adjustments []AdjustmentResult
-	// Orphans are drafts of the import that the export does not have any more, which
-	// Confirm leaves alone.
-	Orphans int
+	// Orphans are drafts of the import that no unit of the plan accounts for any more,
+	// which Confirm leaves alone (apply discards them).
+	Orphans []Orphan
 	Check   model.MonthCheck
 }
 
@@ -198,7 +257,9 @@ type VerifyInput struct {
 
 // VerifyOutput is the comparison for every month confirmed so far.
 type VerifyOutput struct {
-	Months []model.MonthCheck
+	// Warnings are what is odd in the mapping, which the plan tells too.
+	Warnings []model.Warning
+	Months   []model.MonthCheck
 	// Open is the first month that is not confirmed yet, or empty.
 	Open string
 	// Unexplained is how many differences that nothing explains there are in all.
@@ -206,6 +267,9 @@ type VerifyOutput struct {
 	// Stale are the units of the months confirmed so far, and of the month that is
 	// open, whose confirmed version is not what the plan says now.
 	Stale []StaleUnit
+	// Orphans are the transactions of the import that no unit of the plan accounts for
+	// any more, drafts and confirmed ones: a confirmed one counts toward the balances.
+	Orphans []Orphan
 }
 
 // Status counts, for each month of the export, what the import has done.
@@ -220,9 +284,12 @@ type StatusInput struct {
 
 // StatusOutput is the state of the import by month.
 type StatusOutput struct {
-	Months []MonthStatus
-	// Orphans are drafts of the import that the export does not have any more.
-	Orphans int
+	// Warnings are what is odd in the mapping, which the plan tells too.
+	Warnings []model.Warning
+	Months   []MonthStatus
+	// Orphans are the transactions of the import that no unit of the plan accounts for
+	// any more, drafts and confirmed ones.
+	Orphans []Orphan
 }
 
 // MonthStatus counts units, which are one or two transactions or a whole plan, and
@@ -312,6 +379,25 @@ func (e *StaleError) Error() string {
 
 // Is tells ErrStale.
 func (e *StaleError) Is(target error) bool { return target == ErrStale }
+
+// ErrOrphan is what confirming a month is refused with while the ledger has a
+// confirmed transaction of the import that no unit of the plan accounts for.
+var ErrOrphan = errors.New("a confirmed transaction of the import has no unit in the plan")
+
+// OrphanError names the confirmed transactions that no unit of the plan accounts for,
+// which count toward the balances until the user voids them.
+type OrphanError struct {
+	// Month is the month that was asked for.
+	Month   string
+	Orphans []Orphan
+}
+
+func (e *OrphanError) Error() string {
+	return fmt.Sprintf("%v: %d transactions; void them, then run apply and confirm again", ErrOrphan, len(e.Orphans))
+}
+
+// Is tells ErrOrphan.
+func (e *OrphanError) Is(target error) bool { return target == ErrOrphan }
 
 // ErrUnknownMonth is returned for a month that the export has nothing in.
 var ErrUnknownMonth = errors.New("the export has nothing in that month")

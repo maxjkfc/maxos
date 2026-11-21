@@ -278,8 +278,10 @@ func TestApplyDoesNotTakeAnAccountThatIsAnotherKindThanTheMappingSays(t *testing
 	w := newWorld(t, fixture(), fixtureMapping()).reviewed()
 	w.ledger.accounts = append(w.ledger.accounts, finance.Account{ID: w.ledger.id(), Name: "Cash", Kind: "bank"})
 	_, err := w.imp.Apply(context.Background(), usecase.ApplyInput{Files: w.files})
-	if err == nil || !strings.Contains(err.Error(), `account "Cash"`) {
-		t.Fatalf("err = %v, want the conflict of the account to be named", err)
+	var conflict *model.Failure
+	if !errors.As(err, &conflict) || conflict.Code != model.FailureAccountKindDiffers ||
+		!reflect.DeepEqual(conflict.Args, []string{"Cash", "bank", "cash"}) {
+		t.Fatalf("err = %v, want the conflict of the account Cash: a bank in the ledger, a cash in the mapping", err)
 	}
 	if len(w.ledger.txns) != 0 {
 		t.Errorf("transactions = %d, want none: nothing is recorded on a conflict", len(w.ledger.txns))

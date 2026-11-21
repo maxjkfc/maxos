@@ -7,6 +7,7 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -77,15 +78,35 @@ func loadText(t *testing.T, text string) mapping.Loaded {
 	return load(t, writeFile(t, t.TempDir(), "mapping.yaml", text))
 }
 
-// loadFails loads a mapping file that must be refused, and returns what it says.
-func loadFails(t *testing.T, text string) string {
+// loadFails loads a mapping file that must be refused, and returns the failure it is,
+// which is about the file.
+func loadFails(t *testing.T, text string) *model.Failure {
 	t.Helper()
 	path := writeFile(t, t.TempDir(), "mapping.yaml", text)
 	loaded, err := file.NewMappingYAML().Load(context.Background(), path)
 	if err == nil {
 		t.Fatalf("Load read %v from text that is wrong:\n%s", canon(loaded.Mapping), text)
 	}
-	return err.Error()
+	f := failureOf(t, err)
+	wantFile(t, f, path)
+	return f
+}
+
+// The keys that a failure lists as the ones that are known, where a key is not.
+var (
+	sectionKeys    = []string{"instruments", "accounts", "projects", "categories", "parties", "tags", "defaults", "rows"}
+	instrumentKeys = []string{"name", "kind", "is_currency", "decimals", "rate_as"}
+	accountKeys    = []string{"name", "kind", "institution", "closing_day", "payment_due_day", "opening_date"}
+	projectKeys    = []string{"kind", "name", "default_area", "party", "active_period"}
+	categoryKeys   = []string{"category", "treatment", "party", "tag"}
+	defaultsKeys   = []string{"fee_category", "interest_category", "refund_category"}
+	rowKeys        = []string{"treatment", "category", "party", "tag", "quantity"}
+)
+
+// unknownKey is what the failure for a key that is not known says: the key, where it
+// is, and the keys that are known there.
+func unknownKey(key, where string, known []string) []string {
+	return append([]string{key, where}, known...)
 }
 
 // fullMapping has every section and every key.
@@ -227,88 +248,209 @@ func TestLoadOfAFileThatIsNotThere(t *testing.T) {
 	}
 }
 
-func TestLoadCountsTheLinesMarkedGuessed(t *testing.T) {
-	loaded := loadText(t, `# guessed entries are marked, like this: the line of this comment says so too
+// Only the mark that ends an entry counts as one of the entries the import guessed and
+// the user has not looked at yet: the comment after its value, or after its key when
+// the entry goes on below. A comment of a section or of a line of its own does not
+// count, nor does the text of a value, nor a comment that merely has the words. The
+// comment is the mark when it begins with "# guessed" as a word: "# guessed" and
+// "# guessed: not sure", not "# guessedly" or "#guessed".
+func TestLoadCountsTheEntriesMarkedGuessed(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want int
+	}{
+		{"the way Append writes an entry", "accounts:\n  A: {name: A, kind: cash}  # guessed\n  B: {name: B, kind: cash}  # guessed\n", 2},
+		{"a value that is a text", "parties:\n  A: Name  # guessed\n  \"B\": \"Name\"  # guessed\n", 2},
+		{"the key of an entry that goes on below", "projects:\n  A:  # guessed\n    kind: project\n    name: A\n", 1},
+		{"an entry with no value", "tags:\n  t:  # guessed\n  u:\n", 1},
+		{"words after the mark", "accounts:\n  A: {name: A}  # guessed: not sure\n  B: {name: B}  # guessed, check it\n  C: {name: C}  # guessed\n", 3},
+		{"an entry of several lines in braces", "accounts:\n  A: {name: A,\n    kind: cash}  # guessed\n", 1},
+		{"an entry of a section in braces", "parties: {\n  Zed: Zed,  # guessed\n  Amy: Amy\n}\n", 1},
+		{"an entry of every section", `instruments:
+  USD: {name: x, kind: fiat, is_currency: true, decimals: 2}  # guessed
 accounts:
   A: {name: A, kind: cash}  # guessed
-  B: {name: B, kind: cash}  # guessed: not sure about it
-  C: {name: C, kind: cash}  # reviewed
-  D: {name: D, kind: cash}  #guessed
+projects:
+  P: {kind: area, name: P}  # guessed
+categories:
+  expense:
+    Food/Lunch: Food/Lunch  # guessed
+  income:
+    X: Y  # guessed
 parties:
   Zed: Zed  # guessed
-`)
-	// The comment at the top, A, B and Zed; not C, which is reviewed, and not D, whose
-	// mark is not the one the import writes.
-	if loaded.Guessed != 4 {
-		t.Errorf("Guessed = %d, want 4", loaded.Guessed)
+tags:
+  t: T  # guessed
+defaults:
+  fee_category: Fee  # guessed
+rows:
+  r1: {treatment: skip}  # guessed
+`, 9},
+
+		{"a comment of a line of its own", "# guessed\naccounts:\n  # guessed\n  A: {name: A}\n  # guessed\nparties:\n  Zed: Zed\n# guessed\n", 0},
+		{"the comment of a section", "accounts:  # guessed\n  A: {name: A}\nparties:  # guessed\ntags: {t: T}  # guessed\ncategories:  # guessed\n  expense:  # guessed\n    X: Y\n", 0},
+		{"the start of the document", "--- # guessed\naccounts:\n  A: {name: A}\n", 0},
+		{"text in a value", "parties:\n  A: \"contains # guessed\"\n  B: 'and # guessed'\n  C: |\n    text # guessed\n    # guessed\n  D: x\n", 0},
+		{"a comment that has the words and is not the mark", "parties:\n  A: x  # guessedly\n  B: x  #guessed\n  C: x  # I guessed this\n  D: x  # not guessed\n  E: x  # Guessed\n  F: x  # guess\n  G: x  # guessed2\n", 0},
+		{"a comment inside an entry, not at its end", "accounts:\n  A:\n    name: A  # guessed\n    kind: cash\n  B: {name: B, # guessed\n    kind: cash}\n", 0},
 	}
-	if len(loaded.Mapping.Accounts) != 4 {
-		t.Errorf("Accounts = %d, want the marks to be comments and nothing else", len(loaded.Mapping.Accounts))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := loadText(t, tt.text).Guessed; got != tt.want {
+				t.Errorf("Guessed = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 
 func TestLoadRefusesWhatIsWrong(t *testing.T) {
 	tests := []struct {
-		name    string
-		text    string
-		wantErr []string
+		name     string
+		text     string
+		wantCode model.FailureCode
+		wantLine int
+		wantArgs []string
 	}{
-		{"an unknown section", "accounts:\n  A: {name: A}\naccountz:\n  B: {name: B}\n", []string{"line 3", `"accountz"`}},
-		{"an unknown key of an account", "accounts:\n  A: {name: A, kindd: card}\n", []string{"line 2", `"kindd"`, "an account"}},
-		{"an unknown key of a category", "categories:\n  expense:\n    X: {category: Y, colour: red}\n", []string{"line 3", `"colour"`}},
-		{"an unknown section of categories", "categories:\n  savings: {}\n", []string{"line 2", `"savings"`}},
-		{"an unknown default", "defaults:\n  tax_category: Tax\n", []string{"line 2", `"tax_category"`}},
-		{"an unknown key of a row", "rows:\n  a: {note: x}\n", []string{"line 2", `"note"`}},
-		{"decimals that is not a number", "instruments:\n  USD: {name: x, kind: fiat, decimals: abc}\n", []string{"line 2", "decimals", `"abc"`}},
-		{"a day of the month that is not a number", "accounts:\n  A: {name: A, closing_day: five}\n", []string{"line 2", "closing_day", `"five"`}},
-		{"an opening date that is not a day", "accounts:\n  A: {name: A, opening_date: yesterday}\n", []string{"line 2", "opening_date", `"yesterday"`, "is not a day"}},
-		{"an opening date that is not a date of the calendar", "accounts:\n  A: {name: A, opening_date: 2025-13-01}\n", []string{"line 2", "opening_date", `"2025-13-01"`, "is not a day"}},
-		{"an opening date with a time of day", "accounts:\n  A: {name: A, opening_date: 2025-01-07T10:00:00Z}\n", []string{"line 2", "opening_date", `"2025-01-07T10:00:00Z"`, "is not a day"}},
-		{"an opening date that is a list", "accounts:\n  A: {name: A, opening_date: [2025, 1, 7]}\n", []string{"line 2", "opening_date", "single value"}},
-		{"is_currency that is not true or false", "instruments:\n  USD: {name: x, kind: fiat, is_currency: maybe}\n", []string{"line 2", "is_currency", `"maybe"`}},
-		{"a quantity that is not a number", "rows:\n  a: {quantity: lots}\n", []string{"line 2", "quantity", `"lots"`}},
-		{"a key twice", "accounts:\n  A: {name: A}\n  B: {name: B}\n  A: {name: C}\n", []string{"line 4", "twice", "line 2"}},
-		{"a section twice", "accounts: {}\nparties: {}\naccounts: {}\n", []string{"line 3", "twice", "line 1"}},
-		{"a key of an entry twice", "accounts:\n  A: {name: A, name: B}\n", []string{"line 2", "twice"}},
-		{"a section that is a list", "accounts: [a, b]\n", []string{"line 1", "accounts", "mapping"}},
-		{"an entry that is a text", "accounts:\n  A: card\n", []string{"line 2", "an account", "mapping"}},
-		{"a name that is a mapping", "parties:\n  Zed: {a: b}\n", []string{"line 2", "Zed"}},
-		{"a file that is a list", "- a\n- b\n", []string{"line 1", "mapping"}},
-		{"a file that is a text", "hello\n", []string{"line 1", "mapping"}},
-		{"a syntax error", "accounts: [a\nparties: {}\n", []string{"line"}},
-		{"two documents", "accounts: {}\n---\nparties: {}\n", []string{"line 3", "second"}},
+		{"an unknown section", "accounts:\n  A: {name: A}\naccountz:\n  B: {name: B}\n", model.FailureKeyUnknown, 3, unknownKey("accountz", "", sectionKeys)},
+		{"an unknown key of an account", "accounts:\n  A: {name: A, kindd: card}\n", model.FailureKeyUnknown, 2, unknownKey("kindd", "accounts.A", accountKeys)},
+		{"an unknown key of an instrument", "instruments:\n  USD: {name: x, rate: 31}\n", model.FailureKeyUnknown, 2, unknownKey("rate", "instruments.USD", instrumentKeys)},
+		{"an unknown key of a project", "projects:\n  P: {kind: area, colour: red}\n", model.FailureKeyUnknown, 2, unknownKey("colour", "projects.P", projectKeys)},
+		{"an unknown key of a category", "categories:\n  expense:\n    X: {category: Y, colour: red}\n", model.FailureKeyUnknown, 3, unknownKey("colour", "categories.expense.X", categoryKeys)},
+		{"an unknown section of categories", "categories:\n  savings: {}\n", model.FailureKeyUnknown, 2, unknownKey("savings", "categories", []string{"expense", "income"})},
+		{"an unknown default", "defaults:\n  tax_category: Tax\n", model.FailureKeyUnknown, 2, unknownKey("tax_category", "defaults", defaultsKeys)},
+		{"an unknown key of a row", "rows:\n  a: {note: x}\n", model.FailureKeyUnknown, 2, unknownKey("note", "rows.a", rowKeys)},
+		{"decimals that is not a number", "instruments:\n  USD: {name: x, kind: fiat, decimals: abc}\n", model.FailureNotWholeNumber, 2, []string{"decimals", "abc"}},
+		{"a day of the month that is not a number", "accounts:\n  A: {name: A, closing_day: five}\n", model.FailureNotWholeNumber, 2, []string{"closing_day", "five"}},
+		{"an opening date that is not a day", "accounts:\n  A: {name: A, opening_date: yesterday}\n", model.FailureNotDay, 2, []string{"opening_date", "yesterday", "2026-04-15"}},
+		{"an opening date that is not a date of the calendar", "accounts:\n  A: {name: A, opening_date: 2025-13-01}\n", model.FailureNotDay, 2, []string{"opening_date", "2025-13-01", "2026-04-15"}},
+		{"an opening date with a time of day", "accounts:\n  A: {name: A, opening_date: 2025-01-07T10:00:00Z}\n", model.FailureNotDay, 2, []string{"opening_date", "2025-01-07T10:00:00Z", "2026-04-15"}},
+		{"an opening date that is a list", "accounts:\n  A: {name: A, opening_date: [2025, 1, 7]}\n", model.FailureValueNotSingle, 2, []string{"opening_date"}},
+		{"is_currency that is not true or false", "instruments:\n  USD: {name: x, kind: fiat, is_currency: maybe}\n", model.FailureNotBoolean, 2, []string{"is_currency", "maybe"}},
+		{"a quantity that is not a number", "rows:\n  a: {quantity: lots}\n", model.FailureNotNumber, 2, []string{"quantity", "lots"}},
+		{"a key twice", "accounts:\n  A: {name: A}\n  B: {name: B}\n  A: {name: C}\n", model.FailureKeyTwice, 4, []string{"accounts", "A", "2"}},
+		{"a section twice", "accounts: {}\nparties: {}\naccounts: {}\n", model.FailureKeyTwice, 3, []string{"", "accounts", "1"}},
+		{"a key of an entry twice", "accounts:\n  A: {name: A, name: B}\n", model.FailureKeyTwice, 2, []string{"accounts.A", "name", "2"}},
+		{"an expense section twice", "categories:\n  expense: {}\n  expense: {}\n", model.FailureKeyTwice, 3, []string{"categories", "expense", "2"}},
+		{"a section that is a list", "accounts: [a, b]\n", model.FailureMustBeMapping, 1, []string{"accounts"}},
+		{"categories that is a text", "categories: x\n", model.FailureMustBeMapping, 1, []string{"categories"}},
+		{"an expense section that is a list", "categories:\n  expense: [x]\n", model.FailureMustBeMapping, 2, []string{"categories.expense"}},
+		{"defaults that is a text", "defaults: x\n", model.FailureMustBeMapping, 1, []string{"defaults"}},
+		{"an entry that is a text", "accounts:\n  A: card\n", model.FailureMustBeMapping, 2, []string{"accounts.A"}},
+		{"a name that is a mapping", "parties:\n  Zed: {a: b}\n", model.FailureValueNotSingle, 2, []string{"Zed"}},
+		{"a name that is not one value", "accounts:\n  ? [a, b]\n  : {name: x}\n", model.FailureKeyNotSingle, 2, []string{"accounts"}},
+		{"a file that is a list", "- a\n- b\n", model.FailureNotSections, 1, nil},
+		{"a file that is a text", "hello\n", model.FailureNotSections, 1, nil},
+		{"a syntax error", "accounts: [a\nparties: {}\n", model.FailureYAMLSyntax, 1, nil},
+		{"a syntax error that the library gives no line for", "parties:\n  A: \x01\n", model.FailureYAMLSyntax, 0, nil},
+		{"two documents", "accounts: {}\n---\nparties: {}\n", model.FailureSecondDocument, 3, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mustSay(t, loadFails(t, tt.text), tt.wantErr...)
+			wantFailure(t, loadFails(t, tt.text), tt.wantCode, tt.wantLine, tt.wantArgs...)
 		})
 	}
 }
 
-func TestLoadErrorNamesTheFile(t *testing.T) {
+func TestLoadFailureNamesTheFile(t *testing.T) {
 	path := writeFile(t, t.TempDir(), "mapping.yaml", "accounts:\n  A: {kindd: x}\n")
 	_, err := file.NewMappingYAML().Load(context.Background(), path)
 	if err == nil {
 		t.Fatal("Load read a file with a key that is not known")
 	}
-	mustSay(t, err.Error(), path, "line 2")
+	f := failureOf(t, err)
+	wantFailure(t, f, model.FailureKeyUnknown, 2, unknownKey("kindd", "accounts.A", accountKeys)...)
+	wantFile(t, f, path)
 }
 
-// A project has no active period: the import never sets one, since the ledger puts
-// every transaction that has no project of its own into the project that is active
-// on its day. A file that still has the key is refused like any key that is not known.
-func TestLoadRefusesAnActivePeriod(t *testing.T) {
+func TestLoadOfAFileThatCannotBeRead(t *testing.T) {
+	dir := t.TempDir() // a folder is there, and it is not a mapping
+	_, err := file.NewMappingYAML().Load(context.Background(), dir)
+	if err == nil {
+		t.Fatal("Load of a folder gave no error")
+	}
+	f := failureOf(t, err)
+	wantFailure(t, f, model.FailureFileUnreadable, 0)
+	wantFile(t, f, dir)
+	if f.Err == nil {
+		t.Error("the failure has no Err: the user is told the reason of the system as it is")
+	}
+}
+
+// warnActivePeriod is the warning for the active_period of the project of the key, on
+// the line.
+func warnActivePeriod(project string, line int) model.Warning {
+	return model.Warning{Code: model.WarningActivePeriodIgnored, Subject: "projects." + project, Args: []string{strconv.Itoa(line)}}
+}
+
+// A mapping that an earlier version of the import wrote has an active period on some
+// of its projects. The import no longer sets one, since the ledger puts every
+// transaction that has no project of its own into the project that is active on its
+// day, but the key is still read and ignored: the project loads without a period, and
+// a warning says which project and what line, once for each, in the order of the file.
+func TestLoadIgnoresAnActivePeriod(t *testing.T) {
 	tests := []struct {
-		name, text, wantLine string
+		name     string
+		text     string
+		projects int
+		warnings []model.Warning
+		guessed  int
 	}{
-		{"in flow style", "projects:\n  Trip: {kind: project, name: Trip, active_period: {from: 2026-04-15, to: 2026-04-22}}\n", "line 2"},
-		{"in block style", "projects:\n  Trip:\n    kind: project\n    name: Trip\n    active_period:\n      from: 2026-04-15\n      to: 2026-04-22\n", "line 5"},
+		{
+			"in flow style, as the first version wrote it, with the mark of a guess",
+			"projects:\n  Trip: {kind: project, name: Trip, default_area: Daily, active_period: {from: 2026-03-08, to: 2026-03-17}}  # guessed\n",
+			1, []model.Warning{warnActivePeriod("Trip", 2)}, 1,
+		},
+		{
+			"in block style",
+			"projects:\n  Trip:\n    kind: project\n    name: Trip\n    active_period:\n      from: 2026-03-08\n      to: 2026-03-17\n",
+			1, []model.Warning{warnActivePeriod("Trip", 5)}, 0,
+		},
+		{
+			"whatever it says",
+			"projects:\n  A: {kind: project, name: A, active_period: later}\n  B: {kind: project, name: B, active_period: [2026-03-08, 2026-03-17]}\n" +
+				"  C: {kind: project, name: C, active_period: {from: nonsense}}\n  D: {kind: project, name: D, active_period: ~}\n" +
+				"  E:\n    kind: project\n    active_period:\n",
+			5, []model.Warning{
+				warnActivePeriod("A", 2), warnActivePeriod("B", 3), warnActivePeriod("C", 4), warnActivePeriod("D", 5), warnActivePeriod("E", 8),
+			}, 0,
+		},
+		{
+			"several, with a mark on two of them, and the lines are the lines of the keys",
+			"projects:\n  A: {kind: area, name: A}\n" +
+				"  B: {kind: project, name: B, active_period: {from: 2026-03-08, to: 2026-03-17}}  # guessed\n" +
+				"  # a comment\n  C:\n    kind: project\n    active_period:\n      from: 2026-04-01\n      to: 2026-04-02\n" +
+				"  \"2025 Trip\": {kind: project, name: T, active_period: {from: 2026-05-01, to: 2026-05-02}}  # guessed\n",
+			4, []model.Warning{warnActivePeriod("B", 3), warnActivePeriod("C", 7), warnActivePeriod("2025 Trip", 10)}, 2,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mustSay(t, loadFails(t, tt.text), tt.wantLine, `unknown key "active_period"`)
+			dir := t.TempDir()
+			path := writeFile(t, dir, "mapping.yaml", tt.text)
+			old := setOld(t, path)
+			loaded := load(t, path)
+			if len(loaded.Mapping.Projects) != tt.projects {
+				t.Errorf("%d projects, want %d", len(loaded.Mapping.Projects), tt.projects)
+			}
+			if !slices.EqualFunc(loaded.Warnings, tt.warnings, func(a, b model.Warning) bool {
+				return a.Code == b.Code && a.Subject == b.Subject && slices.Equal(a.Args, b.Args)
+			}) {
+				t.Errorf("Warnings = %+v, want %+v", loaded.Warnings, tt.warnings)
+			}
+			if loaded.Guessed != tt.guessed {
+				t.Errorf("Guessed = %d, want %d", loaded.Guessed, tt.guessed)
+			}
+			wantUntouched(t, path, tt.text, old) // Load writes nothing
 		})
 	}
+}
+
+// The period is only ignored where a version of the import wrote it: on a project. On
+// anything else it is a key that is not known, like any other.
+func TestLoadStillRefusesAnActivePeriodElsewhere(t *testing.T) {
+	f := loadFails(t, "accounts:\n  A: {name: A, active_period: {from: 2026-03-08, to: 2026-03-17}}\n")
+	wantFailure(t, f, model.FailureKeyUnknown, 2, unknownKey("active_period", "accounts.A", accountKeys)...)
 }
 
 // What a mapping may be is for the mapping to say (model.Mapping.Validate), not for

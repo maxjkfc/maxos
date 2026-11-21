@@ -11,7 +11,9 @@ import (
 // the user's say), and the balance adjustments of it are made; the months are
 // looked at in order, up to the first that is not: one that has a draft, a unit not
 // recorded yet, or a unit whose confirmed version is not what the plan says now, which
-// Verify reports.
+// Verify reports. It names the transactions of the import that no unit of the plan
+// accounts for as well: a confirmed one counts toward the balances, and is what the
+// differences of a month can come of.
 func (a *Importer) Verify(ctx context.Context, in usecase.VerifyInput) (usecase.VerifyOutput, error) {
 	var out usecase.VerifyOutput
 	ld, err := a.inputs.load(ctx, in.Files)
@@ -19,6 +21,7 @@ func (a *Importer) Verify(ctx context.Context, in usecase.VerifyInput) (usecase.
 		return out, err
 	}
 	plan := ld.plan
+	out.Warnings = plan.Warnings
 	if plan.Blocked() {
 		return out, &usecase.BlockedError{Plan: plan}
 	}
@@ -26,6 +29,7 @@ func (a *Importer) Verify(ctx context.Context, in usecase.VerifyInput) (usecase.
 	if err != nil {
 		return out, err
 	}
+	out.Orphans = st.orphanViews()
 
 	for _, m := range plan.Months() {
 		stale := st.staleUnits(plan, m)

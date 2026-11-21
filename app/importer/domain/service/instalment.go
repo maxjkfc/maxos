@@ -220,7 +220,7 @@ func (b *builder) addInstalment(g instalmentGroup, account string) {
 	j := b.join(rows...)
 	u := model.Unit{
 		Kind:        model.KindBillInstalment,
-		ID:          "plan-" + keys[0],
+		ID:          model.PlanIDPrefix + keys[0],
 		Rows:        keys,
 		Date:        first.Date,
 		Clock:       first.Clock,
@@ -230,6 +230,7 @@ func (b *builder) addInstalment(g instalmentGroup, account string) {
 		Area:        j.area,
 		Project:     j.project,
 		Tags:        j.tags,
+		Notes:       j.notes,
 		Main:        model.Leg{Account: account, Instrument: first.Currency, Amount: g.net},
 	}
 	for _, r := range g.origin {
@@ -257,7 +258,7 @@ func (b *builder) addInstalment(g instalmentGroup, account string) {
 // instalmentDescription is what the rows of a plan say of themselves: the name and
 // the description of each, in the order of the rows, every text once; then what the
 // plan has no place for, and the category the conversion had.
-func instalmentDescription(rows []model.Row, notes []string) string {
+func instalmentDescription(rows []model.Row, notes []model.Note) string {
 	var lines []string
 	for _, r := range rows {
 		for _, text := range []string{r.Name, r.Description} {
@@ -266,7 +267,7 @@ func instalmentDescription(rows []model.Row, notes []string) string {
 			}
 		}
 	}
-	lines = append(lines, notes...)
+	lines = append(lines, noteLines(notes)...)
 	lines = append(lines, categoryNote(rows[0]))
 	return joinNonEmpty("\n", lines...)
 }

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/in/usecase"
 )
@@ -18,6 +20,30 @@ var createdText = []struct{ key, name string }{
 	{usecase.CreatedTags, "標籤"}, {usecase.CreatedParties, "對象"},
 }
 
+// ledgerKindText names the kinds of transaction of the ledger, as the glossary does.
+var ledgerKindText = map[string]string{
+	"expense":        "支出",
+	"income":         "收入",
+	"transfer":       "轉帳",
+	"exchange":       "換匯",
+	"trade":          "買賣",
+	"reward":         "回饋",
+	"dealing":        "往來增減",
+	"instalment":     "分期",
+	"reconciliation": "對帳",
+	"opening":        "期初餘額",
+}
+
+// RenderWarnings says what is odd in the mapping, one line each. A command says it
+// before anything else, whatever the command goes on to do.
+func RenderWarnings(w io.Writer, warnings []model.Warning) error {
+	var b strings.Builder
+	for _, warning := range warnings {
+		fmt.Fprintf(&b, "注意：%s\n", warningText(warning))
+	}
+	return flush(w, &b)
+}
+
 // RenderApply says what apply did.
 func RenderApply(w io.Writer, out usecase.ApplyOutput) error {
 	var b strings.Builder
@@ -26,6 +52,9 @@ func RenderApply(w io.Writer, out usecase.ApplyOutput) error {
 }
 
 func applyText(w *strings.Builder, out usecase.ApplyOutput) {
+	for _, warning := range out.Warnings {
+		fmt.Fprintf(w, "注意：%s\n", warningText(warning))
+	}
 	var made []string
 	for _, c := range createdText {
 		if n := out.Created[c.key]; n > 0 {
@@ -38,20 +67,42 @@ func applyText(w *strings.Builder, out usecase.ApplyOutput) {
 		fmt.Fprintf(w, "參考資料：新增 %s\n", strings.Join(made, "、"))
 	}
 
-	newTotal, updatedTotal, dupTotal := sum(out.New), sum(out.Updated), sum(out.Duplicate)
-	fmt.Fprintf(w, "草稿：新增 %d 筆，已更新 %d 筆，已存在 %d 筆，失敗 %d 筆\n", newTotal, updatedTotal, dupTotal, len(out.Failed))
+	newTotal, updatedTotal, revivedTotal, dupTotal := sum(out.New), sum(out.Updated), sum(out.Revived), sum(out.Duplicate)
+	fmt.Fprintf(w, "草稿：新增 %d 筆，已更新 %d 筆，", newTotal, updatedTotal)
+	if revivedTotal > 0 {
+		fmt.Fprintf(w, "已重新記錄（先前的版本已作廢）%d 筆，", revivedTotal)
+	}
+	fmt.Fprintf(w, "已存在 %d 筆，失敗 %d 筆\n", dupTotal, len(out.Failed))
 	if newTotal > 0 {
 		fmt.Fprintf(w, "  新增的：%s\n", kinds(out.New))
 	}
 	if updatedTotal > 0 {
 		fmt.Fprintf(w, "  已更新的（對照改了，原來的草稿已捨棄、依新的對照重記）：%s\n", kinds(out.Updated))
 	}
+	if revivedTotal > 0 {
+		fmt.Fprintf(w, "  已重新記錄的（對照改回先前的樣子，先前的版本已作廢，所以用新的鍵重記）：%s\n", kinds(out.Revived))
+	}
 	if len(out.Stale) > 0 {
 		fmt.Fprintf(w, "已確認的內容與對照不同 %d 筆；不會動它們，也不會在旁邊再記一筆：\n", len(out.Stale))
 		for _, s := range out.Stale {
-			writeStale(w, s)
+			writeUnit(w, s.Unit, s.Lines)
 		}
 		fmt.Fprintln(w, "  把它們作廢之後再執行一次 apply，會依現在的對照重記成草稿。")
+	}
+	if len(out.Voided) > 0 {
+		fmt.Fprintf(w, "這個版本已作廢 %d 筆；匯入不會再把它們記回去：\n", len(out.Voided))
+		for _, v := range out.Voided {
+			writeUnit(w, v.Unit, v.Lines)
+		}
+	}
+	if len(out.Removed) > 0 {
+		fmt.Fprintf(w, "已移除 %d 筆匯入的草稿（匯出裡已經沒有對應的列）：\n", len(out.Removed))
+		writeOrphans(w, out.Removed)
+	}
+	if len(out.Orphans) > 0 {
+		fmt.Fprintf(w, "匯出裡沒有對應的列、但已確認的交易 %d 筆（列被改過、刪掉，或現在被略過）；不會動它們：\n", len(out.Orphans))
+		writeOrphans(w, out.Orphans)
+		fmt.Fprintln(w, "  把它們作廢，再執行 apply 與 confirm。")
 	}
 	for _, d := range out.ProjectDifferences {
 		fmt.Fprintf(w, "注意：專案「%s」在帳本的預設領域是「%s」，對照檔寫的是「%s」；匯入沿用帳本的，沒有改\n",
@@ -64,8 +115,35 @@ func applyText(w *strings.Builder, out usecase.ApplyOutput) {
 	}
 }
 
-func writeStale(w *strings.Builder, s usecase.StaleUnit) {
-	fmt.Fprintf(w, "  %s %s（檔案第 %s 行）%s\n", kindText[s.Unit.Kind], s.Unit.Date.Format(time.DateOnly), lineList(s.Lines), clip(s.Unit.Description, 24))
+// writeUnit says a unit by its kind, its day, the lines of the export it is made of and
+// the start of its description.
+func writeUnit(w *strings.Builder, u model.Unit, lines []int) {
+	fmt.Fprintf(w, "  %s %s（檔案第 %s 行）%s\n", kindText[u.Kind], u.Date.Format(time.DateOnly), lineList(lines), clip(u.Description, 24))
+}
+
+// writeOrphans says transactions of the import by their day, their kind, the first
+// account they move and how much, and the key they were recorded under, which is what
+// the user finds them by.
+func writeOrphans(w *strings.Builder, orphans []usecase.Orphan) {
+	for _, o := range orphans {
+		kind := ledgerKindText[o.Kind]
+		if kind == "" {
+			kind = o.Kind
+		}
+		fmt.Fprintf(w, "  %s %s %s %s %s", o.Date.Format(time.DateOnly), kind, o.Account, o.Instrument, signedQuantity(o.Amount))
+		if o.Description != "" {
+			fmt.Fprintf(w, "「%s」", clip(o.Description, 24))
+		}
+		fmt.Fprintf(w, "\n    鍵：%s\n", o.Key)
+	}
+}
+
+// signedQuantity writes a quantity with the sign of what it is not negative.
+func signedQuantity(q decimal.Decimal) string {
+	if q.IsPositive() {
+		return "+" + q.String()
+	}
+	return q.String()
 }
 
 func orNone(area string) string {
@@ -128,6 +206,9 @@ func RenderConfirm(w io.Writer, out usecase.ConfirmOutput) error {
 }
 
 func confirmText(w *strings.Builder, out usecase.ConfirmOutput) {
+	for _, warning := range out.Warnings {
+		fmt.Fprintf(w, "注意：%s\n", warningText(warning))
+	}
 	fmt.Fprintf(w, "%s：確認 %d 筆交易，先前已確認 %d 筆單位\n", out.Month, out.Confirmed, out.AlreadyConfirmed)
 	applied, done, blocked := 0, 0, 0
 	for _, a := range out.Adjustments {
@@ -148,8 +229,9 @@ func confirmText(w *strings.Builder, out usecase.ConfirmOutput) {
 			fmt.Fprintf(w, "  擋下：%s %s %s %s，帳本的回覆：%v\n", a.Adjustment.Date.Format(time.DateOnly), a.Adjustment.Account, a.Adjustment.Instrument, a.Adjustment.Amount, a.Err)
 		}
 	}
-	if out.Orphans > 0 {
-		fmt.Fprintf(w, "注意：有 %d 筆匯入的草稿不在檔案裡了，沒有動它們\n", out.Orphans)
+	if len(out.Orphans) > 0 {
+		fmt.Fprintf(w, "注意：有 %d 筆匯入的草稿，匯出裡已經沒有對應的列，沒有動它們（apply 會移除）：\n", len(out.Orphans))
+		writeOrphans(w, out.Orphans)
 	}
 	fmt.Fprintln(w)
 	checkText(w, out.Check, false)
@@ -199,6 +281,9 @@ func RenderVerify(w io.Writer, out usecase.VerifyOutput) error {
 }
 
 func verifyText(w *strings.Builder, out usecase.VerifyOutput) {
+	for _, warning := range out.Warnings {
+		fmt.Fprintf(w, "注意：%s\n", warningText(warning))
+	}
 	if len(out.Months) == 0 {
 		fmt.Fprintln(w, "還沒有確認完的月份，沒有東西可以比對")
 		if out.Open != "" {
@@ -227,14 +312,21 @@ func verifyText(w *strings.Builder, out usecase.VerifyOutput) {
 	if len(out.Stale) > 0 {
 		fmt.Fprintf(w, "已確認的內容與對照不同 %d 筆（作廢它們，再執行 apply 依現在的對照重記）：\n", len(out.Stale))
 		for _, s := range out.Stale {
-			writeStale(w, s)
+			writeUnit(w, s.Unit, s.Lines)
 		}
+	}
+	if len(out.Orphans) > 0 {
+		fmt.Fprintf(w, "匯出裡沒有對應的列的交易 %d 筆（已確認的會算進餘額，作廢它們；草稿由 apply 移除）：\n", len(out.Orphans))
+		writeOrphans(w, out.Orphans)
 	}
 }
 
 // RenderStatus writes the state of the import by month.
 func RenderStatus(w io.Writer, out usecase.StatusOutput) error {
 	var b strings.Builder
+	for _, warning := range out.Warnings {
+		fmt.Fprintf(&b, "注意：%s\n", warningText(warning))
+	}
 	rows := make([][]string, 0, len(out.Months))
 	for _, m := range out.Months {
 		rows = append(rows, []string{
@@ -243,8 +335,9 @@ func RenderStatus(w io.Writer, out usecase.StatusOutput) error {
 		})
 	}
 	table(&b, []string{"月份", "草稿", "已確認", "略過", "待對帳", "尚未匯入", "已作廢", "已確認但與對照不同"}, rows)
-	if out.Orphans > 0 {
-		fmt.Fprintf(&b, "有 %d 筆匯入的草稿不在檔案裡了\n", out.Orphans)
+	if len(out.Orphans) > 0 {
+		fmt.Fprintf(&b, "匯出裡沒有對應的列的交易 %d 筆（已確認的會算進餘額，作廢它們；草稿由 apply 移除）：\n", len(out.Orphans))
+		writeOrphans(&b, out.Orphans)
 	}
 	return flush(w, &b)
 }
@@ -258,6 +351,7 @@ func Refusal(w io.Writer, err error) error {
 	var blocked *usecase.BlockedError
 	var order *usecase.MonthOrderError
 	var stale *usecase.StaleError
+	var orphan *usecase.OrphanError
 	var b strings.Builder
 	var out error
 	switch {
@@ -274,15 +368,23 @@ func Refusal(w io.Writer, err error) error {
 	case errors.As(err, &stale):
 		fmt.Fprintf(&b, "不能確認 %s：已確認的內容與對照不同 %d 筆：\n", stale.Month, len(stale.Units))
 		for _, s := range stale.Units {
-			writeStale(&b, s)
+			writeUnit(&b, s.Unit, s.Lines)
 		}
 		fmt.Fprintln(&b, "把它們作廢，執行 apply 依現在的對照重記，再確認。")
 		out = fmt.Errorf("有 %d 筆已確認的交易與對照不同，什麼都沒有確認", len(stale.Units))
+	case errors.As(err, &orphan):
+		fmt.Fprintf(&b, "不能確認 %s：匯出裡沒有對應的列、但已確認的交易 %d 筆（列被改過、刪掉，或現在被略過）：\n", orphan.Month, len(orphan.Orphans))
+		writeOrphans(&b, orphan.Orphans)
+		fmt.Fprintln(&b, "把它們作廢，執行 apply 依現在的對照重記，再確認。")
+		out = fmt.Errorf("有 %d 筆已確認的交易在匯出裡找不到對應的列，什麼都沒有確認", len(orphan.Orphans))
 	case errors.Is(err, usecase.ErrUnknownMonth):
 		return errors.New("匯出裡沒有這個月份的資料")
 	case errors.Is(err, usecase.ErrNotApplied):
 		return errors.New("這個月有列還沒有 apply 進帳本，請先執行 apply")
 	default:
+		if text, ok := failureText(err); ok {
+			return errors.New(text)
+		}
 		return err
 	}
 	if werr := flush(w, &b); werr != nil {

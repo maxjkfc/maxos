@@ -88,23 +88,50 @@ type RewardPart struct {
 	Description string
 }
 
+// NoteKind says what a unit has no place for.
+type NoteKind string
+
+// The things a unit can have no place for.
+const (
+	// NoteMerchant is the merchant of a row of the unit, where the unit has the merchant
+	// of another row.
+	NoteMerchant NoteKind = "merchant"
+	// NoteProject is a value of 專案 of a row of the unit that the unit has no place for:
+	// another row's area or project is the unit's, or the 專案 is paid for a party and
+	// the unit is not a dealing with that party.
+	NoteProject NoteKind = "project"
+)
+
+// Note is something that a row of a unit says and that the unit has no single place
+// for. The plan keeps it as a line of the Description.
+//
+// Which notes a unit has is not in its rows alone: whether two rows say different
+// areas or projects is for the mapping to say. So a note is a value of its own, and
+// the Version is made of it, not of the line that the plan writes for it.
+type Note struct {
+	Kind NoteKind
+	// Value is what the row says: the merchant, or the value of 專案.
+	Value string
+}
+
 // Unit is one thing the plan records in the ledger: one transaction, or two for a
 // KindExpenseReward, or a whole instalment plan. It is made of one row of the
 // export, or of the rows that are halves of one transaction, and says it by the names
 // of the mapping, so that it can be recorded once the ledger has what it names.
 //
 // A unit is told from the others by its ID, which comes of the rows it is made of,
-// and from its own earlier versions by its Version, which comes of what the plan says
-// it is: a change of the mapping, of a row override or of the rates is a new version
-// of the same unit, and so another idempotency key (see Key).
+// and from its own earlier versions by its Version, which comes of its inputs: the
+// rows it is made of, and what the mapping, the row overrides and the rates make of
+// them. A change of any of those is a new version of the same unit, and so another
+// idempotency key (see Key and Fingerprint).
 type Unit struct {
 	Kind UnitKind
 	// ID is made of the keys of the rows: the key of the row for a unit of one row,
 	// "<out>+<in>" for the two halves of a transfer, an exchange or a trade, and
 	// "plan-<first row>" for an instalment plan.
 	ID string
-	// Version is the fingerprint of everything else the unit says to the ledger
-	// (Fingerprint); the plan sets it when it is made.
+	// Version is the fingerprint of the unit's inputs (Fingerprint); the plan sets it
+	// when it is made.
 	Version string
 	// Rows are the keys of the rows of the export it is made of.
 	Rows []string
@@ -116,12 +143,19 @@ type Unit struct {
 	// time of day and then the file.
 	Order int
 
+	// Description and Merchant are the text of the transaction: words of the rows the
+	// unit is made of, and the lines the plan writes around them (see Notes). They are
+	// not in the Version, which has the rows whole instead, and FormatVersion for the
+	// wording.
 	Description string
 	Merchant    string
 	// Area and Project are by their names in the ledger, empty for none. Tags too.
 	Area    string
 	Project string
 	Tags    []string
+	// Notes are what the rows of the unit say that it has no single place for, which the
+	// plan also writes as lines of the Description. They are in the Version.
+	Notes []Note
 
 	// Main is what the unit does to the account it is of: the account an expense is
 	// paid from, an income comes into, the account a transfer or an exchange leaves,

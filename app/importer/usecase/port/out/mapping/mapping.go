@@ -15,6 +15,9 @@ type Loaded struct {
 	// Guessed is how many of its entries are still marked "# guessed", which the user
 	// has not looked at yet.
 	Guessed int
+	// Warnings are what is odd in the file and stops nothing: a key that is no longer
+	// used, which is ignored and left in the file.
+	Warnings []model.Warning
 }
 
 // Store keeps the mapping.

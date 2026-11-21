@@ -2,7 +2,6 @@ package moze
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/in/usecase"
@@ -11,37 +10,40 @@ import (
 // Apply makes the reference data the plan uses and records its units, as drafts: what
 // the ledger lacks is recorded, what it has in the version the plan says is left, a
 // draft of an earlier version is discarded and recorded again, and a confirmed
-// earlier version is reported and left alone.
+// earlier version is reported and left alone. A transaction of the import that no
+// unit of the plan accounts for is an orphan: a draft is discarded, a confirmed one is
+// reported.
 func (a *Importer) Apply(ctx context.Context, in usecase.ApplyInput) (usecase.ApplyOutput, error) {
 	ld, err := a.inputs.load(ctx, in.Files)
 	if err != nil {
 		return usecase.ApplyOutput{}, err
 	}
 	plan := ld.plan
+	out := usecase.ApplyOutput{
+		Warnings:    plan.Warnings,
+		New:         map[model.UnitKind]int{},
+		Updated:     map[model.UnitKind]int{},
+		Revived:     map[model.UnitKind]int{},
+		Duplicate:   map[model.UnitKind]int{},
+		Adjustments: len(plan.Adjustments),
+		NoOps:       len(plan.NoOps),
+	}
 	// What the ledger is made of, its accounts and instruments, cannot be changed
 	// afterwards, so a guess that the user has not looked at is not recorded from.
 	if plan.Blocked() || ld.mapping.Guessed > 0 {
-		return usecase.ApplyOutput{}, &usecase.BlockedError{Plan: plan, Guessed: ld.mapping.Guessed}
+		return out, &usecase.BlockedError{Plan: plan, Guessed: ld.mapping.Guessed}
 	}
 
 	r, made, err := a.ensure(ctx, plan)
 	if err != nil {
-		return usecase.ApplyOutput{}, fmt.Errorf("make the reference data: %w", err)
+		return out, err
 	}
+	out.Created, out.ProjectDifferences = made.created, made.projectDifferences
 	st, err := a.readState(ctx, plan)
 	if err != nil {
-		return usecase.ApplyOutput{}, err
+		return out, err
 	}
 
-	out := usecase.ApplyOutput{
-		Created:            made.created,
-		ProjectDifferences: made.projectDifferences,
-		New:                map[model.UnitKind]int{},
-		Updated:            map[model.UnitKind]int{},
-		Duplicate:          map[model.UnitKind]int{},
-		Adjustments:        len(plan.Adjustments),
-		NoOps:              len(plan.NoOps),
-	}
 	for _, s := range plan.Skipped {
 		out.Skipped += len(s.Rows)
 	}
@@ -55,6 +57,10 @@ func (a *Importer) Apply(ctx context.Context, in usecase.ApplyInput) (usecase.Ap
 			out.Failed = append(out.Failed, usecase.Failure{Unit: u, Lines: linesOf(plan, u), Err: err})
 		case res == resultStale:
 			out.Stale = append(out.Stale, usecase.StaleUnit{Unit: u, Lines: linesOf(plan, u)})
+		case res == resultVoided:
+			out.Voided = append(out.Voided, usecase.VoidedUnit{Unit: u, Lines: linesOf(plan, u)})
+		case res == resultRevived:
+			out.Revived[u.Kind]++
 		case res == resultUpdated:
 			out.Updated[u.Kind]++
 		case res == resultDuplicate:
@@ -62,6 +68,21 @@ func (a *Importer) Apply(ctx context.Context, in usecase.ApplyInput) (usecase.Ap
 		default:
 			out.New[u.Kind]++
 		}
+	}
+
+	// What no unit of the plan accounts for: the drafts are discarded, which is what
+	// the export says of them, and the confirmed ones are reported, for the user to void.
+	for _, t := range st.orphans() {
+		o := st.orphanOf(t)
+		if t.Status == "confirmed" {
+			out.Orphans = append(out.Orphans, o)
+			continue
+		}
+		if err := a.ledger.DiscardDraft.DiscardDraft(ctx, t.ID); err != nil {
+			return out, model.LedgerFailure(model.VerbDiscard, model.ThingTransaction, t.IdempotencyKey, err)
+		}
+		st.discarded[t.ID] = true
+		out.Removed = append(out.Removed, o)
 	}
 	return out, nil
 }
@@ -75,11 +96,17 @@ const (
 	// resultUpdated is a unit whose draft of an earlier version was discarded and
 	// recorded again (or whose earlier version was voided, and is recorded again).
 	resultUpdated
+	// resultRevived is a unit whose present version had been voided, to make room for
+	// another version that is gone too, and which is recorded again under a key of its
+	// own.
+	resultRevived
 	// resultDuplicate is a unit the ledger had in the version the plan says.
 	resultDuplicate
 	// resultStale is a unit that the ledger has in an earlier version that is
 	// confirmed, which is left alone.
 	resultStale
+	// resultVoided is a unit whose present version the user voided, which stays so.
+	resultVoided
 )
 
 // applyUnit brings the ledger up to what the plan says of the unit. The transactions of
@@ -88,32 +115,43 @@ const (
 // confirmed nothing is recorded, since the unit would be there twice once both were
 // confirmed; otherwise the drafts are discarded, and the unit is recorded. The
 // transactions it already has in its present version are not recorded again, which is
-// how an apply that was cut short is taken up where it stopped.
+// how an apply that was cut short is taken up where it stopped. A present version that
+// was voided is left so, unless the void was what made room for a version that is gone
+// too: then it is recorded again, under a key of its own, since the ledger would answer
+// the key it has with the voided transaction.
 func (a *Importer) applyUnit(ctx context.Context, r refs, st *state, u model.Unit) (result, error) {
 	l := st.look(u)
-	if l.stale() {
+	s, _ := stateOf(u, l)
+	drafts := l.drafts()
+	switch {
+	case s == unitStale:
 		return resultStale, nil
-	}
-	if len(l.others) == 0 && len(l.current) == len(u.Keys()) {
-		// All of it is there, in the version the plan says: nothing to ask of the ledger.
+	case s == unitVoid:
+		return resultVoided, nil
+	case (s == unitDraft || s == unitConfirmed) && len(drafts) == 0:
+		// All of it is there, in the version the plan says, and nothing is left of
+		// another: nothing to ask of the ledger.
 		return resultDuplicate, nil
 	}
 	discarded := 0
-	for _, o := range l.others {
-		if o.gone || o.tx.Status != "draft" {
-			continue
-		}
+	for _, o := range drafts {
 		if err := a.ledger.DiscardDraft.DiscardDraft(ctx, o.tx.ID); err != nil {
-			return resultNew, fmt.Errorf("discard the draft of an earlier version: %w", err)
+			return resultNew, err
 		}
 		st.discarded[o.tx.ID] = true
 		discarded++
 	}
-	c, err := a.record(ctx, r, u)
+	attempt := l.attempt
+	if s == unitRevived {
+		attempt++
+	}
+	c, err := a.record(ctx, r, u, attempt)
 	if err != nil {
 		return resultNew, err
 	}
 	switch {
+	case s == unitRevived:
+		return resultRevived, nil
 	case c.New == 0 && discarded == 0:
 		return resultDuplicate, nil
 	case len(l.others) > 0:

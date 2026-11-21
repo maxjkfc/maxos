@@ -296,12 +296,12 @@ func TestConfirmTellsTheDraftsTheExportDoesNotHaveAnymore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Orphans != 1 {
-		t.Errorf("orphans = %d, want the one draft the export lost", out.Orphans)
+	if len(out.Orphans) != 1 || out.Orphans[0].Status != "draft" || !out.Orphans[0].Date.Equal(day("2026-03-02")) {
+		t.Errorf("orphans = %+v, want the one draft the export lost, by its day", out.Orphans)
 	}
 	status, err := other.Status(context.Background(), usecase.StatusInput{Files: w.files})
-	if err != nil || status.Orphans != 1 {
-		t.Errorf("status orphans = %d, %v", status.Orphans, err)
+	if err != nil || len(status.Orphans) != 1 {
+		t.Errorf("status orphans = %+v, %v", status.Orphans, err)
 	}
 }
 

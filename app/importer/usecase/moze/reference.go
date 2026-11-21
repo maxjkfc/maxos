@@ -2,9 +2,9 @@ package moze
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 
 	"github.com/google/uuid"
 
@@ -129,12 +129,30 @@ type ensured struct {
 	projectDifferences []usecase.ProjectDifference
 }
 
+// archived is the failure for reference data that the mapping names and the ledger has
+// archived: it is not used, and not made again, since it has the name.
+func archived(thing model.Thing, name string) *model.Failure {
+	return &model.Failure{Code: model.FailureArchived, Args: []string{string(thing), name}}
+}
+
+// currencyFlag is how a failure says whether an instrument is a currency.
+func currencyFlag(isCurrency bool) string {
+	if isCurrency {
+		return "currency"
+	}
+	return "not_currency"
+}
+
 // ensure makes what the plan uses of the reference data, and returns the ids of all
 // of it, and how much was made. What the ledger has, by name, is used as it is; an
 // instrument or an account that has the name but is another thing than the mapping
-// says is a conflict to put right by hand, and is an error, as is an archived one. A
+// says is a conflict to put right by hand, and is a failure, as is an archived one. A
 // project that the ledger has is used as it is too, and a default area of it that is not
 // the mapping's is reported.
+//
+// What stops it is a *model.Failure, never a sentence of this layer: a step the ledger
+// did not take is model.LedgerFailure, with the reply of the ledger in it as it was
+// given; the rest are the codes of the conflicts. The command line has the words.
 func (a *Importer) ensure(ctx context.Context, plan model.Plan) (refs, ensured, error) {
 	need := needsOf(plan)
 	r := newRefs()
@@ -161,7 +179,7 @@ func (a *Importer) ensure(ctx context.Context, plan model.Plan) (refs, ensured, 
 func (a *Importer) ensureInstruments(ctx context.Context, plan model.Plan, need needs, r *refs, created map[string]int) error {
 	listed, err := a.ledger.ListInstruments.ListInstruments(ctx, finance.ListInstrumentsInput{IncludeArchived: true})
 	if err != nil {
-		return fmt.Errorf("list instruments: %w", err)
+		return model.LedgerFailure(model.VerbList, model.ThingInstrument, "", err)
 	}
 	have := map[string]finance.Instrument{}
 	for _, in := range listed.Instruments {
@@ -175,11 +193,13 @@ func (a *Importer) ensureInstruments(ctx context.Context, plan model.Plan, need 
 		want := plan.Mapping.Instruments[code]
 		if in, ok := have[code]; ok {
 			if in.ArchivedAt != nil {
-				return fmt.Errorf("instrument %s is archived", code)
+				return archived(model.ThingInstrument, code)
 			}
 			if in.IsCurrency != want.IsCurrency || in.Decimals != want.Decimals || in.Kind != want.Kind {
-				return fmt.Errorf("instrument %s exists as a %s with %d decimals (currency %t), and the mapping says a %s with %d (currency %t): put one right",
-					code, in.Kind, in.Decimals, in.IsCurrency, want.Kind, want.Decimals, want.IsCurrency)
+				return &model.Failure{Code: model.FailureInstrumentDiffers, Args: []string{
+					code, in.Kind, strconv.Itoa(in.Decimals), currencyFlag(in.IsCurrency),
+					want.Kind, strconv.Itoa(want.Decimals), currencyFlag(want.IsCurrency),
+				}}
 			}
 			r.instruments[code] = in.ID
 			continue
@@ -188,7 +208,7 @@ func (a *Importer) ensureInstruments(ctx context.Context, plan model.Plan, need 
 			Code: code, Name: want.Name, Kind: want.Kind, IsCurrency: want.IsCurrency, Decimals: want.Decimals,
 		})
 		if err != nil {
-			return fmt.Errorf("create instrument %s: %w", code, err)
+			return model.LedgerFailure(model.VerbCreate, model.ThingInstrument, code, err)
 		}
 		r.instruments[code] = made.ID
 		created[usecase.CreatedInstruments]++
@@ -226,7 +246,7 @@ func (a *Importer) ensureAccounts(ctx context.Context, plan model.Plan, need nee
 
 	institutions, err := a.ledger.ListInstitutions.ListInstitutions(ctx, finance.ListInstitutionsInput{IncludeArchived: true})
 	if err != nil {
-		return fmt.Errorf("list institutions: %w", err)
+		return model.LedgerFailure(model.VerbList, model.ThingInstitution, "", err)
 	}
 	haveInstitution := map[string]finance.Institution{}
 	for _, in := range institutions.Institutions {
@@ -234,7 +254,7 @@ func (a *Importer) ensureAccounts(ctx context.Context, plan model.Plan, need nee
 	}
 	accounts, err := a.ledger.ListAccounts.ListAccounts(ctx, finance.ListAccountsInput{IncludeArchived: true})
 	if err != nil {
-		return fmt.Errorf("list accounts: %w", err)
+		return model.LedgerFailure(model.VerbList, model.ThingAccount, "", err)
 	}
 	haveAccount := map[string]finance.Account{}
 	for _, acc := range accounts.Accounts {
@@ -245,10 +265,10 @@ func (a *Importer) ensureAccounts(ctx context.Context, plan model.Plan, need nee
 		spec := specs[name]
 		if acc, ok := haveAccount[name]; ok {
 			if acc.ArchivedAt != nil {
-				return fmt.Errorf("account %q is archived", name)
+				return archived(model.ThingAccount, name)
 			}
 			if acc.Kind != spec.Kind {
-				return fmt.Errorf("account %q exists as a %s, and the mapping says a %s: put one right", name, acc.Kind, spec.Kind)
+				return &model.Failure{Code: model.FailureAccountKindDiffers, Args: []string{name, acc.Kind, spec.Kind}}
 			}
 			r.accounts[name] = acc.ID
 			continue
@@ -259,14 +279,14 @@ func (a *Importer) ensureAccounts(ctx context.Context, plan model.Plan, need nee
 			if !ok {
 				made, err := a.ledger.CreateInstitution.CreateInstitution(ctx, finance.CreateInstitutionInput{Name: spec.Institution})
 				if err != nil {
-					return fmt.Errorf("create institution %q: %w", spec.Institution, err)
+					return model.LedgerFailure(model.VerbCreate, model.ThingInstitution, spec.Institution, err)
 				}
 				inst = made
 				haveInstitution[inst.Name] = inst
 				created[usecase.CreatedInstitutions]++
 			}
 			if inst.ArchivedAt != nil {
-				return fmt.Errorf("institution %q is archived", spec.Institution)
+				return archived(model.ThingInstitution, spec.Institution)
 			}
 			id := inst.ID
 			in.InstitutionID = &id
@@ -281,7 +301,7 @@ func (a *Importer) ensureAccounts(ctx context.Context, plan model.Plan, need nee
 		}
 		made, err := a.ledger.CreateAccount.CreateAccount(ctx, in)
 		if err != nil {
-			return fmt.Errorf("create account %q: %w", name, err)
+			return model.LedgerFailure(model.VerbCreate, model.ThingAccount, name, err)
 		}
 		r.accounts[name] = made.ID
 		created[usecase.CreatedAccounts]++
@@ -299,7 +319,7 @@ type categoryKey struct {
 func (a *Importer) ensureCategories(ctx context.Context, need needs, r *refs, created map[string]int) error {
 	listed, err := a.ledger.ListCategories.ListCategories(ctx, finance.ListCategoriesInput{IncludeArchived: true})
 	if err != nil {
-		return fmt.Errorf("list categories: %w", err)
+		return model.LedgerFailure(model.VerbList, model.ThingCategory, "", err)
 	}
 	have := map[categoryKey]finance.Category{}
 	for _, c := range listed.Categories {
@@ -318,13 +338,13 @@ func (a *Importer) ensureCategories(ctx context.Context, need needs, r *refs, cr
 		key := categoryKey{direction, parentID, name}
 		if c, ok := have[key]; ok {
 			if c.ArchivedAt != nil {
-				return uuid.Nil, fmt.Errorf("category %q is archived", name)
+				return uuid.Nil, archived(model.ThingCategory, name)
 			}
 			return c.ID, nil
 		}
 		made, err := a.ledger.CreateCategory.CreateCategory(ctx, finance.CreateCategoryInput{Direction: direction, ParentID: parent, Name: name})
 		if err != nil {
-			return uuid.Nil, fmt.Errorf("create the %s category %q: %w", direction, name, err)
+			return uuid.Nil, model.LedgerFailure(model.VerbCreate, model.ThingCategory, name, err)
 		}
 		have[key] = made
 		created[usecase.CreatedCategories]++
@@ -361,7 +381,7 @@ func (a *Importer) ensureCategories(ctx context.Context, need needs, r *refs, cr
 func (a *Importer) ensureAreas(ctx context.Context, need needs, r *refs, created map[string]int) error {
 	listed, err := a.ledger.ListAreas.ListAreas(ctx, catalog.ListAreasInput{IncludeArchived: true})
 	if err != nil {
-		return fmt.Errorf("list areas: %w", err)
+		return model.LedgerFailure(model.VerbList, model.ThingArea, "", err)
 	}
 	have := map[string]catalog.Area{}
 	for _, ar := range listed.Areas {
@@ -371,14 +391,14 @@ func (a *Importer) ensureAreas(ctx context.Context, need needs, r *refs, created
 	for _, name := range need.areas {
 		if ar, ok := have[name]; ok {
 			if ar.ArchivedAt != nil {
-				return fmt.Errorf("area %q is archived", name)
+				return archived(model.ThingArea, name)
 			}
 			r.areas[name] = ar.ID
 			continue
 		}
 		made, err := a.ledger.CreateArea.CreateArea(ctx, catalog.CreateAreaInput{Name: name})
 		if err != nil {
-			return fmt.Errorf("create area %q: %w", name, err)
+			return model.LedgerFailure(model.VerbCreate, model.ThingArea, name, err)
 		}
 		r.areas[name] = made.ID
 		r.areaNames[made.ID] = name
@@ -406,7 +426,7 @@ func projectSpec(m model.Mapping, name string) model.ProjectMap {
 func (a *Importer) ensureProjects(ctx context.Context, plan model.Plan, need needs, r *refs, made *ensured) error {
 	listed, err := a.ledger.ListProjects.ListProjects(ctx, catalog.ListProjectsInput{IncludeArchived: true})
 	if err != nil {
-		return fmt.Errorf("list projects: %w", err)
+		return model.LedgerFailure(model.VerbList, model.ThingProject, "", err)
 	}
 	have := map[string]catalog.Project{}
 	for _, p := range listed.Projects {
@@ -416,7 +436,7 @@ func (a *Importer) ensureProjects(ctx context.Context, plan model.Plan, need nee
 		spec := projectSpec(plan.Mapping, name)
 		if p, ok := have[name]; ok {
 			if p.ArchivedAt != nil {
-				return fmt.Errorf("project %q is archived", name)
+				return archived(model.ThingProject, name)
 			}
 			r.projects[name] = p.ID
 			ledgerArea := ""
@@ -439,7 +459,7 @@ func (a *Importer) ensureProjects(ctx context.Context, plan model.Plan, need nee
 		}
 		created, err := a.ledger.CreateProject.CreateProject(ctx, in)
 		if err != nil {
-			return fmt.Errorf("create project %q: %w", name, err)
+			return model.LedgerFailure(model.VerbCreate, model.ThingProject, name, err)
 		}
 		r.projects[name] = created.ID
 		made.created[usecase.CreatedProjects]++
@@ -450,7 +470,7 @@ func (a *Importer) ensureProjects(ctx context.Context, plan model.Plan, need nee
 func (a *Importer) ensureTags(ctx context.Context, need needs, r *refs, created map[string]int) error {
 	listed, err := a.ledger.ListTags.ListTags(ctx, catalog.ListTagsInput{IncludeArchived: true})
 	if err != nil {
-		return fmt.Errorf("list tags: %w", err)
+		return model.LedgerFailure(model.VerbList, model.ThingTag, "", err)
 	}
 	have := map[string]catalog.Tag{}
 	for _, t := range listed.Tags {
@@ -459,14 +479,14 @@ func (a *Importer) ensureTags(ctx context.Context, need needs, r *refs, created 
 	for _, name := range need.tags {
 		if t, ok := have[name]; ok {
 			if t.ArchivedAt != nil {
-				return fmt.Errorf("tag %q is archived", name)
+				return archived(model.ThingTag, name)
 			}
 			r.tags[name] = t.ID
 			continue
 		}
 		made, err := a.ledger.CreateTag.CreateTag(ctx, catalog.CreateTagInput{Name: name})
 		if err != nil {
-			return fmt.Errorf("create tag %q: %w", name, err)
+			return model.LedgerFailure(model.VerbCreate, model.ThingTag, name, err)
 		}
 		r.tags[name] = made.ID
 		created[usecase.CreatedTags]++
@@ -477,7 +497,7 @@ func (a *Importer) ensureTags(ctx context.Context, need needs, r *refs, created 
 func (a *Importer) ensureParties(ctx context.Context, need needs, r *refs, created map[string]int) error {
 	listed, err := a.ledger.ListParties.ListParties(ctx, catalog.ListPartiesInput{IncludeArchived: true})
 	if err != nil {
-		return fmt.Errorf("list parties: %w", err)
+		return model.LedgerFailure(model.VerbList, model.ThingParty, "", err)
 	}
 	have := map[string]catalog.Party{}
 	for _, p := range listed.Parties {
@@ -486,14 +506,14 @@ func (a *Importer) ensureParties(ctx context.Context, need needs, r *refs, creat
 	for _, name := range need.parties {
 		if p, ok := have[name]; ok {
 			if p.ArchivedAt != nil {
-				return fmt.Errorf("party %q is archived", name)
+				return archived(model.ThingParty, name)
 			}
 			r.parties[name] = p.ID
 			continue
 		}
 		made, err := a.ledger.CreateParty.CreateParty(ctx, catalog.CreatePartyInput{Name: name})
 		if err != nil {
-			return fmt.Errorf("create party %q: %w", name, err)
+			return model.LedgerFailure(model.VerbCreate, model.ThingParty, name, err)
 		}
 		r.parties[name] = made.ID
 		created[usecase.CreatedParties]++
