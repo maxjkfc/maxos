@@ -471,6 +471,11 @@ type ListTransactionsInput struct {
 	// Status is "draft", "confirmed" or "void" to list only the transactions in
 	// that status; empty lists all of them.
 	Status string
+	// Kind is "expense", "income", "transfer", "exchange", "opening", "reward",
+	// "dealing", "reconciliation", "instalment" or "trade" to list only the
+	// transactions of that kind; empty lists all of them. Any other value is
+	// model.ErrInvalidKind.
+	Kind string
 	// From and To bound the day the transactions happened on, both ends included;
 	// only the day each falls on counts. nil leaves that end open. To may not be
 	// before From.

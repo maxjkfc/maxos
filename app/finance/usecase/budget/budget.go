@@ -1,6 +1,8 @@
 // Package budget implements the budget use cases: setting the budgets of areas and
 // of projects, with their allocations, taking the budget of a project away, and
-// reading where areas and projects stand against their budgets.
+// reading where areas and projects stand against their budgets. It also reads what
+// was spent, by category in a month and as a total for each month of a range, with
+// the same definition of spent as the budgets have.
 package budget
 
 import (
@@ -20,7 +22,7 @@ import (
 )
 
 // Service implements usecase.SetAreaBudget, SetProjectBudget, RemoveProjectBudget,
-// GetAreaBudgets and GetProjectBudgets.
+// GetAreaBudgets, GetProjectBudgets, GetSpending and GetSpendingTrend.
 //
 // A use case that writes does all of it, the reads that check the request
 // included, in one database transaction. What today is, for the reads that count
@@ -43,6 +45,8 @@ var (
 	_ usecase.RemoveProjectBudget = (*Service)(nil)
 	_ usecase.GetAreaBudgets      = (*Service)(nil)
 	_ usecase.GetProjectBudgets   = (*Service)(nil)
+	_ usecase.GetSpending         = (*Service)(nil)
+	_ usecase.GetSpendingTrend    = (*Service)(nil)
 )
 
 // SetAreaBudget checks that the area can be used and the allocations are

@@ -334,6 +334,35 @@ linters:
           deny:
             - pkg: github.com/maxjkfc/maxos/app/finance/adapter/out/persistence/postgres
               desc: only the Postgres adapter may use its package and the sqlc types in dbgen
+        # Inbound adapters do not reach each other either (conventions section 3): an
+        # MCP tool and a web page each call the use cases, and neither calls the other.
+        # The web pages are the one kind there is; an inbound adapter of another kind
+        # (the MCP tools of M3) adds a rule like finance-adapter-in-web for itself. A web
+        # adapter calls use cases, so it never reaches the database, and the MCP SDK is
+        # the MCP adapter's.
+        finance-adapter-in-web:
+          list-mode: lax
+          files:
+            - "${config-path}/app/finance/adapter/in/web/**"
+          allow:
+            - github.com/maxjkfc/maxos/app/finance/adapter/in/web
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/finance/adapter/in/
+              desc: the web adapter must not depend on another inbound adapter
+            - pkg: github.com/jackc/pgx
+              desc: a web adapter calls use cases; it never reaches the database
+            - pkg: github.com/maxjkfc/maxos/pkg/postgres
+              desc: a web adapter calls use cases; it never reaches the database
+            - pkg: github.com/modelcontextprotocol/go-sdk
+              desc: the MCP SDK belongs to the MCP adapter, not to the web pages
+        finance-adapter-in-others:
+          list-mode: lax
+          files:
+            - "${config-path}/app/finance/adapter/in/**"
+            - "!${config-path}/app/finance/adapter/in/web/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/finance/adapter/in/web
+              desc: only the web adapter may use its package
         finance-boundary:
           list-mode: lax
           files:

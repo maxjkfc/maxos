@@ -33,6 +33,9 @@ func listIDsSQL(f repo.TransactionFilter) (string, []any) {
 	if f.Status != "" {
 		conditions = append(conditions, "t.status = "+arg(string(f.Status)))
 	}
+	if f.Kind != "" {
+		conditions = append(conditions, "t.kind = "+arg(string(f.Kind)))
+	}
 	if f.From != nil {
 		conditions = append(conditions, "t.occurred_on >= "+arg(*f.From))
 	}

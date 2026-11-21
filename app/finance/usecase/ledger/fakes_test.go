@@ -126,6 +126,12 @@ type fakeTransactions struct {
 	postedOnSet     []uuid.UUID
 	statementsAsked []repo.StatementFilter
 	figuresAsked    []figuresAsk
+	// accounts and instruments are where DraftSummary finds the names of accounts and
+	// the codes of instruments that it puts what it returns in order by. draftSummaries
+	// counts the calls of DraftSummary; readErr is what it returns too.
+	accounts       *fakeAccounts
+	instruments    *fakeInstruments
+	draftSummaries int
 }
 
 func newFakeTransactions() *fakeTransactions {
@@ -257,10 +263,16 @@ func (f *fakeTransactions) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// List returns the transactions of listResult that are of the kind of the filter,
+// when it has one, cut to its limit. It does not filter by the other conditions of
+// the filter, which a test of the use case only needs to see passed on (listed).
 func (f *fakeTransactions) List(_ context.Context, filter repo.TransactionFilter) ([]model.Transaction, error) {
 	f.listed = filter
 	f.lists++
 	out := f.listResult
+	if filter.Kind != "" {
+		out = slices.DeleteFunc(slices.Clone(out), func(txn model.Transaction) bool { return txn.Kind != filter.Kind })
+	}
 	if len(out) > filter.Limit {
 		out = out[:filter.Limit]
 	}
@@ -499,6 +511,109 @@ func (f *fakeTransactions) Statement(_ context.Context, q repo.StatementFilter) 
 		)
 	})
 	return content, nil
+}
+
+// DraftSummary reads the drafts as the repo does. Only the transactions that are
+// drafts count, whatever day they happened on. A draft is in the month of its day
+// once; it is in the group of each account it has an account posting to once,
+// however many such postings it has to it, and with none it is in a group of its
+// month that has no account. The amounts of a group are the account postings of its
+// drafts added up for each instrument, the negative ones as a positive outflow and
+// the positive ones as an inflow. The months come newest first, the accounts of a
+// month by their name and then their id with the group of none last, and the
+// amounts of an account by the code of the instrument.
+func (f *fakeTransactions) DraftSummary(context.Context) (model.DraftSummary, error) {
+	f.draftSummaries++
+	if f.readErr != nil {
+		return model.DraftSummary{}, f.readErr
+	}
+	// The group of the drafts that move no account is the one under uuid.Nil.
+	type group struct {
+		count   int
+		amounts map[uuid.UUID]*model.DraftAmount
+	}
+	type month struct {
+		count  int
+		groups map[uuid.UUID]*group
+	}
+	months := map[time.Time]*month{}
+	for _, txn := range f.byID {
+		if txn.Status != model.StatusDraft {
+			continue
+		}
+		first := model.MonthOf(txn.OccurredOn)
+		m := months[first]
+		if m == nil {
+			m = &month{groups: map[uuid.UUID]*group{}}
+			months[first] = m
+		}
+		m.count++
+		groupOf := func(account uuid.UUID) *group {
+			g := m.groups[account]
+			if g == nil {
+				g = &group{amounts: map[uuid.UUID]*model.DraftAmount{}}
+				m.groups[account] = g
+			}
+			return g
+		}
+		counted := map[uuid.UUID]bool{}
+		for _, p := range txn.Postings {
+			if p.Book != model.BookAccount {
+				continue
+			}
+			g := groupOf(*p.AccountID)
+			if !counted[*p.AccountID] {
+				counted[*p.AccountID] = true
+				g.count++
+			}
+			amount := g.amounts[p.InstrumentID]
+			if amount == nil {
+				amount = &model.DraftAmount{InstrumentID: p.InstrumentID, InstrumentCode: f.instruments.instruments[p.InstrumentID].Code}
+				g.amounts[p.InstrumentID] = amount
+			}
+			if p.Quantity.IsNegative() {
+				amount.Outflow = amount.Outflow.Add(p.Quantity.Neg())
+			} else {
+				amount.Inflow = amount.Inflow.Add(p.Quantity)
+			}
+		}
+		if len(counted) == 0 {
+			groupOf(uuid.Nil).count++
+		}
+	}
+
+	var summary model.DraftSummary
+	for first, m := range months {
+		draftMonth := model.DraftMonth{Month: first, Count: m.count}
+		for id, g := range m.groups {
+			account := model.DraftAccount{Count: g.count}
+			if id != uuid.Nil {
+				account.AccountID = &id
+			}
+			for _, amount := range g.amounts {
+				account.Amounts = append(account.Amounts, *amount)
+			}
+			slices.SortFunc(account.Amounts, func(a, b model.DraftAmount) int { return cmp.Compare(a.InstrumentCode, b.InstrumentCode) })
+			draftMonth.Accounts = append(draftMonth.Accounts, account)
+		}
+		slices.SortFunc(draftMonth.Accounts, func(a, b model.DraftAccount) int {
+			switch {
+			case a.AccountID == nil && b.AccountID == nil:
+				return 0
+			case a.AccountID == nil:
+				return 1
+			case b.AccountID == nil:
+				return -1
+			}
+			return cmp.Or(
+				cmp.Compare(f.accounts.accounts[*a.AccountID].Name, f.accounts.accounts[*b.AccountID].Name),
+				bytes.Compare(a.AccountID[:], b.AccountID[:]),
+			)
+		})
+		summary.Months = append(summary.Months, draftMonth)
+	}
+	slices.SortFunc(summary.Months, func(a, b model.DraftMonth) int { return b.Month.Compare(a.Month) })
+	return summary, nil
 }
 
 // fakeAccounts is an in-memory repo.AccountRepo of which only Get and Lock are

@@ -65,6 +65,7 @@ func newEnv(t *testing.T) *env {
 		projects:    &fakeProjects{},
 		clock:       &fakeClock{now: time.Date(2026, 11, 14, 15, 30, 0, 0, taipei)},
 	}
+	e.txns.accounts, e.txns.instruments = e.accounts, e.instruments
 	e.cash = e.accounts.add("cash")
 	e.bank = e.accounts.add("bank")
 	e.card = e.accounts.addCard("card", new(5), new(20))

@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -14,12 +15,13 @@ import (
 	"github.com/maxjkfc/maxos/pkg/cfaccess"
 	"github.com/maxjkfc/maxos/pkg/config"
 	"github.com/maxjkfc/maxos/pkg/mcpserver"
+	"github.com/maxjkfc/maxos/pkg/webserver"
 )
 
 func newServeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
-		Short: "Serve MCP over HTTP at /mcp; every request must carry a valid Cloudflare Access token",
+		Short: "Serve MCP over HTTP at /mcp and the read-only pages under /app/; every request must carry a valid Cloudflare Access token",
 		Args:  cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			cfg, err := config.Load(true)
@@ -33,29 +35,35 @@ func newServeCmd() *cobra.Command {
 				CatalogModule(),
 				FinanceModule(),
 				MCPModule(),
+				WebModule(),
 				AccessModule(),
+				HTTPModule(),
 				fx.Invoke(serveHTTP),
 			))
 		},
 	}
 }
 
-// serveHTTP mounts the MCP endpoint behind the Access verifier and ties the
-// HTTP server to the app: it listens when the app starts and drains in-flight
-// requests when it stops.
+// HTTPModule provides what the HTTP server serves (see newHTTPHandler): the MCP
+// endpoint and the pages, behind the Access verifier. It needs the registries of
+// both (MCPModule, WebModule) and a verifier (AccessModule; a test supplies one that
+// trusts a key of its own).
+func HTTPModule() fx.Option {
+	return fx.Provide(newHTTPHandler)
+}
+
+// serveHTTP ties the HTTP server to the app: it listens when the app starts and
+// drains in-flight requests when it stops.
 func serveHTTP(
 	lc fx.Lifecycle,
 	sd fx.Shutdowner,
 	cfg config.Config,
 	logger *slog.Logger,
-	registry *mcpserver.Registry,
-	verifier *cfaccess.Verifier,
+	handler http.Handler,
 ) {
-	mux := http.NewServeMux()
-	mux.Handle("/mcp", verifier.Middleware(registry.HTTPHandler(callerFromAccess)))
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -82,6 +90,25 @@ func serveHTTP(
 	})
 }
 
+// newHTTPHandler is what the server serves: the MCP endpoint at /mcp and the pages
+// under /app/. Neither has an entrance that the Access verifier does not guard. The
+// MCP endpoint is wrapped in its middleware here; the pages are built with it as
+// their guard, which they cannot be built without, so that it also covers what the
+// pages answer on their own (a path that is no page, a method that is refused). The
+// pages are also mounted at /app, which they send on to /app/ once the guard has let
+// the request through: the mux would otherwise do it before the guard has looked.
+func newHTTPHandler(registry *mcpserver.Registry, pages *webserver.Registry, verifier *cfaccess.Verifier) (http.Handler, error) {
+	web, err := pages.Pages(userFromAccess, verifier.Middleware)
+	if err != nil {
+		return nil, fmt.Errorf("build the pages: %w", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", verifier.Middleware(registry.HTTPHandler(callerFromAccess)))
+	mux.Handle(webserver.Prefix+"/", web)
+	mux.Handle(webserver.Prefix, web)
+	return mux, nil
+}
+
 // callerFromAccess attributes a request to the identity the Access middleware
 // verified. The middleware guarantees one; a missing identity is a wiring bug,
 // so the request is refused rather than served under an anonymous actor.
@@ -91,4 +118,15 @@ func callerFromAccess(r *http.Request) (mcpserver.Caller, bool) {
 		return mcpserver.Caller{}, false
 	}
 	return mcpserver.Caller{Source: "mcp-http", Actor: id.Actor()}, true
+}
+
+// userFromAccess names the user of a page by the identity the Access middleware
+// verified: the email of the token, or the identity of a service token. As for the
+// MCP endpoint, a missing identity is a wiring bug and the request is refused.
+func userFromAccess(r *http.Request) (webserver.User, bool) {
+	id, ok := cfaccess.IdentityFrom(r.Context())
+	if !ok {
+		return webserver.User{}, false
+	}
+	return webserver.User{Name: id.Actor()}, true
 }

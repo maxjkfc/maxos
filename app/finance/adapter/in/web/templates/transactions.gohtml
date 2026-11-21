@@ -1,0 +1,56 @@
+{{define "content"}}{{with .Data}}
+{{template "monthnav" .}}
+
+<form class="filters" method="get" action="/app/transactions">
+<input type="hidden" name="month" value="{{.Filters.Month}}">
+<label>帳戶
+<select name="account">{{range .Filters.Accounts}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+</label>
+<label>狀態
+<select name="status">{{range .Filters.Statuses}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+</label>
+<label>種類
+<select name="kind">{{range .Filters.Kinds}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+</label>
+<button type="submit" class="button-primary">套用篩選</button>
+{{if .Filtered}}<a href="{{.Filters.Reset}}">清除篩選</a>{{end}}
+</form>
+
+{{if .Rows}}<div class="table-wrap">
+<table class="transactions stack wide" role="table">
+<caption class="sr-only">{{.Month}} 的交易，新的在前</caption>
+<thead role="rowgroup"><tr role="row">
+<th scope="col" role="columnheader">日期</th>
+<th scope="col" role="columnheader">入帳日</th>
+<th scope="col" role="columnheader">種類</th>
+<th scope="col" role="columnheader">類別</th>
+<th scope="col" role="columnheader">說明</th>
+<th scope="col" role="columnheader">帳戶</th>
+<th scope="col" role="columnheader" class="num">金額</th>
+<th scope="col" role="columnheader">領域／專案</th>
+<th scope="col" role="columnheader">狀態</th>
+</tr></thead>
+<tbody role="rowgroup">
+{{range .Rows}}{{$many := gt (len .Movements) 1}}<tr role="row" class="{{.Class}}">
+<th scope="row" role="rowheader" class="nowrap"><a href="{{.Href}}">{{.Date}}</a></th>
+<td role="cell" data-label="入帳日" class="nowrap">{{.Posted}}</td>
+<td role="cell" data-label="種類">{{.Kind}}{{if .PlanLabel}}<span class="line muted small">{{.PlanLabel}}</span>{{end}}</td>
+<td role="cell" data-label="類別">{{.Categories}}</td>
+<td role="cell" data-label="說明" class="memo">{{.Description}}{{if .Merchant}}<span class="line muted small">{{.Merchant}}</span>{{end}}</td>
+<td role="cell" data-label="帳戶">{{.Accounts}}</td>
+<td role="cell" data-label="金額" class="num">{{range .Movements}}<span class="line">{{if $many}}<span class="muted small">{{.Where}}　</span>{{end}}{{template "amount" .Amount}}</span>{{end}}</td>
+<td role="cell" data-label="領域／專案">{{if .Area}}<span class="line">{{.Area}}</span>{{end}}{{if .Project}}<span class="line muted small">專案：{{.Project}}</span>{{end}}</td>
+<td role="cell" data-label="狀態"><span class="badge badge-{{.StatusKey}}">{{.Status}}</span></td>
+</tr>
+{{end}}</tbody>
+</table>
+</div>
+{{else}}<p class="empty">{{if .Filtered}}{{.Month}} 沒有符合篩選條件的交易。{{else}}{{.Month}} 沒有交易。{{end}}</p>
+{{end}}
+{{if or .PrevPage .NextPage}}<nav class="pager" aria-label="分頁">
+{{if .PrevPage}}<a class="button" href="{{.PrevPage}}" rel="prev">← 上一頁</a>{{end}}
+<span>第 {{.Page}} 頁</span>
+{{if .NextPage}}<a class="button" href="{{.NextPage}}" rel="next">下一頁 →</a>{{end}}
+</nav>
+{{end}}
+{{end}}{{end}}

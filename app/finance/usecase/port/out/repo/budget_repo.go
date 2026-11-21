@@ -64,4 +64,15 @@ type BudgetRepo interface {
 	// when projectID is set and every project's otherwise. The order is by project
 	// id, then category id. to is a date as model.DateOf makes it.
 	ProjectSpending(ctx context.Context, projectID *uuid.UUID, to time.Time) ([]model.ProjectSpending, error)
+	// Spending adds up what was spent on the days from from to to, both days
+	// included, by the month of the day the transaction happened on and the category:
+	// a row for each month and category that has something spent on it, with the
+	// parent of the category. It is the same definition of spent as AreaSpending and
+	// ProjectSpending, the same transactions and the same postings, but with no area
+	// or project to group by and no area to keep out: a transaction counts whether it
+	// belongs to an area, a project, both or neither, so the spending of a month is
+	// what the areas spent in it, projects included, and the expenses that have no
+	// area. The order is by month, then category id. from and to are dates as
+	// model.DateOf makes them, and a range of days may cover several months.
+	Spending(ctx context.Context, from, to time.Time) ([]model.MonthCategorySpending, error)
 }

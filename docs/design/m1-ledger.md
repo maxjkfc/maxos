@@ -251,7 +251,7 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 
 ### 預算與分配（M1c，`app/finance`）
 
-預算只用來比對與告警：不從現有的錢裡預留，超過了什麼都不擋，只回報（`Over`）。`usecase/budget` 一個套件實作五個 use case，port 在 `usecase/port/in/usecase/budget.go`；`BudgetRepo`（`usecase/port/out/repo/budget_repo.go`）存取預算與分配，也加總「花了多少」；規則在 `domain/model/budget.go`。
+預算只用來比對與告警：不從現有的錢裡預留，超過了什麼都不擋，只回報（`Over`）。`usecase/budget` 一個套件實作七個 use case，其中五個是預算本身，port 在 `usecase/port/in/usecase/budget.go`；另外兩個是網頁用的讀取（`GetSpending`、`GetSpendingTrend`），見本節最後一段。`BudgetRepo`（`usecase/port/out/repo/budget_repo.go`）存取預算與分配，也加總「花了多少」；規則在 `domain/model/budget.go`。
 
 **寫入**（每個都在一個資料庫交易內，驗證失敗什麼都不寫）
 
@@ -320,6 +320,26 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 
 - 結帳日不留歷史（見上）：改結帳日會把過去的帳單重切。
 - **對帳不變。**`Reconcile` 仍然以交易日期比對餘額。入帳日與交易日期在結帳日前後不同時（例如結帳日當天的消費，銀行放進下一張帳單），要與銀行寄來的帳單核對，比的是那張帳單的 `Closing`，不是 `GetBalances` 在結帳日的餘額：後者有那筆消費，前者沒有。用結帳日的餘額去對銀行的帳單，會對出一筆不存在的差額。`cmd/` 的測試把這個後果寫成斷言（結帳日當天的消費被移到下一張帳單後，對帳那天的記錄餘額仍是含它的，差額是它的金額），所以日後有人改了 `Reconcile` 會知道是在改這個行為。
+
+### 網頁用的讀取（`GetSpending`、`GetSpendingTrend`、`GetDraftSummary`、`ListTransactions` 的種類篩選）
+
+唯讀的網頁（Cloudflare Access 之後、伺服器端渲染）要三個既有讀取給不了的數字，和一個篩選。它們都在 port 後面，沒有新的資料表、沒有 migration，也還沒有 MCP 工具（M3）。
+
+**花了多少，只有一個定義。** `GetSpending{Month}` 回傳該月各類別花了多少（`Categories`：類別連同它的父類別 id，金額大的在前、同額依類別 id；`Total` 是全部加總），`GetSpendingTrend{From, To}` 回傳區間內每個月各一個總額（最舊的在前；沒花的月份與還沒開始的月份也在，總額為 0）。「花了多少」仍是「預算與分配」那一段的定義：已確認交易的 `expense` 分錄的 `base_amount`，`occurred_on` 不晚於今天，任何種類的交易都算（手續費、分期的利息、「未記錄」照算），折扣與回饋、收入都不減，分攤只算自己的份，草稿與作廢的不算。這兩個讀取只是不依領域或專案分組，也不把沒有領域的支出排除：
+
+- **SQL 只有一條。** `BudgetRepo.Spending`（sqlc 的 `ListSpending`）的條件與 `AreaSpending`、`ProjectSpending` 一樣（已確認、`book = 'expense'`、`occurred_on` 在兩天之間，兩端都含），依月份（`occurred_on` 所在月的第一天）、類別與它的父類別分組，依月份再依類別 id 排序。它不再為這些讀取另寫一份「什麼算花了」。
+- **與領域的數字相等。** 一個月的 `Total` = 該月各領域的 `SpentWithProjects`（`GetAreaBudgets`）加上沒有領域的支出：沒有領域的支出不屬於任何領域，不在領域的任何數字裡，卻是這個月花的。有測試把兩邊對起來：adapter 的整合測試（領域內、專案內、兩者皆無的支出，與手續費、分期利息、外幣、對帳，月份、類別各自相等），以及 `cmd/` 的端到端測試（真的 use case 與 PostgreSQL，確認、作廢與日期在未來的各一）。
+- **「到哪一天」也只有一份。** `model.SpendingRange(第一個月, 最後一個月, 今天)`：從第一個月的第一天，到最後一個月的最後一天與今天中較早的一天，兩端都含；第一個月還沒開始就沒有範圍，不問 repo。`GetAreaBudgets`（行為不變）、`GetSpending`、`GetSpendingTrend` 都用它，今天來自注入的時鐘，與餘額同一個。月份的算術（`CountMonths`、`MonthsBetween`、`TotalsByMonth`、`SpendingOfMonth`）是 `domain/model` 的純函式。
+- **參數。** `Month`、`From`、`To` 與 `GetAreaBudgets` 一樣只取它們所在的月（以自己的時區讀）。`GetSpendingTrend` 整個區間只問 repo 一次；`From` 或 `To` 沒給是 `ErrMonthRequired`（它的訊息不再提「預算」，因為這兩個讀取也用它），`To` 的月早於 `From` 的月是 `ErrDateRangeReversed`，超過 `usecase.MaxSpendingTrendMonths`（120）個月是 `ErrSpendingRangeTooWide`，都在讀 repo 之前就回。
+
+**等著確認的草稿。** `GetDraftSummary{}` 回傳還沒確認的草稿：`Count`（每張草稿算一次）、`Amounts` 與 `Months`（新的月份在前）；每個月有 `Count`、`Amounts` 與 `Accounts`。讓人在確認一個匯入的月份之前先看到整體，不必把每張草稿都讀出來。草稿不改餘額、預算與報表（`CONTEXT.md`），所以這裡的金額是「確認後會動多少」。
+
+- **只有草稿**：已確認與作廢的不在其中，不論發生在哪一天，也不受「今天」限制，日期在今天之後的草稿一樣在等。月份是 `occurred_on` 所在的月。
+- **草稿動哪個帳戶，看它的 `account` 分錄。** `instalment` 帳的分錄不是帳戶分錄。一張草稿有幾個不同的帳戶，在每個帳戶底下各算一次，在月份與總數只算一次：轉帳在轉出與轉入的帳戶都有；手續費從轉出的帳戶付，那個帳戶仍只算一次，從第三個帳戶付，第三個帳戶也有這一張。沒有任何 `account` 分錄的草稿，在該月「沒有帳戶」那一組（`AccountID` 為 nil，排在最後，沒有 `Amounts`）：別人替我付的支出，與消費分期的起點（它只有 `instalment` 與 `expense` 分錄，此刻帳戶一毛也沒扣）。消費分期的各期有 `account` 分錄，在各自扣款日所在的月、被扣款的帳戶底下；帳單分期的起點有 `account` 分錄（把已出的帳單還清），所以屬於那張卡，不在「沒有帳戶」那一組。
+- **金額。** 每個標的各一筆：`Outflow` 是為負的 `account` 分錄加總（以正數表示），`Inflow` 是為正的加總，`Net = Inflow − Outflow`，與餘額同號，負的是減少。標的依代碼排序（以位元組比較）。月份的 `Amounts` 是它各帳戶的加總，全部的 `Amounts` 是各月份的加總（`model.AddDraftAmounts`）：所以一筆轉帳在月份的 `Outflow` 與 `Inflow` 各有一份，淨額是 0。帳戶依帳戶名稱再依 id 排序。
+- **一份快照。** `TransactionRepo.DraftSummary` 以三條語句（每月的張數、每月每個帳戶的張數、每月每個帳戶每個標的的金額）在 `DB.WithinSnapshot` 裡讀，與 `List`、`Statement` 同一個做法（架構規範第 6 節的例外），所以張數與金額是同一批草稿：別的連線在讀的中途確認了一張，這一次的回答裡仍有它（有測試：以 pgx tracer 把變更放在兩條語句之間）。沒有草稿是沒有月份、張數 0，不是錯誤。
+
+**`ListTransactions` 的種類篩選。** `ListTransactionsInput.Kind` 是十種種類之一（`expense`、`income`、`transfer`、`exchange`、`opening`、`reward`、`dealing`、`reconciliation`、`instalment`、`trade`）就只列該種類的交易，空字串列全部；其他值回 `ErrInvalidKind`，與 `Status` 一樣在問 repo 之前就檢查，訊息列出可用的值。它與其他篩選條件一起成立，分頁在篩選之後（`listIDsSQL` 多一個 `t.kind = $n`）。分期要注意：消費分期的起點種類是 `expense`，各期是 `instalment`；帳單分期的起點與各期都是 `instalment`。
 
 ## 6. 測試
 

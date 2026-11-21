@@ -1,0 +1,39 @@
+{{define "content"}}{{with .Data}}
+{{if .Months}}<p class="note note-draft">共有 <strong>{{.Count}}</strong> 筆草稿等著確認。草稿不影響餘額、預算和報表，確認後才生效。</p>
+{{range .Months}}
+<section class="panel">
+<h2>{{.Label}} <span class="muted small">{{.Count}} 筆</span> <a class="small" href="{{.Href}}">查看這個月的草稿</a></h2>
+<div class="table-wrap">
+<table class="stack" role="table">
+<caption class="sr-only">{{.Label}} 的草稿，依帳戶</caption>
+<thead role="rowgroup"><tr role="row">
+<th scope="col" role="columnheader">帳戶</th>
+<th scope="col" role="columnheader" class="num">筆數</th>
+<th scope="col" role="columnheader" class="num">流出</th>
+<th scope="col" role="columnheader" class="num">流入</th>
+<th scope="col" role="columnheader" class="num">淨額</th>
+</tr></thead>
+<tbody role="rowgroup">
+{{range .Accounts}}<tr role="row">
+<th scope="row" role="rowheader"><a href="{{.Href}}">{{.Name}}</a></th>
+<td role="cell" data-label="筆數" class="num">{{.Count}}</td>
+{{if .NoAccount}}<td role="cell" data-label="" class="num muted" colspan="3">沒有帳戶的變動</td>{{else}}<td role="cell" data-label="流出" class="num">{{range .Amounts}}<span class="line">{{template "amount" .Outflow}}</span>{{end}}</td>
+<td role="cell" data-label="流入" class="num">{{range .Amounts}}<span class="line">{{template "amount" .Inflow}}</span>{{end}}</td>
+<td role="cell" data-label="淨額" class="num">{{range .Amounts}}<span class="line">{{template "amount" .Net}}</span>{{end}}</td>{{end}}
+</tr>
+{{end}}</tbody>
+<tfoot role="rowgroup"><tr role="row">
+<th scope="row" role="rowheader">這個月合計</th>
+<td role="cell" data-label="筆數" class="num">{{.Count}}</td>
+<td role="cell" data-label="流出" class="num">{{range .Amounts}}<span class="line">{{template "amount" .Outflow}}</span>{{end}}</td>
+<td role="cell" data-label="流入" class="num">{{range .Amounts}}<span class="line">{{template "amount" .Inflow}}</span>{{end}}</td>
+<td role="cell" data-label="淨額" class="num">{{range .Amounts}}<span class="line">{{template "amount" .Net}}</span>{{end}}</td>
+</tr></tfoot>
+</table>
+</div>
+<p class="muted small">一筆草稿動到兩個帳戶（例如轉帳）時，兩個帳戶各算一筆，合計只算一次。</p>
+</section>
+{{end}}
+{{else}}<p class="empty">沒有等著確認的草稿。</p>
+{{end}}
+{{end}}{{end}}

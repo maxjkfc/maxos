@@ -1,0 +1,735 @@
+/*
+ * The one stylesheet of the pages. Nothing is inline (the pages send a content
+ * security policy that forbids it), so every look is a class.
+ *
+ * Mobile first: the base is one column that fits a phone, and the rules in the
+ * media queries at the end only add room. Light and dark follow the system
+ * (prefers-color-scheme). Numbers use tabular figures and are right-aligned, and a
+ * negative amount is written with its sign: colour is only a second cue, never the
+ * only one.
+ */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --surface-2: #eef1f4;
+  --text: #1a2027;
+  --muted: #566270;
+  --border: #d5dbe2;
+  --accent: #1d5fc2;
+  --neg: #a8281f;
+  --draft-bg: #fff6dc;
+  --draft-edge: #c99a1b;
+  --void-text: #6b7480;
+  --bar: #3b78d4;
+  --bar-hl: #d96f00;
+  --track: #e3e8ee;
+  --over: #b3261e;
+  --over-bg: #fde8e6;
+  --ok-bg: #e5f4ea;
+  --focus: #1d5fc2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101317;
+    --surface: #181d23;
+    --surface-2: #20262d;
+    --text: #e7ebf0;
+    --muted: #9ca8b5;
+    --border: #2e3640;
+    --accent: #7db1ff;
+    --neg: #ff9189;
+    --draft-bg: #2b2512;
+    --draft-edge: #b88f1f;
+    --void-text: #8d97a3;
+    --bar: #5b94e6;
+    --bar-hl: #ffb14a;
+    --track: #29313a;
+    --over: #ff7a70;
+    --over-bg: #3a1d1a;
+    --ok-bg: #16301f;
+    --focus: #7db1ff;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+}
+
+a {
+  color: var(--accent);
+}
+
+a:focus-visible,
+select:focus-visible,
+button:focus-visible,
+input:focus-visible,
+summary:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -999px;
+  top: 0;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  z-index: 10;
+}
+
+.skip-link:focus {
+  left: 0.5rem;
+  top: 0.5rem;
+}
+
+/* Header and navigation */
+
+.site-header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.site-header-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.25rem 1rem;
+  padding: 0.6rem 1rem 0;
+  max-width: 76rem;
+  margin: 0 auto;
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.who {
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.who strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.site-nav {
+  max-width: 76rem;
+  margin: 0 auto;
+  padding: 0 0.5rem;
+}
+
+.site-nav ul {
+  display: flex;
+  flex-wrap: wrap;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.site-nav a {
+  display: block;
+  padding: 0.55rem 0.7rem;
+  text-decoration: none;
+  color: var(--text);
+  border-bottom: 3px solid transparent;
+}
+
+.site-nav a:hover {
+  background: var(--surface-2);
+}
+
+.site-nav a[aria-current="page"] {
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* Page */
+
+main {
+  max-width: 76rem;
+  margin: 0 auto;
+  padding: 0.5rem 1rem 3rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  line-height: 1.3;
+  margin: 1rem 0 0.75rem;
+}
+
+h2 {
+  font-size: 1.15rem;
+  margin: 1.75rem 0 0.5rem;
+}
+
+h3 {
+  font-size: 1rem;
+  margin: 1.25rem 0 0.4rem;
+}
+
+p {
+  margin: 0.4rem 0 0.8rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 0.85rem;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.error-message {
+  padding: 0.75rem 1rem;
+  background: var(--over-bg);
+  border-left: 4px solid var(--over);
+  border-radius: 4px;
+}
+
+.empty {
+  padding: 0.9rem 1rem;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+.note {
+  padding: 0.6rem 0.9rem;
+  background: var(--surface-2);
+  border-left: 4px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+}
+
+.note-draft {
+  background: var(--draft-bg);
+  border-left-color: var(--draft-edge);
+  color: var(--text);
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.25rem 0.9rem 0.9rem;
+  margin: 1rem 0;
+}
+
+.panel > h2:first-child,
+.panel > h3:first-child {
+  margin-top: 0.8rem;
+}
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 2rem;
+  margin: 0.5rem 0 1rem;
+  padding: 0;
+  list-style: none;
+}
+
+.stats dt {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.stats dd {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1rem;
+  margin: 0.5rem 0 1rem;
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Links that look like buttons, and the filter form */
+
+.button,
+button {
+  display: inline-block;
+  font: inherit;
+  padding: 0.4rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.button:hover,
+button:hover {
+  background: var(--surface-2);
+}
+
+.button-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.button-primary:hover {
+  background: var(--accent);
+  filter: brightness(1.1);
+}
+
+.month-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 0.25rem 0 1rem;
+}
+
+.month-nav strong {
+  font-size: 1.1rem;
+  min-width: 5.5rem;
+  text-align: center;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.6rem 0.9rem;
+  margin: 0 0 1rem;
+}
+
+.filters label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.filters select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  min-width: 8rem;
+  max-width: 100%;
+}
+
+.pager {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin: 0.75rem 0;
+}
+
+/* Tables */
+
+.table-wrap {
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 0.5rem 0 1rem;
+}
+
+/* A table of a few narrow columns does not need the width of the screen. */
+.table-wrap.compact {
+  max-width: 44rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+caption {
+  text-align: left;
+  padding: 0.6rem 0.75rem 0.2rem;
+  font-weight: 600;
+}
+
+th,
+td {
+  padding: 0.5rem 0.7rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+
+thead th {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+
+tbody th[scope="row"] {
+  font-weight: 500;
+}
+
+tbody tr:last-child > th,
+tbody tr:last-child > td {
+  border-bottom: 0;
+}
+
+tfoot th,
+tfoot td {
+  font-weight: 600;
+  border-top: 2px solid var(--border);
+  border-bottom: 0;
+}
+
+.num {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.amt {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.unit {
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
+th.num {
+  text-align: right;
+}
+
+.neg {
+  color: var(--neg);
+}
+
+.line {
+  display: block;
+}
+
+/* Read by a screen reader, not seen: the caption of a table whose heading says it. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.group-row th,
+.group-row td {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+
+.indent {
+  padding-left: 1.6rem;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.badge-draft {
+  background: var(--draft-bg);
+  border-color: var(--draft-edge);
+}
+
+.badge-void {
+  color: var(--void-text);
+  text-decoration: line-through;
+}
+
+.badge-over {
+  background: var(--over-bg);
+  border-color: var(--over);
+  color: var(--over);
+  font-weight: 600;
+}
+
+.badge-ok {
+  background: var(--ok-bg);
+}
+
+tr.draft > td,
+tr.draft > th {
+  background: var(--draft-bg);
+}
+
+tr.draft > :first-child {
+  border-left: 4px dashed var(--draft-edge);
+}
+
+tr.void > td,
+tr.void > th {
+  color: var(--void-text);
+}
+
+tr.void .num,
+tr.void .memo {
+  text-decoration: line-through;
+}
+
+tr.current > td,
+tr.current > th {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+
+details {
+  margin: 0.5rem 0 1rem;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+details > ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+}
+
+/* Charts (inline SVG from pkg/svgchart) and budget meters */
+
+.chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 26rem;
+  margin: 0.5rem 0;
+}
+
+.chart text {
+  fill: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.chart-value {
+  fill: var(--muted);
+}
+
+.chart-bar,
+.chart-fill {
+  fill: var(--bar);
+}
+
+.chart-bar-hl {
+  fill: var(--bar-hl);
+}
+
+.chart-track {
+  fill: var(--track);
+}
+
+.chart-fill-over {
+  fill: var(--over);
+}
+
+.chart-limit {
+  stroke: var(--text);
+  stroke-width: 1.5;
+}
+
+.chart a:hover text {
+  text-decoration: underline;
+}
+
+.chart a:focus-visible {
+  outline: 2px solid var(--focus);
+}
+
+.chart-progress {
+  max-width: 22rem;
+  margin: 0.25rem 0;
+  /* The limit marker sits on the edge of the track when the budget is just spent. */
+  overflow: visible;
+}
+
+.budget-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.75rem;
+  margin-top: 0.8rem;
+}
+
+.budget-head h3 {
+  margin: 0;
+}
+
+.split {
+  display: grid;
+  gap: 1rem;
+}
+
+/* A table that is too wide for a phone is a list of cards there: each row is a block,
+   and each cell says what it is (data-label) in front of its value. The headings of
+   the columns are kept for screen readers, which the roles in the markup give the
+   table back that display: block takes away. Between a phone and a desktop a wide
+   table keeps its width and scrolls in its frame. */
+table.wide {
+  min-width: 54rem;
+}
+
+@media (max-width: 40rem) {
+  .site-nav a {
+    padding: 0.55rem 0.5rem;
+  }
+
+  table.wide {
+    min-width: 0;
+  }
+
+  table.stack,
+  .stack tbody,
+  .stack tfoot,
+  .stack tr,
+  .stack th,
+  .stack td {
+    display: block;
+  }
+
+  .stack thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .stack tr {
+    padding: 0.6rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .stack tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  .stack th,
+  .stack td {
+    border: 0;
+    padding: 0.15rem 0;
+  }
+
+  .stack td {
+    position: relative;
+    min-height: 1.4em;
+    padding-left: 7.4rem;
+  }
+
+  .stack td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 0;
+    top: 0.2rem;
+    width: 6.8rem;
+    color: var(--muted);
+    font-size: 0.8rem;
+    text-align: left;
+  }
+
+  .stack td:empty {
+    display: none;
+  }
+
+  .stack th[scope="row"] {
+    font-weight: 600;
+  }
+
+  /* The tint and the dashed edge of a row go on the row, which holds its cells. */
+  .stack tr.draft,
+  .stack tr.current {
+    background: var(--surface-2);
+  }
+
+  .stack tr.draft {
+    background: var(--draft-bg);
+    border-left: 4px dashed var(--draft-edge);
+  }
+
+  .stack tr.draft > td,
+  .stack tr.draft > th,
+  .stack tr.current > td,
+  .stack tr.current > th {
+    background: transparent;
+  }
+
+  .stack tr.draft > :first-child {
+    border-left: 0;
+  }
+}
+
+@media (min-width: 52rem) {
+  main {
+    padding-top: 1rem;
+  }
+
+  h1 {
+    font-size: 1.75rem;
+  }
+
+  .split {
+    grid-template-columns: minmax(0, 26rem) minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .chart {
+    max-width: 30rem;
+  }
+}
+
+@media print {
+  .site-nav,
+  .skip-link {
+    display: none;
+  }
+}

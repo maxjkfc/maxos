@@ -39,10 +39,11 @@ func New(
 }
 
 // Module provides the use cases to the Fx graph as usecase.SetAreaBudget,
-// SetProjectBudget, RemoveProjectBudget, GetAreaBudgets and GetProjectBudgets, all
-// backed by one Service. It needs a tx.Transactor, a repo.BudgetRepo, a
-// repo.CategoryRepo, a repo.InstrumentRepo, a clock.Clock, and the catalog's
-// usecase.VerifyReferences, usecase.ListAreas and usecase.ListProjects.
+// SetProjectBudget, RemoveProjectBudget, GetAreaBudgets, GetProjectBudgets,
+// GetSpending and GetSpendingTrend, all backed by one Service. It needs a
+// tx.Transactor, a repo.BudgetRepo, a repo.CategoryRepo, a repo.InstrumentRepo, a
+// clock.Clock, and the catalog's usecase.VerifyReferences, usecase.ListAreas and
+// usecase.ListProjects.
 func Module() fx.Option {
 	return fx.Provide(fx.Annotate(New,
 		fx.As(new(usecase.SetAreaBudget)),
@@ -50,5 +51,7 @@ func Module() fx.Option {
 		fx.As(new(usecase.RemoveProjectBudget)),
 		fx.As(new(usecase.GetAreaBudgets)),
 		fx.As(new(usecase.GetProjectBudgets)),
+		fx.As(new(usecase.GetSpending)),
+		fx.As(new(usecase.GetSpendingTrend)),
 	))
 }

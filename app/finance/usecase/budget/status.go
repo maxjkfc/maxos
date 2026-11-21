@@ -19,8 +19,9 @@ import (
 // The budget of an area in the month is the one in force in it, which is for the
 // domain to pick from all the budgets there are (model.BudgetsInForce). What was
 // spent is what the repo adds up for the days of the month, up to today and no
-// further: the days of a month that has not begun are not asked for at all, and a
-// month that has ended is asked for to its last day.
+// further, as the domain says (model.SpendingRange): the days of a month that has
+// not begun are not asked for at all, and a month that has ended is asked for to
+// its last day.
 //
 // The areas are those that have a budget in force or spending, which the catalog
 // puts in order by name, so that an area it does not list is an error and not
@@ -37,13 +38,9 @@ func (s *Service) GetAreaBudgets(ctx context.Context, in usecase.GetAreaBudgetsI
 	}
 	inForce := model.BudgetsInForce(budgets, month)
 
-	through := model.LastDayOf(month)
-	if today := s.today(); today.Before(through) {
-		through = today
-	}
 	var spending []model.AreaSpending
-	if !through.Before(month) {
-		if spending, err = s.budgets.AreaSpending(ctx, month, through); err != nil {
+	if from, through, begun := model.SpendingRange(month, month, s.today()); begun {
+		if spending, err = s.budgets.AreaSpending(ctx, from, through); err != nil {
 			return usecase.GetAreaBudgetsOutput{}, fmt.Errorf("get what the areas spent in %s: %w", month.Format("2006-01"), err)
 		}
 	}

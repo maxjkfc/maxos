@@ -1,0 +1,36 @@
+{{define "content"}}{{with .Data}}
+{{template "monthnav" .}}
+<p class="muted small">統計已確認的支出，以本位幣金額計，算到今天為止，和預算的「已花」是同一個算法。</p>
+
+<h2>{{.Month}} 的支出（依類別）</h2>
+{{if .Top}}<p>合計 <strong>{{template "amount" .Total}}</strong></p>
+<div class="split">
+<div>{{.ByCategoryChart}}</div>
+<div class="table-wrap">
+<table>
+<caption>各類別的支出和子類別</caption>
+<thead><tr><th scope="col">類別</th><th scope="col" class="num">金額</th><th scope="col" class="num">占比</th></tr></thead>
+{{range .Top}}<tbody>
+<tr class="group-row"><th scope="row">{{.Name}}</th><td class="num">{{template "amount" .Total}}</td><td class="num">{{.Share}}</td></tr>
+{{range .Children}}<tr><th scope="row" class="indent">{{.Name}}</th><td class="num">{{template "amount" .Amount}}</td><td class="num">{{.Share}}</td></tr>
+{{end}}</tbody>
+{{end}}</table>
+</div>
+</div>
+{{else}}<p class="empty">{{.Month}} 沒有支出。</p>
+{{end}}
+
+<h2>最近十二個月每月的支出</h2>
+<div class="split">
+<div>{{.TrendChart}}</div>
+<div class="table-wrap">
+<table>
+<caption>每月的支出合計</caption>
+<thead><tr><th scope="col">月份</th><th scope="col" class="num">支出合計</th></tr></thead>
+<tbody>
+{{range .Trend}}<tr{{if .Selected}} class="current" aria-current="true"{{end}}><th scope="row"><a href="{{.Href}}">{{.Month}}</a></th><td class="num">{{template "amount" .Total}}</td></tr>
+{{end}}</tbody>
+</table>
+</div>
+</div>
+{{end}}{{end}}

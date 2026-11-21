@@ -7,7 +7,7 @@ maxos 的分層、依賴規則與技術選型。所有開發（含 subagent 派�
 - 單一使用者的個人系統，跑在一台 Mac mini 上。
 - 一個 Go binary（modular monolith）加一個 PostgreSQL。
 - Context 依序加入：finance、health、project。Context 之間會互相關聯。
-- 對外只有 MCP 端點，經 Cloudflare Tunnel 與 Cloudflare Access；其餘只在本機或 Tailscale 內。
+- 對外只有 MCP 端點與唯讀的網頁（`/app/`），經 Cloudflare Tunnel 與同一個 Cloudflare Access；其餘只在本機或 Tailscale 內。
 
 ## 2. 目錄結構
 
@@ -18,6 +18,7 @@ main.go                          只呼叫 cmd.Execute()
 cmd/                             Cobra 子指令與 FX 組裝
   root.go  serve.go  mcp_stdio.go  migrate.go
   dp.go                          所有 FX module 的組裝
+  web.go                         網頁的 FX module（WebModule）
 app/
   <context>/
     domain/
@@ -29,14 +30,15 @@ app/
         in/usecase/              use case 介面與 Input / Output
         out/<kind>/              對外介面：repo、pricefeed 等
     adapter/
-      in/<transport>/            mcp、cli、http
+      in/<transport>/            mcp（工具）、web（頁面）
       out/
         persistence/postgres/    repo 實作、sqlc 查詢與產生碼
         <kind>/                  其他對外實作
 pkg/                             與業務無關的技術元件
-  config/  log/  postgres/  cfaccess/  mcpserver/  clock/
+  config/  log/  postgres/  cfaccess/  mcpserver/  webserver/  svgchart/  clock/
 migrations/                      goose 的 SQL migration（Go package，內嵌進 binary）
 internal/testpg/                 整合測試用的資料庫輔助
+internal/webtest/               網頁測試用的 Access 替身（自簽金鑰與信任它的 verifier）
 docs/
 ```
 
@@ -62,7 +64,7 @@ docs/
 | `adapter/out` | port 的實作 | 產生的 DB 型別不能傳出 adapter |
 | `pkg` | 技術元件 | 不能 import `app/` |
 
-業務規則的歸屬：單一 entity 能判斷的放 `domain/model`；要查資料或跨 entity 的放 use case 或 `domain/service`。例如「文字長度 1 到 4000」屬於 inbox 的 domain，「同一冪等鍵回傳既有紀錄」屬於 use case。
+業務規則的歸屬：單一 entity 能判斷的放 `domain/model`；要查資料或跨 entity 的放 use case 或 `domain/service`。例如「文字長度 1 到 4000」屬於 inbox 的 domain，「同一冪等鍵回傳既有紀錄」屬於 use case。輸入端 adapter 只做格式：網頁把金額寫成標的的小數位數與千分位、把代碼換成用語，不重算 use case 給的數字。
 
 ## 4. 依賴規則
 
@@ -82,7 +84,7 @@ adapter  →  usecase  →  domain
 6. 只有 `cmd/` 知道具體實作，負責把 adapter 注入 port。
 7. **時間**：use case 與 domain 不呼叫 `time.Now()`、`time.Since()`、`time.Until()`（三者都讀牆上的時鐘）。use case 要知道現在或今天，只經自己 context 的 `usecase/port/out/clock`（介面只有 `Now()`），由 `cmd/` 以 `pkg/clock` 實作並注入，時區來自 `MAXOS_TIMEZONE`（預設 `Asia/Taipei`）；測試給假的時鐘。資料庫記下的寫入時間（`confirmed_at` 等）不在此限，那是何時寫入，不是使用者的「今天」。
 
-以上規則由 golangci-lint 在 `make check` 檢查：第 1 至 6 點是 import 限制（depguard），第 7 點是 `forbidigo`，禁止 `app/<context>/domain` 與 `app/<context>/usecase` 的非測試檔使用 `time.Now`、`time.Since`、`time.Until`（`pkg/clock` 與 `cmd/` 不在此限）。
+以上規則由 golangci-lint 在 `make check` 檢查：第 1 至 6 點是 import 限制（depguard），第 7 點是 `forbidigo`，禁止 `app/<context>/domain` 與 `app/<context>/usecase` 的非測試檔使用 `time.Now`、`time.Since`、`time.Until`（`pkg/clock` 與 `cmd/` 不在此限）。輸入端 adapter 的不同種類（`adapter/in/mcp`、`adapter/in/web`）之間也不互相 import，網頁 adapter 不碰資料庫與 MCP SDK，見第 11 節。
 
 ## 5. 技術選型
 
@@ -100,7 +102,8 @@ adapter  →  usecase  →  domain
 | 設定 | 環境變數，`.env` 不進版控 | |
 | HTTP | 標準函式庫 `net/http` | |
 | MCP | 官方 Go SDK，Streamable HTTP（stateless）與 stdio | |
-| 對外入口 | Cloudflare Tunnel，只對應 MCP | |
+| 網頁 | `html/template` 伺服器端渲染；圖表是伺服器產生的 inline SVG（`pkg/svgchart`）；一份內嵌的樣式表 | 沒有 JavaScript、CDN 或任何外部請求；`Content-Security-Policy: default-src 'self'` |
+| 對外入口 | Cloudflare Tunnel，對應 MCP（`/mcp`）與唯讀網頁（`/app/`） | |
 | 認證 | Cloudflare Access（Managed OAuth、passkey）；origin 驗證 `Cf-Access-Jwt-Assertion` | 沒有關閉驗證的開關 |
 
 ## 6. 資料庫慣例
@@ -114,7 +117,7 @@ adapter  →  usecase  →  domain
   - 版本固定，透過 `make sqlc` 執行。
   - `make check` 會重新產生並要求無差異。
 - **手寫 SQL 的例外**：有可選篩選條件的動態查詢，可以在同一個 adapter 裡手寫，集中在 `queries.go`。
-- **交易邊界**由 use case 決定，repo 不自行開交易。唯一的例外是需要用同一份快照讀好幾條語句的唯讀 repo 方法，它可以用 `DB.WithinSnapshot` 開唯讀的 `REPEATABLE READ` 交易（目前是 finance 的 `TransactionRepo.List` 與 `TransactionRepo.Statement`）；寫入一律由 use case 決定。
+- **交易邊界**由 use case 決定，repo 不自行開交易。唯一的例外是需要用同一份快照讀好幾條語句的唯讀 repo 方法，它可以用 `DB.WithinSnapshot` 開唯讀的 `REPEATABLE READ` 交易（目前是 finance 的 `TransactionRepo.List`、`TransactionRepo.Statement` 與 `TransactionRepo.DraftSummary`）；寫入一律由 use case 決定。
   - `pkg/postgres` 的 `DB` 是 repo 執行 SQL 的入口（`dbgen.New(postgres.NewDB(pool))`）：語句會自動加入 context 帶著的交易，沒有交易就直接走連線池，所以 repo 不需要知道交易的存在。
   - `DB.WithinTx(ctx, fn)` 開啟交易，並把交易放進傳給 `fn` 的 context；`fn` 回傳 `nil` 才提交，回傳錯誤或 panic 就回滾；`fn` 內再呼叫 `WithinTx` 會用 savepoint，內層回傳錯誤時（含 context 在提交前已結束，以及 `fn` 忽略失敗的語句後回傳 `nil`），內層的寫入一律還原，外層交易仍可繼續使用。
   - use case 不能 import `pkg/`：需要交易的 use case 在自己 context 的 `usecase/port/out/` 宣告只有 `WithinTx(ctx context.Context, fn func(ctx context.Context) error) error` 的介面（finance 的是 `usecase/port/out/tx` 的 `Transactor`），由 `cmd/` 把 `*postgres.DB` 注入。
@@ -127,7 +130,7 @@ adapter  →  usecase  →  domain
 | `domain` | 純單元測試，不需要資料庫 |
 | `usecase` | 單元測試，port 用假實作 |
 | `adapter/out/persistence` | `*_integration_test.go`，用真的 PostgreSQL |
-| `adapter/in` | 透過真的協定客戶端呼叫（MCP 用記憶體內 transport） |
+| `adapter/in` | 透過真的協定客戶端呼叫（MCP 用記憶體內 transport）；網頁透過真的 mux 與 Access 中介層發請求（`internal/webtest` 的自簽金鑰），檢查回傳的 HTML |
 | `cmd` | `cmd/*_integration_test.go`，用 `cmd/` 的 Fx 模組（`CatalogModule`、`FinanceModule`…）加真的 PostgreSQL，驗證跨 context、使用者看得到的行為，不是測接線；adapter 與 use case 互相不能 import，只有 `cmd/` 同時知道兩邊，所以這類測試放在這裡 |
 
 - 整合測試用 `internal/testpg`：每個測試程式建一次套完 migration 的 template database，每個測試從它複製出獨立的空資料庫。
@@ -153,7 +156,7 @@ adapter  →  usecase  →  domain
 | 日誌 | Zap | `slog` | 功能夠用，少一個依賴 |
 | 設定 | Viper + `config.yaml` | 環境變數 | 設定項少，跑在 Compose |
 | Migration | 放在外部 repo | goose 內嵌 | 單一 repo，沒有共用 schema 的其他服務 |
-| HTTP 路由 | chi | 標準函式庫 | 目前只有一個 MCP 端點 |
+| HTTP 路由 | chi | 標準函式庫 | 只有 `/mcp` 與 `/app/` 兩組路徑，頁面用 `ServeMux` 的方法與萬用字元樣式 |
 
 ## 10. 新增 context 的步驟
 
@@ -161,6 +164,31 @@ adapter  →  usecase  →  domain
 2. 新增 migration，資料表用該 context 的前綴。
 3. 在 `sqlc.yaml` 加一組設定，輸出到該 context 的 postgres adapter。
 4. 在 use case 套件的 `new.go` 提供 `Module()`，並在 `cmd/dp.go` 掛上。
-5. 需要對外的動作，在 `adapter/in/mcp` 註冊工具。
+5. 需要對外的動作，在 `adapter/in/mcp` 註冊工具；需要頁面，在 `adapter/in/web` 登記頁面（第 11 節）。
 6. 更新第 2 節的 context 清單。
 7. 在 `.golangci.yml` 加上該 context 的 depguard 規則（複製 `inbox-*` 各條，改成該 context 的名稱與路徑）。
+
+## 11. 輸入端 adapter：MCP 與網頁
+
+兩種輸入端 adapter 用同一個做法：共用的註冊表放在 `pkg/`，不認識任何 context；每個 context 在自己的 `adapter/in/<種類>` 登記自己的工具或頁面；`cmd/` 把各 context 的登記函式放進 Fx 的 value group，組成註冊表，掛在 `serve` 的 HTTP server 上，外面是 Cloudflare Access 的 verifier。
+
+| | MCP | 網頁 |
+|---|---|---|
+| 共用註冊表 | `pkg/mcpserver` | `pkg/webserver`（版面、導覽、安全標頭、錯誤頁、金額與日期的格式）；圖表在 `pkg/svgchart` |
+| context 的登記 | `app/<context>/adapter/in/mcp` | `app/<context>/adapter/in/web`：頁面的 handler、view 與內嵌的 `templates/*.gohtml` |
+| Fx | `MCPModule`，value group `mcp.registrars` | `WebModule`（`cmd/web.go`），value group `web.registrars` |
+| 路徑 | `/mcp` | `/app/` 底下 |
+| 守門 | `verifier.Middleware` | 同一個 verifier；它是 `webserver.Registry.Pages` 必填的參數，沒有 guard 就建不出頁面 |
+
+網頁 adapter 可以 import 的：自己 context 的 `usecase/port`（in-port，以及時鐘的 out-port）、`domain/model`（只為了認得錯誤與取日期）、別的 context 的 `usecase/port/in`（例如 catalog 的名稱清單）、`pkg/webserver`、`pkg/svgchart`。不可以 import 的：use case 實作、`adapter/out`、別種輸入端 adapter（例如 MCP 的）、`pgx`、`pkg/postgres`、MCP SDK，由 depguard 的 `finance-adapter-in-web` 與 `finance-adapter-in-others` 檢查；別種輸入端 adapter 之後也各加一條對應的規則。
+
+網頁 adapter 另外遵守：
+
+- **只讀。** 只服務 GET 與 HEAD，其他方法回 405。之後要加寫入的動作，在 `webserver` 加 `Post` 與一個檢查來源（`Origin`、`Sec-Fetch-Site`）與 token 的 middleware，頁面的 handler 不必動；做法寫在 `docs/design/web-readonly.md`。
+- **一頁的 use case 呼叫數固定，不隨列數增加。** 列出來的東西（交易、草稿、帳單……）一次取得，名稱用的參考清單（帳戶、類別、領域……）每種一次；不在迴圈裡呼叫 use case。要的資料 use case 給不出來時，加 use case，不在 adapter 裡逐筆查。唯一隨數量增減的是信用卡帳單總覽：每張設了結帳日的卡一次 `ListCardStatements`（帳單的日子是各卡自己的），那是卡的張數，不是帳本的筆數。
+- **頁面只排版，不算數字。** 金額的小數位數、千分位、用語、把一張帳單的消費依頂層類別加起來，是格式；餘額、預算的已花、某月的支出是 use case 算的，頁面不重算。
+- **「今天」只來自時鐘 port**，時區是 `MAXOS_TIMEZONE`；日期與時間都以這個時區顯示。
+- **沒有外部資源。** 模板與唯一的一份樣式表以 `go:embed` 內嵌，圖表是伺服器產生的 inline SVG，沒有 JavaScript；每個回應帶 `Content-Security-Policy: default-src 'self'` 等標頭（`webserver.Secure`）。
+- 畫面上的用語照 `CONTEXT.md`。
+
+測試：用 `internal/webtest` 的 Access 替身（自簽金鑰、信任它的 verifier、簽好的 token）透過真的 mux 發請求，檢查拒絕、405、404 與 400 的頁面、標頭與 HTML；圖表是純函式，單獨測；`cmd/` 的測試用真的模組與 PostgreSQL 走一遍。

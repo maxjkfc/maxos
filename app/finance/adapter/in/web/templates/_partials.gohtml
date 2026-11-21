@@ -1,0 +1,10 @@
+{{/* An amount: the number, with its sign and the places of its instrument, and the code of the instrument after it. */}}
+{{define "amount"}}<span class="amt{{if .Negative}} neg{{end}}">{{.Text}}<span class="unit"> {{.Unit}}</span></span>{{end}}
+
+{{/* The links around a month; the data is a view that has Prev, Month, Next and Current. */}}
+{{define "monthnav"}}<nav class="month-nav" aria-label="切換月份">
+<a class="button" href="{{.Prev}}" rel="prev">← 上個月</a>
+<strong>{{.Month}}</strong>
+<a class="button" href="{{.Next}}" rel="next">下個月 →</a>
+<a href="{{.Current}}">回到本月</a>
+</nav>{{end}}

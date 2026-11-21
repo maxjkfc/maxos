@@ -65,6 +65,13 @@ func listFilter(in usecase.ListTransactionsInput) (repo.TransactionFilter, int, 
 			return repo.TransactionFilter{}, 0, fmt.Errorf("%w %q: want draft, confirmed or void", model.ErrInvalidStatus, in.Status)
 		}
 	}
+	if in.Kind != "" {
+		filter.Kind = model.Kind(in.Kind)
+		if !filter.Kind.Valid() {
+			return repo.TransactionFilter{}, 0, fmt.Errorf("%w %q: want expense, income, transfer, exchange, opening, reward, dealing, reconciliation, instalment or trade",
+				model.ErrInvalidKind, in.Kind)
+		}
+	}
 	if in.From != nil {
 		from := model.DateOf(*in.From)
 		filter.From = &from

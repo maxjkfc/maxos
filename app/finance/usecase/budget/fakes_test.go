@@ -73,11 +73,18 @@ type spendRow struct {
 
 // fakeBudgets is an in-memory repo.BudgetRepo. Its budgets are kept as they are
 // saved; what was spent is the rows a test adds, which it filters by day and by
-// area and project as the statements of the real repo do.
+// area and project as the statements of the real repo do, and, for Spending only,
+// the transactions a test adds, which are what the rows cannot say: a status, and
+// postings of every book.
 type fakeBudgets struct {
 	areaBudgets    []model.AreaBudget
 	projectBudgets []model.ProjectBudget
 	spending       []spendRow
+	// transactions are read by Spending only: it counts the expense postings of the
+	// confirmed ones, whatever else they hold. categories gives it the parent of the
+	// category of a posting, which a row of spending holds whole.
+	transactions []model.Transaction
+	categories   map[uuid.UUID]model.Category
 
 	// saves counts the budgets stored, new or replaced.
 	saves int
@@ -87,6 +94,10 @@ type fakeBudgets struct {
 	areaSpendingAsked    [][2]time.Time
 	projectSpendingAsked []time.Time
 	projectFilters       []*uuid.UUID
+	// spendingAsked is each range of days Spending was asked for; spendingErr, when
+	// set, is what it returns.
+	spendingAsked [][2]time.Time
+	spendingErr   error
 	// projectBudgetReads counts the calls of ProjectBudgets.
 	projectBudgetReads int
 }
@@ -191,6 +202,60 @@ func (f *fakeBudgets) ProjectSpending(_ context.Context, projectID *uuid.UUID, t
 			Spending:  model.Spending{CategoryID: row.category.ID, ParentID: row.category.ParentID, Amount: row.amount},
 		})
 	}
+	return out, nil
+}
+
+// Spending adds up, as the real repo does, the expense postings of the confirmed
+// transactions that happened from the day from to the day to, both days included,
+// for each month and category: whether the transaction has an area, a project or
+// neither, by the base amount of the posting. What it adds up is the rows a test
+// added, which are confirmed expenses already, and the transactions, of which only
+// the confirmed ones count, and of their postings the expense ones only. The rows
+// come by month and then category id, one for each pair, as the statement gives
+// them.
+func (f *fakeBudgets) Spending(_ context.Context, from, to time.Time) ([]model.MonthCategorySpending, error) {
+	f.spendingAsked = append(f.spendingAsked, [2]time.Time{from, to})
+	if f.spendingErr != nil {
+		return nil, f.spendingErr
+	}
+	type key struct {
+		month    time.Time
+		category uuid.UUID
+	}
+	sums := map[key]*model.MonthCategorySpending{}
+	add := func(on time.Time, category uuid.UUID, parent *uuid.UUID, amount decimal.Decimal) {
+		if on.Before(from) || on.After(to) {
+			return
+		}
+		k := key{model.MonthOf(on), category}
+		sum, found := sums[k]
+		if !found {
+			sum = &model.MonthCategorySpending{Month: k.month, Spending: model.Spending{CategoryID: category, ParentID: parent}}
+			sums[k] = sum
+		}
+		sum.Amount = sum.Amount.Add(amount)
+	}
+	for _, row := range f.spending {
+		add(row.on, row.category.ID, row.category.ParentID, row.amount)
+	}
+	for _, txn := range f.transactions {
+		if txn.Status != model.StatusConfirmed {
+			continue
+		}
+		for _, p := range txn.Postings {
+			if p.Book == model.BookExpense {
+				add(txn.OccurredOn, *p.CategoryID, f.categories[*p.CategoryID].ParentID, *p.BaseAmount)
+			}
+		}
+	}
+
+	out := make([]model.MonthCategorySpending, 0, len(sums))
+	for _, sum := range sums {
+		out = append(out, *sum)
+	}
+	slices.SortFunc(out, func(a, b model.MonthCategorySpending) int {
+		return cmp.Or(a.Month.Compare(b.Month), slices.Compare(a.CategoryID[:], b.CategoryID[:]))
+	})
 	return out, nil
 }
 
@@ -333,6 +398,7 @@ func newEnv(t *testing.T) *env {
 		categories: &fakeCategories{categories: map[uuid.UUID]model.Category{}},
 		catalog:    newFakeCatalog(),
 	}
+	e.budgets.categories = e.categories.categories
 	e.clock.setDay(2026, time.November, 14)
 	e.svc = budget.New(e.txs, e.budgets, e.categories, fakeInstruments{}, e.catalog, e.catalog, e.catalog, e.clock)
 	return e

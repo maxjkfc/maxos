@@ -1,0 +1,30 @@
+{{define "layout"}}<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex, nofollow">
+<title>{{.Title}}・maxos</title>
+<link rel="stylesheet" href="{{.Style}}">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到內容</a>
+<header class="site-header">
+<div class="site-header-bar">
+<span class="brand">maxos</span>
+<span class="who">登入身分 <strong>{{.User.Name}}</strong></span>
+</div>
+<nav class="site-nav" aria-label="主選單">
+<ul>
+{{range .Nav}}<li><a href="{{.Href}}"{{if .Current}} aria-current="page"{{end}}>{{.Label}}</a></li>
+{{end}}</ul>
+</nav>
+</header>
+<main id="main">
+<h1>{{.Title}}</h1>
+{{template "content" .}}
+</main>
+</body>
+</html>
+{{end}}

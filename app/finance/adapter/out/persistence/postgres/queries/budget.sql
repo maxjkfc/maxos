@@ -99,3 +99,31 @@ WHERE t.status = 'confirmed' AND p.book = 'expense'
   AND (sqlc.narg('project_id')::uuid IS NULL OR t.project_id = sqlc.narg('project_id'))
 GROUP BY t.project_id, p.category_id, c.parent_id
 ORDER BY t.project_id, p.category_id;
+
+-- name: ListSpending :many
+-- What was spent, with no area or project in the way: the base amounts of the
+-- expense postings of the confirmed transactions that happened on the days from
+-- from_day to to_day, both days included, added up for each month (the first day of
+-- the month the transaction happened in) and category. It is the definition of
+-- ListAreaSpending and ListProjectSpending, the same transactions and postings, but
+-- with no area or project to group by and none to keep out: a transaction counts
+-- whether it belongs to an area, a project, both or neither, so what a month adds
+-- up to is what the areas spent in it, projects included (ListAreaSpending), and
+-- the expenses that have no area. Every kind of transaction has expense postings
+-- that count (the fee of a transfer, the interest of an instalment period); a draft
+-- or a void transaction has none that do; a reward is not an expense posting, and a
+-- discount is a column of one, not a posting; a share of what I paid for others is
+-- a dealing posting. parent_id is the parent category of the category, NULL for a
+-- top-level one. The month is cut from a timestamp, so that no time zone is in it.
+-- By month, then category id.
+SELECT date_trunc('month', t.occurred_on::timestamp)::date AS month,
+       p.category_id::uuid AS category_id,
+       c.parent_id,
+       sum(p.base_amount)::numeric AS amount
+FROM fin_posting p
+JOIN fin_transaction t ON t.id = p.transaction_id
+JOIN fin_category c ON c.id = p.category_id
+WHERE t.status = 'confirmed' AND p.book = 'expense'
+  AND t.occurred_on >= @from_day AND t.occurred_on <= @to_day
+GROUP BY date_trunc('month', t.occurred_on::timestamp), p.category_id, c.parent_id
+ORDER BY date_trunc('month', t.occurred_on::timestamp), p.category_id;

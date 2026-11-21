@@ -19,6 +19,8 @@ var ErrDuplicateKey = errors.New("idempotency key already exists")
 type TransactionFilter struct {
 	// Status limits the list to that status; empty lists every status.
 	Status model.Status
+	// Kind limits the list to that kind of transaction; empty lists every kind.
+	Kind model.Kind
 	// From and To bound the day the transactions happened on, both ends included.
 	// They are dates as model.DateOf makes them; nil leaves that end open.
 	From, To *time.Time
@@ -89,7 +91,7 @@ type StatementContent struct {
 // transaction in several statements and relies on the database to check, when
 // its transaction commits, that the postings add up to zero; and GetForUpdate,
 // whose lock lasts until its transaction ends. The only transaction a repo opens
-// is the read-only snapshot of List and of Statement.
+// is the read-only snapshot of List, of Statement and of DraftSummary.
 type TransactionRepo interface {
 	// Insert stores the transaction, a draft, with its postings and tags, and
 	// returns it as stored, including the fields the store assigns (CreatedAt). A
@@ -200,4 +202,21 @@ type TransactionRepo interface {
 	// figures add up. Call it outside a database transaction, or inside one that is
 	// REPEATABLE READ or stricter, as for List.
 	Statement(ctx context.Context, f StatementFilter) (StatementContent, error)
+	// DraftSummary reads the drafts that are waiting to be confirmed, grouped by the
+	// month they happened in and then by the account they move (see
+	// model.DraftSummary): how many there are in each group and what they would move
+	// of each instrument. Only the transactions that are drafts are in it, whatever day
+	// they happened on, and nothing limits them to today: a draft changes nothing
+	// until it is confirmed, and one dated after today is waiting like any other. An
+	// account posting is a posting of the account book: the instalment posting of the
+	// origin of a purchase paid in instalments is not one, so a draft that has no
+	// account posting is in the group of its month that has no account. The months
+	// come newest first, the accounts of a month by account name and then id with
+	// that group last, and the amounts of an account by instrument code. It reads all
+	// of it in one snapshot, as Statement does, so that the counts and the amounts
+	// are of the same drafts: a draft that is confirmed or discarded while it runs is
+	// in all of them or none. Call it outside a database transaction, or inside one
+	// that is REPEATABLE READ or stricter, as for List. There is nothing to return
+	// for no draft: no months.
+	DraftSummary(ctx context.Context) (model.DraftSummary, error)
 }
