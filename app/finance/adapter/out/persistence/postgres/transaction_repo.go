@@ -416,81 +416,42 @@ func (r *TransactionRepo) Statement(ctx context.Context, f repo.StatementFilter)
 	return content, nil
 }
 
-// DraftSummary reads the drafts that are waiting: how many there are in each month,
-// how many of each month move each account, and what they would move of each
-// instrument, as three statements in one snapshot (see WithinSnapshot in
-// pkg/postgres). Read apart they could disagree, a draft that is confirmed between
-// two of them being in one and not in the other; in one snapshot every number is of
-// the same drafts.
-func (r *TransactionRepo) DraftSummary(ctx context.Context) (model.DraftSummary, error) {
-	var summary model.DraftSummary
-	err := r.db.WithinSnapshot(ctx, func(ctx context.Context) error {
-		months, err := r.q.ListDraftMonths(ctx)
-		if err != nil {
-			return fmt.Errorf("count the drafts of each month: %w", err)
-		}
-		accounts, err := r.q.ListDraftAccounts(ctx)
-		if err != nil {
-			return fmt.Errorf("count the drafts that move each account: %w", err)
-		}
-		amounts, err := r.q.ListDraftAmounts(ctx)
-		if err != nil {
-			return fmt.Errorf("add up what the drafts move: %w", err)
-		}
-		summary, err = draftSummaryOf(months, accounts, amounts)
-		return err
-	})
+// DraftTransactions reads every draft with its postings to accounts, and the periods
+// of draft plans among them, in one statement (ListDraftPostings): a row for each
+// posting, and one for a draft that has none. The rows of a transaction come together,
+// which is what puts them back under it. One statement reads one snapshot, so a draft
+// that is confirmed or discarded meanwhile is in it with all its postings, or not at
+// all, and nothing here needs a database transaction of its own.
+func (r *TransactionRepo) DraftTransactions(ctx context.Context) ([]model.DraftTransaction, error) {
+	rows, err := r.q.ListDraftPostings(ctx)
 	if err != nil {
-		return model.DraftSummary{}, err
+		return nil, fmt.Errorf("list the drafts with their postings to accounts: %w", err)
 	}
-	return summary, nil
-}
-
-// draftSummaryOf puts the rows of the three statements of DraftSummary together:
-// the accounts under their months, in the order of their rows, and the amounts under
-// the account of the month they are of. A row that has no place to go means that the
-// statements were not read in one snapshot.
-func draftSummaryOf(months []dbgen.ListDraftMonthsRow, accounts []dbgen.ListDraftAccountsRow, amounts []dbgen.ListDraftAmountsRow) (model.DraftSummary, error) {
-	summary := model.DraftSummary{Months: make([]model.DraftMonth, len(months))}
-	monthAt := make(map[int64]int, len(months)) // a month, as the Unix time of its first day, to its place in summary.Months
-	for i, row := range months {
-		summary.Months[i] = model.DraftMonth{Month: row.Month, Count: int(row.Drafts)}
-		monthAt[row.Month.Unix()] = i
-	}
-
-	// group is an account, or none, in a month; place is where it is in the summary.
-	type group struct {
-		month   int64
-		account uuid.NullUUID
-	}
-	type place struct{ month, account int }
-	accountAt := make(map[group]place, len(accounts))
-	for _, row := range accounts {
-		m, ok := monthAt[row.Month.Unix()]
-		if !ok {
-			return model.DraftSummary{}, fmt.Errorf("the drafts of %s that move accounts were not counted for the month: the statements were not read in one snapshot",
-				row.Month.Format("2006-01"))
+	var txns []model.DraftTransaction
+	for _, row := range rows {
+		if len(txns) == 0 || txns[len(txns)-1].ID != row.TransactionID {
+			txns = append(txns, model.DraftTransaction{
+				ID:         row.TransactionID,
+				Kind:       model.Kind(row.Kind),
+				OccurredOn: row.OccurredOn,
+				PlanID:     optionalUUID(row.PlanID),
+				PlanSeq:    planSeq(row.PlanSeq),
+			})
 		}
-		month := &summary.Months[m]
-		accountAt[group{row.Month.Unix(), row.AccountID}] = place{month: m, account: len(month.Accounts)}
-		month.Accounts = append(month.Accounts, model.DraftAccount{AccountID: optionalUUID(row.AccountID), Count: int(row.Drafts)})
-	}
-
-	for _, row := range amounts {
-		at, ok := accountAt[group{row.Month.Unix(), uuid.NullUUID{UUID: row.AccountID, Valid: true}}]
-		if !ok {
-			return model.DraftSummary{}, fmt.Errorf("the drafts of %s that move account %s were not counted for it: the statements were not read in one snapshot",
-				row.Month.Format("2006-01"), row.AccountID)
+		if !row.AccountID.Valid {
+			continue // a draft with no posting to an account
 		}
-		account := &summary.Months[at.month].Accounts[at.account]
-		account.Amounts = append(account.Amounts, model.DraftAmount{
-			InstrumentID:   row.InstrumentID,
-			InstrumentCode: row.InstrumentCode,
-			Outflow:        row.Outflow,
-			Inflow:         row.Inflow,
+		txn := &txns[len(txns)-1]
+		txn.Postings = append(txn.Postings, model.DraftPosting{
+			AccountID:      row.AccountID.UUID,
+			AccountName:    row.AccountName.String,
+			Book:           model.Book(row.Book.String),
+			InstrumentID:   row.InstrumentID.UUID,
+			InstrumentCode: row.InstrumentCode.String,
+			Quantity:       row.Quantity.Decimal,
 		})
 	}
-	return summary, nil
+	return txns, nil
 }
 
 // loadOne returns the transaction a row holds, with its postings and tags.

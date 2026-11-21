@@ -166,7 +166,8 @@ func buildPlan(r *refs, current usecase.Transaction, seq int, plan usecase.Insta
 // docs/design/m1-ledger.md, section 3): the expense postings of an expense are what
 // was bought, and those of any other kind are a fee, the interest of a period of an
 // instalment plan, or what a reconciliation found missing; a dealing posting of an
-// expense is a share of what I paid for someone, or what a party paid for me.
+// expense is a share of what I paid for someone, or what I owe a party who paid for
+// me.
 func partsOf(r *refs, t usecase.Transaction) []partView {
 	var parts []partView
 	for _, p := range t.Postings {
@@ -182,7 +183,7 @@ func partsOf(r *refs, t usecase.Transaction) []partView {
 				Role:   "折扣",
 				Target: targetOf(r, p),
 				Amount: r.money(p.InstrumentID, *p.Discount),
-				Note:   "店家結帳當下少收的金額，只留作記錄；支出以實付金額計。",
+				Note:   "店家結帳當下少收的金額，不影響支出：支出以實付金額計。",
 			})
 		}
 	}
@@ -191,43 +192,43 @@ func partsOf(r *refs, t usecase.Transaction) []partView {
 
 // roleOf says what a posting of a transaction of the kind is for.
 func roleOf(kind string, p usecase.Posting) string {
-	switch p.Book {
-	case "account":
+	switch model.Book(p.Book) {
+	case model.BookAccount:
 		return "帳戶"
-	case "expense":
-		switch kind {
-		case "expense":
+	case model.BookExpense:
+		switch model.Kind(kind) {
+		case model.KindExpense:
 			return "主要金額"
-		case "instalment":
+		case model.KindInstalment:
 			return "利息"
-		case "reconciliation":
+		case model.KindReconciliation:
 			return "未記錄"
 		default:
 			return "手續費"
 		}
-	case "income":
-		if kind == "reconciliation" {
+	case model.BookIncome:
+		if model.Kind(kind) == model.KindReconciliation {
 			return "未記錄"
 		}
 		return "主要金額"
-	case "dealing":
+	case model.BookDealing:
 		switch {
-		case kind != "expense":
-			return "往來"
+		case model.Kind(kind) != model.KindExpense:
+			return dealingLabel
 		case p.Quantity.IsNegative():
-			return "別人代付"
+			return dealingLabel + "（我欠對方）"
 		default:
 			return "分攤"
 		}
-	case "reward":
+	case model.BookReward:
 		return "回饋"
-	case "instalment":
+	case model.BookInstalment:
 		return unbilledLabel
-	case "conversion":
+	case model.BookConversion:
 		return "中介（換匯、買賣）"
-	case "opening":
+	case model.BookOpening:
 		return "期初餘額"
-	case "adjustment":
+	case model.BookAdjustment:
 		return "數量修正"
 	default:
 		return p.Book

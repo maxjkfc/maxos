@@ -23,7 +23,7 @@
 {{if .Figures}}<td role="cell" data-label="上期餘額" class="num">{{range .Figures}}<span class="line">{{template "amount" .Previous}}</span>{{end}}</td>
 <td role="cell" data-label="本期消費" class="num">{{range .Figures}}<span class="line">{{template "amount" .Charges}}</span>{{end}}</td>
 <td role="cell" data-label="繳款與退款" class="num">{{range .Figures}}<span class="line">{{template "amount" .Credits}}</span>{{end}}</td>
-<td role="cell" data-label="期末餘額" class="num">{{range .Figures}}<span class="line">{{template "amount" .Closing}}</span>{{end}}</td>{{else}}<td role="cell" data-label="" class="num muted" colspan="4">這一期沒有款項</td>{{end}}
+<td role="cell" data-label="期末餘額" class="num">{{range .Figures}}<span class="line">{{template "amount" .Closing}}</span>{{end}}</td>{{else}}<td role="cell" data-label="" class="muted note-cell" colspan="4">這一期沒有款項</td>{{end}}
 </tr>
 {{end}}</tbody>
 </table>

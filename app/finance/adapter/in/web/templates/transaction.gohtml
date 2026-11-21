@@ -45,7 +45,7 @@
 <th scope="row" role="rowheader"><a href="{{.Href}}">{{.Label}}</a>{{if .Current}} <span class="badge">目前這筆</span>{{end}}</th>
 <td role="cell" data-label="日期" class="nowrap">{{.Date}}</td>
 <td role="cell" data-label="狀態"><span class="badge badge-{{.StatusKey}}">{{.Status}}</span></td>
-<td role="cell" data-label="金額" class="num">{{range .Moves}}<span class="line">{{if $many}}<span class="muted small">{{.Where}}　</span>{{end}}{{template "amount" .Amount}}</span>{{end}}</td>
+<td role="cell" data-label="金額" class="num">{{range .Moves}}<span class="line">{{if or $many .Indirect}}<span class="where muted small">{{.Where}}　</span>{{end}}{{template "amount" .Amount}}</span>{{end}}</td>
 </tr>
 {{end}}</tbody>
 </table>

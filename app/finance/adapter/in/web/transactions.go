@@ -79,20 +79,27 @@ type txRow struct {
 // or in the principal of an instalment plan that is not yet due.
 type movement struct {
 	// Where is the account, or says what else the amount is of, when it is not one.
-	Where  string
-	Amount amountView
+	Where string
+	// Indirect is true when the amount is not a posting to an account (the principal
+	// of an instalment that is not yet due, a dealing with a party): a row always
+	// says what it is then, because it is not what the account holds.
+	Indirect bool
+	Amount   amountView
 }
 
 // transactions lists the transactions of a month, with the filters of the query. It
 // asks for one page, and reads the lists that name the rows once.
 func (h *handlers) transactions(r *http.Request) (webserver.Page, error) {
 	ctx := r.Context()
-	q := r.URL.Query()
+	q, err := queryOf(r, "month", "account", "status", "kind", "page")
+	if err != nil {
+		return webserver.Page{}, err
+	}
 	month, err := monthParam(q, h.today())
 	if err != nil {
 		return webserver.Page{}, err
 	}
-	account, err := idParam(q, "account")
+	account, withoutAccount, err := accountParam(q)
 	if err != nil {
 		return webserver.Page{}, err
 	}
@@ -100,17 +107,18 @@ func (h *handlers) transactions(r *http.Request) (webserver.Page, error) {
 	if err != nil {
 		return webserver.Page{}, err
 	}
-	f := listFilter{Month: month, Account: account, Status: q.Get("status"), Kind: q.Get("kind")}
+	f := listFilter{Month: month, Account: account, WithoutAccount: withoutAccount, Status: q.Get("status"), Kind: q.Get("kind")}
 
 	to := model.LastDayOf(month)
 	out, err := h.p.ListTransactions.ListTransactions(ctx, usecase.ListTransactionsInput{
-		Status:    f.Status,
-		Kind:      f.Kind,
-		From:      &month,
-		To:        &to,
-		AccountID: account,
-		Limit:     pageSize,
-		Offset:    (page - 1) * pageSize,
+		Status:         f.Status,
+		Kind:           f.Kind,
+		From:           &month,
+		To:             &to,
+		AccountID:      account,
+		WithoutAccount: withoutAccount,
+		Limit:          pageSize,
+		Offset:         (page - 1) * pageSize,
 	})
 	if err != nil {
 		return webserver.Page{}, fail(err)
@@ -127,7 +135,7 @@ func (h *handlers) transactions(r *http.Request) (webserver.Page, error) {
 		Current:  f.link(model.MonthOf(h.today()), 1),
 		Filters:  f.form(names),
 		Page:     page,
-		Filtered: f.Account != nil || f.Status != "" || f.Kind != "",
+		Filtered: f.Account != nil || f.WithoutAccount || f.Status != "" || f.Kind != "",
 	}
 	if page > 1 {
 		v.PrevPage = f.link(month, page-1)
@@ -145,16 +153,35 @@ func (h *handlers) transactions(r *http.Request) (webserver.Page, error) {
 type listFilter struct {
 	Month   time.Time
 	Account *uuid.UUID
-	Status  string
-	Kind    string
+	// WithoutAccount lists the transactions that are of no account, which an account
+	// cannot be chosen for.
+	WithoutAccount bool
+	Status         string
+	Kind           string
+}
+
+// noAccount is what the account parameter says to list the transactions that are of
+// no account.
+const noAccount = "none"
+
+// accountParam reads the account to list the transactions of: an id, or noAccount.
+func accountParam(q url.Values) (account *uuid.UUID, without bool, err error) {
+	if q.Get("account") == noAccount {
+		return nil, true, nil
+	}
+	account, err = idParam(q, "account")
+	return account, false, err
 }
 
 // link is the page of the list of a month, and of a page of it, with the filters
 // kept.
 func (f listFilter) link(month time.Time, page int) string {
 	q := url.Values{"month": {webserver.FormatMonth(month)}, "status": {f.Status}, "kind": {f.Kind}}
-	if f.Account != nil {
+	switch {
+	case f.Account != nil:
 		q.Set("account", f.Account.String())
+	case f.WithoutAccount:
+		q.Set("account", noAccount)
 	}
 	if page > 1 {
 		q.Set("page", strconv.Itoa(page))
@@ -168,7 +195,10 @@ func (f listFilter) form(r *refs) filterView {
 		Month: webserver.FormatMonth(f.Month),
 		Reset: link("/app/transactions", url.Values{"month": {webserver.FormatMonth(f.Month)}}),
 	}
-	v.Accounts = append(v.Accounts, choice{Value: "", Label: "全部帳戶", Selected: f.Account == nil})
+	v.Accounts = append(v.Accounts,
+		choice{Value: "", Label: "全部帳戶", Selected: f.Account == nil && !f.WithoutAccount},
+		choice{Value: noAccount, Label: "沒有帳戶的交易", Selected: f.WithoutAccount},
+	)
 	for _, a := range r.accounts {
 		label := a.Name
 		if a.ArchivedAt != nil {
@@ -285,22 +315,24 @@ func firstMemo(t usecase.Transaction) string {
 // movementsOf is what a transaction moved, as a reader asks it: what each account
 // gained or lost. A transaction that moved no account, such as the origin of an
 // instalment plan, which only makes principal owed that is not yet due, or an
-// expense that a party paid for me, shows what it did instead.
+// expense that a party paid for me, shows what it did instead, and each of those
+// amounts is marked as not being an account's (Indirect), so that it is told what it
+// is.
 func movementsOf(r *refs, t usecase.Transaction) []movement {
-	for _, book := range []string{"account", "instalment", "dealing"} {
+	for _, book := range []model.Book{model.BookAccount, model.BookInstalment, model.BookDealing} {
 		var moves []movement
 		for _, p := range t.Postings {
-			if p.Book != book {
+			if p.Book != string(book) {
 				continue
 			}
 			where := targetOf(r, p)
 			switch book {
-			case "instalment":
+			case model.BookInstalment:
 				where += "・" + unbilledLabel
-			case "dealing":
-				where = "往來・" + where
+			case model.BookDealing:
+				where = dealingLabel + "・" + where
 			}
-			moves = append(moves, movement{Where: where, Amount: r.signed(p.InstrumentID, p.Quantity)})
+			moves = append(moves, movement{Where: where, Indirect: book != model.BookAccount, Amount: r.signed(p.InstrumentID, p.Quantity)})
 		}
 		if len(moves) > 0 {
 			return moves

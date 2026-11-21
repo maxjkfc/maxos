@@ -3,6 +3,7 @@ package web
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"time"
@@ -15,7 +16,9 @@ import (
 
 // The query parameters of the pages. A parameter that does not read is a 400 page
 // that says which one, never a page of nothing: a month that is not a month must
-// not look like a month without transactions.
+// not look like a month without transactions. The page says what the parameter
+// should be and never repeats what it was given: that is the request's own, and as
+// long as the request wants it to be.
 
 // The first and the last year a page takes a month of: far enough on both sides
 // of any ledger, near enough that no date arithmetic on it can overflow.
@@ -23,6 +26,24 @@ const (
 	firstYear = 1900
 	lastYear  = 2999
 )
+
+// queryOf reads the query string of a request for the parameters a page takes,
+// which are all of one value. A query that does not parse (a bad escape, a
+// semicolon where an ampersand should be) and a parameter of the page that is given
+// more than once are a 400 page: net/http's own Query leaves out what it cannot read
+// without a word, and a page must not answer as if the parameter was not there.
+func queryOf(r *http.Request, singles ...string) (url.Values, error) {
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return nil, webserver.BadRequest("網址的參數讀不懂：請用 &，並把特殊字元寫成 %XX。")
+	}
+	for _, name := range singles {
+		if len(q[name]) > 1 {
+			return nil, webserver.BadRequest(name + " 只能給一個值。")
+		}
+	}
+	return q, nil
+}
 
 // monthParam reads the month the page is of, as the first day of it, at midnight
 // UTC, the way the use cases take a month. A page that is not given one is of the
@@ -34,7 +55,7 @@ func monthParam(q url.Values, today time.Time) (time.Time, error) {
 	}
 	month, err := time.Parse("2006-01", value)
 	if err != nil || month.Year() < firstYear || month.Year() > lastYear {
-		return time.Time{}, webserver.BadRequest(fmt.Sprintf("month 必須是 %d 到 %d 年之間的 YYYY-MM，例如 2026-11；收到的是「%s」。", firstYear, lastYear, value))
+		return time.Time{}, webserver.BadRequest(fmt.Sprintf("month 必須是 %d 到 %d 年之間的 YYYY-MM，例如 2026-11。", firstYear, lastYear))
 	}
 	return month, nil
 }
@@ -47,7 +68,7 @@ func dateParam(q url.Values, name string) (*time.Time, error) {
 	}
 	day, err := time.Parse(time.DateOnly, value)
 	if err != nil || day.Year() < firstYear || day.Year() > lastYear {
-		return nil, webserver.BadRequest(fmt.Sprintf("%s 必須是 YYYY-MM-DD，例如 2026-11-14；收到的是「%s」。", name, value))
+		return nil, webserver.BadRequest(fmt.Sprintf("%s 必須是 %d 到 %d 年之間的 YYYY-MM-DD，例如 2026-11-14。", name, firstYear, lastYear))
 	}
 	return &day, nil
 }
@@ -60,7 +81,7 @@ func idParam(q url.Values, name string) (*uuid.UUID, error) {
 	}
 	id, err := uuid.Parse(value)
 	if err != nil {
-		return nil, webserver.BadRequest(fmt.Sprintf("%s 不是有效的 id：「%s」。", name, value))
+		return nil, webserver.BadRequest(name + " 不是有效的 id。")
 	}
 	return &id, nil
 }
@@ -73,7 +94,7 @@ func pageParam(q url.Values) (int, error) {
 	}
 	n, err := strconv.Atoi(value)
 	if err != nil || n < 1 || n > maxPage {
-		return 0, webserver.BadRequest(fmt.Sprintf("page 必須是 1 到 %d 的整數；收到的是「%s」。", maxPage, value))
+		return 0, webserver.BadRequest(fmt.Sprintf("page 必須是 1 到 %d 的整數。", maxPage))
 	}
 	return n, nil
 }
@@ -117,16 +138,18 @@ func fail(err error) error {
 	case errors.As(err, &webErr):
 		return err
 	case errors.Is(err, model.ErrNotFound):
-		return &webserver.Error{Status: 404, Message: "找不到這筆資料。", Err: err}
+		return &webserver.Error{Status: http.StatusNotFound, Message: "找不到這筆資料。", Err: err}
 	case errors.Is(err, model.ErrNoStatements):
-		return &webserver.Error{Status: 404, Message: "這個帳戶沒有帳單：只有設了結帳日的信用卡才有。", Err: err}
+		return &webserver.Error{Status: http.StatusNotFound, Message: "這個帳戶沒有帳單：只有設了結帳日的信用卡才有。", Err: err}
 	case errors.Is(err, model.ErrInvalidStatus):
-		return &webserver.Error{Status: 400, Message: "status 必須是 draft、confirmed 或 void。", Err: err}
+		return &webserver.Error{Status: http.StatusBadRequest, Message: "status 必須是 draft、confirmed 或 void。", Err: err}
 	case errors.Is(err, model.ErrInvalidKind):
-		return &webserver.Error{Status: 400, Message: "kind 不是已知的交易種類。", Err: err}
+		return &webserver.Error{Status: http.StatusBadRequest, Message: "kind 不是已知的交易種類。", Err: err}
 	case errors.Is(err, model.ErrInvalidPage), errors.Is(err, model.ErrDateRangeReversed),
 		errors.Is(err, model.ErrMonthRequired), errors.Is(err, model.ErrDateRangeRequired):
-		return &webserver.Error{Status: 400, Message: "請求的範圍不正確。", Err: err}
+		return &webserver.Error{Status: http.StatusBadRequest, Message: "請求的範圍不正確。", Err: err}
+	case errors.Is(err, model.ErrConflictingFilters):
+		return &webserver.Error{Status: http.StatusBadRequest, Message: "帳戶和「沒有帳戶」不能同時選。", Err: err}
 	default:
 		return err
 	}

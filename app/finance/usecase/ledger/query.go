@@ -51,13 +51,17 @@ func (s *Service) ListTransactions(ctx context.Context, in usecase.ListTransacti
 // listFilter turns the input into the filter of the repo, which asks for one more
 // than the page size, and returns the page size too.
 func listFilter(in usecase.ListTransactionsInput) (repo.TransactionFilter, int, error) {
+	if in.AccountID != nil && in.WithoutAccount {
+		return repo.TransactionFilter{}, 0, model.ErrConflictingFilters
+	}
 	filter := repo.TransactionFilter{
-		AccountID: in.AccountID,
-		PartyID:   in.PartyID,
-		PlanID:    in.PlanID,
-		ProjectID: in.ProjectID,
-		AreaID:    in.AreaID,
-		Offset:    in.Offset,
+		AccountID:      in.AccountID,
+		WithoutAccount: in.WithoutAccount,
+		PartyID:        in.PartyID,
+		PlanID:         in.PlanID,
+		ProjectID:      in.ProjectID,
+		AreaID:         in.AreaID,
+		Offset:         in.Offset,
 	}
 	if in.Status != "" {
 		filter.Status = model.Status(in.Status)
@@ -65,6 +69,10 @@ func listFilter(in usecase.ListTransactionsInput) (repo.TransactionFilter, int, 
 			return repo.TransactionFilter{}, 0, fmt.Errorf("%w %q: want draft, confirmed or void", model.ErrInvalidStatus, in.Status)
 		}
 	}
+	// The drafts are listed as GetDraftSummary counts them: of an instalment plan, its
+	// origin, which stands for the plan. The periods are drafts as part of it, and are
+	// listed by the plan.
+	filter.WithoutPlanPeriods = filter.Status == model.StatusDraft && in.PlanID == nil
 	if in.Kind != "" {
 		filter.Kind = model.Kind(in.Kind)
 		if !filter.Kind.Valid() {

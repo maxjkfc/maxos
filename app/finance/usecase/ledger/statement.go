@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -108,7 +109,9 @@ func (s *Service) cardWithStatements(ctx context.Context, id uuid.UUID) (model.A
 // The days of the statement and when it is due are the model's arithmetic on the
 // closing day and the payment due day of the card; what is on it is the repo's,
 // which reads the figures, the transactions and the drafts in one snapshot. A
-// statement is closed when its closing date is before today.
+// statement is closed when its closing date is before today. What the card was
+// charged for is divided up from the transactions of the statement
+// (model.ChargesOfCard), by the top-level category of each expense line.
 func (s *Service) GetCardStatement(ctx context.Context, in usecase.GetCardStatementInput) (usecase.CardStatement, error) {
 	card, err := s.cardWithStatements(ctx, in.AccountID)
 	if err != nil {
@@ -125,17 +128,65 @@ func (s *Service) GetCardStatement(ctx context.Context, in usecase.GetCardStatem
 	if err != nil {
 		return usecase.CardStatement{}, fmt.Errorf("get the statement of card %q closing on %s: %w", card.Name, period.ClosingOn.Format(time.DateOnly), err)
 	}
+	charges, err := s.statementCharges(ctx, card.ID, content)
+	if err != nil {
+		return usecase.CardStatement{}, fmt.Errorf("get the statement of card %q closing on %s: %w", card.Name, period.ClosingOn.Format(time.DateOnly), err)
+	}
 
 	out := usecase.CardStatement{
 		CardStatementSummary: statementSummary(card, period, today, content.Figures),
 		Transactions:         make([]usecase.StatementTransaction, len(content.Transactions)),
 		Drafts:               content.Drafts,
+		Charges:              charges,
 	}
 	for i, txn := range content.Transactions {
 		out.Transactions[i] = usecase.StatementTransaction{
 			Transaction:   toTransaction(txn),
 			StatementDate: txn.StatementDate(),
 			Amounts:       amountsOn(txn, card.ID),
+		}
+	}
+	return out, nil
+}
+
+// statementCharges divides up what the transactions of the statement charged the
+// card, for each instrument it was charged in, in the order of the figures. The
+// parents of the categories, the archived ones too, say which top-level category a
+// line of an expense is for; they are read, in one call, only when there is a
+// transaction to divide up.
+func (s *Service) statementCharges(ctx context.Context, cardID uuid.UUID, content repo.StatementContent) ([]usecase.StatementCharges, error) {
+	if len(content.Transactions) == 0 {
+		return nil, nil
+	}
+	categories, err := s.categories.List(ctx, "", true)
+	if err != nil {
+		return nil, fmt.Errorf("list the categories to divide up the charges: %w", err)
+	}
+	parents := make(map[uuid.UUID]uuid.UUID, len(categories))
+	for _, c := range categories {
+		if c.ParentID != nil {
+			parents[c.ID] = *c.ParentID
+		}
+	}
+	topLevel := func(category uuid.UUID) uuid.UUID {
+		if parent, ok := parents[category]; ok {
+			return parent
+		}
+		return category
+	}
+
+	divided := model.ChargesOfCard(cardID, content.Transactions, topLevel)
+	place := make(map[uuid.UUID]int, len(content.Figures))
+	for i, f := range content.Figures {
+		place[f.InstrumentID] = i
+	}
+	slices.SortFunc(divided, func(a, b model.CardCharges) int { return cmp.Compare(place[a.InstrumentID], place[b.InstrumentID]) })
+
+	out := make([]usecase.StatementCharges, len(divided))
+	for i, c := range divided {
+		out[i] = usecase.StatementCharges{InstrumentID: c.InstrumentID, Shares: c.Shares, Other: c.Other, Categories: make([]usecase.CategoryCharge, len(c.Categories))}
+		for j, category := range c.Categories {
+			out[i].Categories[j] = usecase.CategoryCharge{CategoryID: category.CategoryID, Amount: category.Amount}
 		}
 	}
 	return out, nil

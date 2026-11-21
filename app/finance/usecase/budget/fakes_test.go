@@ -61,43 +61,22 @@ func (f *fakeTx) WithinTx(ctx context.Context, fn func(ctx context.Context) erro
 
 func inTx(ctx context.Context) bool { return ctx.Value(txKey{}) != nil }
 
-// spendRow is an expense posting of a confirmed transaction that happened on a day,
-// which the fake repo adds up as the real one does.
-type spendRow struct {
-	on       time.Time
-	area     *uuid.UUID
-	project  *uuid.UUID
-	category model.Category
-	amount   decimal.Decimal
-}
-
-// fakeBudgets is an in-memory repo.BudgetRepo. Its budgets are kept as they are
-// saved; what was spent is the rows a test adds, which it filters by day and by
-// area and project as the statements of the real repo do, and, for Spending only,
-// the transactions a test adds, which are what the rows cannot say: a status, and
-// postings of every book.
+// fakeBudgets is an in-memory repo.BudgetRepo. Its budgets are kept as they are saved.
+// What was spent is the rows a test sets, which Spending returns as they are, whatever
+// it is asked: what the statement counts, and for which days, is the Postgres repo's,
+// and is tested there. It notes what it was asked.
 type fakeBudgets struct {
 	areaBudgets    []model.AreaBudget
 	projectBudgets []model.ProjectBudget
-	spending       []spendRow
-	// transactions are read by Spending only: it counts the expense postings of the
-	// confirmed ones, whatever else they hold. categories gives it the parent of the
-	// category of a posting, which a row of spending holds whole.
-	transactions []model.Transaction
-	categories   map[uuid.UUID]model.Category
+	// rows are what Spending returns.
+	rows []model.SpendingRow
 
 	// saves counts the budgets stored, new or replaced.
 	saves int
-	// areaSpendingAsked is each range of days AreaSpending was asked for, and
-	// projectSpendingAsked the last day each call of ProjectSpending was given, with
-	// the project it was limited to, or nil, in projectFilters.
-	areaSpendingAsked    [][2]time.Time
-	projectSpendingAsked []time.Time
-	projectFilters       []*uuid.UUID
-	// spendingAsked is each range of days Spending was asked for; spendingErr, when
-	// set, is what it returns.
-	spendingAsked [][2]time.Time
-	spendingErr   error
+	// asked is each filter Spending was called with; spendingErr, when set, is what it
+	// returns.
+	asked       []repo.SpendingFilter
+	spendingErr error
 	// projectBudgetReads counts the calls of ProjectBudgets.
 	projectBudgetReads int
 }
@@ -168,95 +147,15 @@ func (f *fakeBudgets) ProjectBudgets(_ context.Context, projectID *uuid.UUID) ([
 	return out, nil
 }
 
-// AreaSpending returns the rows that have an area and happened from the day from to
-// the day to, both days included. It does not add them up: the use case does not
-// depend on that, and a test can give two expenses of one category.
-func (f *fakeBudgets) AreaSpending(_ context.Context, from, to time.Time) ([]model.AreaSpending, error) {
-	f.areaSpendingAsked = append(f.areaSpendingAsked, [2]time.Time{from, to})
-	var out []model.AreaSpending
-	for _, row := range f.spending {
-		if row.area == nil || row.on.Before(from) || row.on.After(to) {
-			continue
-		}
-		out = append(out, model.AreaSpending{
-			AreaID:    *row.area,
-			InProject: row.project != nil,
-			Spending:  model.Spending{CategoryID: row.category.ID, ParentID: row.category.ParentID, Amount: row.amount},
-		})
-	}
-	return out, nil
-}
-
-// ProjectSpending returns the rows that belong to a project, of the project asked
-// for when there is one, that happened up to the day to, that day included.
-func (f *fakeBudgets) ProjectSpending(_ context.Context, projectID *uuid.UUID, to time.Time) ([]model.ProjectSpending, error) {
-	f.projectSpendingAsked = append(f.projectSpendingAsked, to)
-	f.projectFilters = append(f.projectFilters, projectID)
-	var out []model.ProjectSpending
-	for _, row := range f.spending {
-		if row.project == nil || row.on.After(to) || (projectID != nil && *row.project != *projectID) {
-			continue
-		}
-		out = append(out, model.ProjectSpending{
-			ProjectID: *row.project,
-			Spending:  model.Spending{CategoryID: row.category.ID, ParentID: row.category.ParentID, Amount: row.amount},
-		})
-	}
-	return out, nil
-}
-
-// Spending adds up, as the real repo does, the expense postings of the confirmed
-// transactions that happened from the day from to the day to, both days included,
-// for each month and category: whether the transaction has an area, a project or
-// neither, by the base amount of the posting. What it adds up is the rows a test
-// added, which are confirmed expenses already, and the transactions, of which only
-// the confirmed ones count, and of their postings the expense ones only. The rows
-// come by month and then category id, one for each pair, as the statement gives
-// them.
-func (f *fakeBudgets) Spending(_ context.Context, from, to time.Time) ([]model.MonthCategorySpending, error) {
-	f.spendingAsked = append(f.spendingAsked, [2]time.Time{from, to})
+// Spending returns the rows a test set, whatever the filter is: it filters, orders and
+// adds up nothing, which is what the statement does. It notes the filter it was called
+// with.
+func (f *fakeBudgets) Spending(_ context.Context, filter repo.SpendingFilter) ([]model.SpendingRow, error) {
+	f.asked = append(f.asked, filter)
 	if f.spendingErr != nil {
 		return nil, f.spendingErr
 	}
-	type key struct {
-		month    time.Time
-		category uuid.UUID
-	}
-	sums := map[key]*model.MonthCategorySpending{}
-	add := func(on time.Time, category uuid.UUID, parent *uuid.UUID, amount decimal.Decimal) {
-		if on.Before(from) || on.After(to) {
-			return
-		}
-		k := key{model.MonthOf(on), category}
-		sum, found := sums[k]
-		if !found {
-			sum = &model.MonthCategorySpending{Month: k.month, Spending: model.Spending{CategoryID: category, ParentID: parent}}
-			sums[k] = sum
-		}
-		sum.Amount = sum.Amount.Add(amount)
-	}
-	for _, row := range f.spending {
-		add(row.on, row.category.ID, row.category.ParentID, row.amount)
-	}
-	for _, txn := range f.transactions {
-		if txn.Status != model.StatusConfirmed {
-			continue
-		}
-		for _, p := range txn.Postings {
-			if p.Book == model.BookExpense {
-				add(txn.OccurredOn, *p.CategoryID, f.categories[*p.CategoryID].ParentID, *p.BaseAmount)
-			}
-		}
-	}
-
-	out := make([]model.MonthCategorySpending, 0, len(sums))
-	for _, sum := range sums {
-		out = append(out, *sum)
-	}
-	slices.SortFunc(out, func(a, b model.MonthCategorySpending) int {
-		return cmp.Or(a.Month.Compare(b.Month), slices.Compare(a.CategoryID[:], b.CategoryID[:]))
-	})
-	return out, nil
+	return f.rows, nil
 }
 
 // fakeCategories is an in-memory repo.CategoryRepo of which only Get is used.
@@ -398,7 +297,6 @@ func newEnv(t *testing.T) *env {
 		categories: &fakeCategories{categories: map[uuid.UUID]model.Category{}},
 		catalog:    newFakeCatalog(),
 	}
-	e.budgets.categories = e.categories.categories
 	e.clock.setDay(2026, time.November, 14)
 	e.svc = budget.New(e.txs, e.budgets, e.categories, fakeInstruments{}, e.catalog, e.catalog, e.catalog, e.clock)
 	return e
@@ -457,10 +355,41 @@ func (e *env) addCategory(c model.Category) model.Category {
 	return c
 }
 
-// spend adds an expense of the amount to the category on the day: in the area, when
-// there is one, and in the project, when there is one.
+// spend sets a row of what was spent on the category, of the amount, in the month the
+// day falls in: in the area, when there is one, and in the project, when there is one.
+// The fake repo returns its rows as they are, whatever it is asked, so the day only
+// names the month of the row.
 func (e *env) spend(on time.Time, area, project *uuid.UUID, category model.Category, amount string) {
-	e.budgets.spending = append(e.budgets.spending, spendRow{on: on, area: area, project: project, category: category, amount: dec(amount)})
+	e.budgets.rows = append(e.budgets.rows, model.SpendingRow{
+		Month: model.MonthOf(on), AreaID: area, ProjectID: project,
+		Spending: model.Spending{CategoryID: category.ID, ParentID: category.ParentID, Amount: dec(amount)},
+	})
+}
+
+// asked writes what the repo was asked for, one to a line: the days, as
+// "2026-11-01..2026-11-14", with nothing before the dots when there is no first day,
+// and " of 日本旅行" when it was limited to a project.
+func (e *env) asked() []string {
+	lines := make([]string, len(e.budgets.asked))
+	for i, f := range e.budgets.asked {
+		if f.From != nil {
+			lines[i] = f.From.Format(time.DateOnly)
+		}
+		lines[i] += ".." + f.To.Format(time.DateOnly)
+		if f.ProjectID != nil {
+			lines[i] += " of " + e.catalog.projects[*f.ProjectID].Name
+		}
+	}
+	return lines
+}
+
+// wantAsked fails the test unless the repo was asked for what is given, one to a line
+// as asked writes it, and for nothing else.
+func (e *env) wantAsked(want ...string) {
+	e.t.Helper()
+	if got := e.asked(); !slices.Equal(got, want) {
+		e.t.Errorf("the repo was asked for %q, want %q", got, want)
+	}
 }
 
 func allocation(c model.Category, amount string) usecase.Allocation {

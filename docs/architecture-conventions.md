@@ -64,7 +64,7 @@ docs/
 | `adapter/out` | port 的實作 | 產生的 DB 型別不能傳出 adapter |
 | `pkg` | 技術元件 | 不能 import `app/` |
 
-業務規則的歸屬：單一 entity 能判斷的放 `domain/model`；要查資料或跨 entity 的放 use case 或 `domain/service`。例如「文字長度 1 到 4000」屬於 inbox 的 domain，「同一冪等鍵回傳既有紀錄」屬於 use case。輸入端 adapter 只做格式：網頁把金額寫成標的的小數位數與千分位、把代碼換成用語，不重算 use case 給的數字。
+業務規則的歸屬：單一 entity 能判斷的放 `domain/model`；要查資料或跨 entity 的放 use case 或 `domain/service`。例如「文字長度 1 到 4000」屬於 inbox 的 domain，「同一冪等鍵回傳既有紀錄」屬於 use case。輸入端 adapter 只做格式：網頁把金額寫成標的的小數位數與千分位、把代碼換成用語，不加總、不分攤、不判斷 use case 給的數字（見第 11 節）。
 
 ## 4. 依賴規則
 
@@ -117,7 +117,7 @@ adapter  →  usecase  →  domain
   - 版本固定，透過 `make sqlc` 執行。
   - `make check` 會重新產生並要求無差異。
 - **手寫 SQL 的例外**：有可選篩選條件的動態查詢，可以在同一個 adapter 裡手寫，集中在 `queries.go`。
-- **交易邊界**由 use case 決定，repo 不自行開交易。唯一的例外是需要用同一份快照讀好幾條語句的唯讀 repo 方法，它可以用 `DB.WithinSnapshot` 開唯讀的 `REPEATABLE READ` 交易（目前是 finance 的 `TransactionRepo.List`、`TransactionRepo.Statement` 與 `TransactionRepo.DraftSummary`）；寫入一律由 use case 決定。
+- **交易邊界**由 use case 決定，repo 不自行開交易。唯一的例外是需要用同一份快照讀好幾條語句的唯讀 repo 方法，它可以用 `DB.WithinSnapshot` 開唯讀的 `REPEATABLE READ` 交易（目前是 finance 的 `TransactionRepo.List` 與 `TransactionRepo.Statement`）；寫入一律由 use case 決定。
   - `pkg/postgres` 的 `DB` 是 repo 執行 SQL 的入口（`dbgen.New(postgres.NewDB(pool))`）：語句會自動加入 context 帶著的交易，沒有交易就直接走連線池，所以 repo 不需要知道交易的存在。
   - `DB.WithinTx(ctx, fn)` 開啟交易，並把交易放進傳給 `fn` 的 context；`fn` 回傳 `nil` 才提交，回傳錯誤或 panic 就回滾；`fn` 內再呼叫 `WithinTx` 會用 savepoint，內層回傳錯誤時（含 context 在提交前已結束，以及 `fn` 忽略失敗的語句後回傳 `nil`），內層的寫入一律還原，外層交易仍可繼續使用。
   - use case 不能 import `pkg/`：需要交易的 use case 在自己 context 的 `usecase/port/out/` 宣告只有 `WithinTx(ctx context.Context, fn func(ctx context.Context) error) error` 的介面（finance 的是 `usecase/port/out/tx` 的 `Transactor`），由 `cmd/` 把 `*postgres.DB` 注入。
@@ -170,25 +170,26 @@ adapter  →  usecase  →  domain
 
 ## 11. 輸入端 adapter：MCP 與網頁
 
-兩種輸入端 adapter 用同一個做法：共用的註冊表放在 `pkg/`，不認識任何 context；每個 context 在自己的 `adapter/in/<種類>` 登記自己的工具或頁面；`cmd/` 把各 context 的登記函式放進 Fx 的 value group，組成註冊表，掛在 `serve` 的 HTTP server 上，外面是 Cloudflare Access 的 verifier。
+兩種輸入端 adapter 用同一個做法：共用的註冊表放在 `pkg/`，不認識任何 context；每個 context 在自己的 `adapter/in/<種類>` 登記自己的工具或頁面；`cmd/` 把各 context 的登記函式放進 Fx 的 value group，組成註冊表，掛在 `serve` 的 HTTP server 上。`serve` 的 handler 最外面是安全標頭與 Cloudflare Access 的 verifier，包住整個 mux：mux 自己回的轉址（`//app`、`/app/./x`）與 404（`/`、`/APP/`）也在它們後面，沒有 token 的請求只會得到 401，且每個回應（401 也是）都帶標頭。
 
 | | MCP | 網頁 |
 |---|---|---|
 | 共用註冊表 | `pkg/mcpserver` | `pkg/webserver`（版面、導覽、安全標頭、錯誤頁、金額與日期的格式）；圖表在 `pkg/svgchart` |
-| context 的登記 | `app/<context>/adapter/in/mcp` | `app/<context>/adapter/in/web`：頁面的 handler、view 與內嵌的 `templates/*.gohtml` |
-| Fx | `MCPModule`，value group `mcp.registrars` | `WebModule`（`cmd/web.go`），value group `web.registrars` |
+| context 的登記 | `app/<context>/adapter/in/mcp`：`NewRegistrar(use case…)` | `app/<context>/adapter/in/web`：頁面的 handler、view 與內嵌的 `templates/*.gohtml`；`NewRegistrar(Ports)`，`Ports` 是一個沒有 Fx 的普通 struct |
+| Fx | `MCPModule`，value group `mcp.registrars` | `WebModule`（`cmd/web.go`），value group `web.registrars`；填 `Ports` 的 Fx struct 也在 `cmd/web.go`，adapter 不認識 Fx |
 | 路徑 | `/mcp` | `/app/` 底下 |
-| 守門 | `verifier.Middleware` | 同一個 verifier；它是 `webserver.Registry.Pages` 必填的參數，沒有 guard 就建不出頁面 |
+| 守門 | `verifier.Middleware`（在 `newHTTPHandler` 最外面） | 同一個 verifier；它同時是 `webserver.Registry.Pages` 必填的參數，沒有 guard 就建不出頁面 |
 
-網頁 adapter 可以 import 的：自己 context 的 `usecase/port`（in-port，以及時鐘的 out-port）、`domain/model`（只為了認得錯誤與取日期）、別的 context 的 `usecase/port/in`（例如 catalog 的名稱清單）、`pkg/webserver`、`pkg/svgchart`。不可以 import 的：use case 實作、`adapter/out`、別種輸入端 adapter（例如 MCP 的）、`pgx`、`pkg/postgres`、MCP SDK，由 depguard 的 `finance-adapter-in-web` 與 `finance-adapter-in-others` 檢查；別種輸入端 adapter 之後也各加一條對應的規則。
+網頁 adapter 可以 import 的，由 depguard 的 `finance-adapter-in-web`（一份 strict 的白名單，測試檔另有 `finance-adapter-in-web-tests`，多一個 `internal/webtest` 與 `pkg/cfaccess`）檢查，只有這些：標準函式庫、`uuid` 與 decimal；自己 context 的 `usecase/port/in/`（use case 的 in-port）與 `usecase/port/out/clock`（時鐘；不是 repo，也不是 `tx`）；`domain/model`（它的名稱常數：種類、帳簿、狀態、帳戶種類，它的錯誤，與取月份和日期的純函式；頁面用常數，不寫字串）；別的 context 的 `usecase/port/in/`（例如 catalog 的名稱清單）；`pkg/webserver`、`pkg/svgchart`。其餘一律不行：use case 實作、`adapter/out`、別種輸入端 adapter（包括名字只是長得像的，如 `adapter/in/webhook`）、`pgx`、`pkg/postgres`、`pkg/mcpserver`、MCP SDK、Fx。`finance-adapter-in-others` 另外擋別種輸入端 adapter 反過來 import 網頁；之後有別種輸入端 adapter 時，各加一條對應的白名單。
 
 網頁 adapter 另外遵守：
 
 - **只讀。** 只服務 GET 與 HEAD，其他方法回 405。之後要加寫入的動作，在 `webserver` 加 `Post` 與一個檢查來源（`Origin`、`Sec-Fetch-Site`）與 token 的 middleware，頁面的 handler 不必動；做法寫在 `docs/design/web-readonly.md`。
 - **一頁的 use case 呼叫數固定，不隨列數增加。** 列出來的東西（交易、草稿、帳單……）一次取得，名稱用的參考清單（帳戶、類別、領域……）每種一次；不在迴圈裡呼叫 use case。要的資料 use case 給不出來時，加 use case，不在 adapter 裡逐筆查。唯一隨數量增減的是信用卡帳單總覽：每張設了結帳日的卡一次 `ListCardStatements`（帳單的日子是各卡自己的），那是卡的張數，不是帳本的筆數。
-- **頁面只排版，不算數字。** 金額的小數位數、千分位、用語、把一張帳單的消費依頂層類別加起來，是格式；餘額、預算的已花、某月的支出是 use case 算的，頁面不重算。
-- **「今天」只來自時鐘 port**，時區是 `MAXOS_TIMEZONE`；日期與時間都以這個時區顯示。
+- **頁面只排版：不加總，不分攤，不判斷。** 頁面做的是：金額的小數位數與千分位、日期、把代碼換成用語、列的順序（照 use case 給的；把它給的幾列併進同一個表時照金額排）、某個數字占它的總額的百分比、同一個回答裡兩個數字的差（預算與已花之間的「還剩」與「超支多少」）。這些不是頁面的：把幾筆加起來（一張帳單的消費依頂層類別、一個類別連同子類別的合計、草稿的流出與流入）、把一個數字分到各項、判斷一個狀態（超支、超過分配）、決定什麼算一筆草稿。缺的時候加 use case：這些現在分別在 `GetCardStatement` 的 `Charges`、`GetSpending` 的 `TopLevel`、預算的 `Over`（領域、專案與每一個分配）、`GetDraftSummary`。
+- **「今天」只來自時鐘 port**，時區是 `MAXOS_TIMEZONE`。交易的日期是帳本裡的日曆日，原樣顯示、不轉時區；建立、確認、作廢與發生的時刻（有時分的）才轉成這個時區顯示。
+- **查詢參數要讀得出來，讀不出來是 400。** 查詢字串用 `url.ParseQuery` 讀，壞的跳脫與分號是 400，一頁收的參數給了不只一次也是 400（各頁共用一個 `queryOf`），不能像 `URL.Query()` 那樣悄悄丟掉讀不懂的，讓一個壞的月份看起來像本月。400 的頁面說參數該是什麼，不重複收到的值。
 - **沒有外部資源。** 模板與唯一的一份樣式表以 `go:embed` 內嵌，圖表是伺服器產生的 inline SVG，沒有 JavaScript；每個回應帶 `Content-Security-Policy: default-src 'self'` 等標頭（`webserver.Secure`）。
-- 畫面上的用語照 `CONTEXT.md`。
+- 畫面上的用語照 `CONTEXT.md`：測試從 `CONTEXT.md` 讀出每個 `_Avoid_` 的詞（名字是別的詞條、或是種類的名字的除外），每個測試取得的每一頁（`site.page`）都對照它，不另外維護一份詞表。
 
-測試：用 `internal/webtest` 的 Access 替身（自簽金鑰、信任它的 verifier、簽好的 token）透過真的 mux 發請求，檢查拒絕、405、404 與 400 的頁面、標頭與 HTML；圖表是純函式，單獨測；`cmd/` 的測試用真的模組與 PostgreSQL 走一遍。
+測試：用 `internal/webtest` 的 Access 替身（自簽金鑰、信任它的 verifier、簽好的 token）透過真的 mux 發請求，檢查拒絕、405、404 與 400 的頁面、標頭與 HTML；圖表是純函式，單獨測；`cmd/` 的測試用真的模組與 PostgreSQL 走一遍，另有一個不需要資料庫的測試走過 mux 自己回答的路徑，檢查沒有 token 時只會得到 401。

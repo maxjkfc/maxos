@@ -91,22 +91,25 @@ func serveHTTP(
 }
 
 // newHTTPHandler is what the server serves: the MCP endpoint at /mcp and the pages
-// under /app/. Neither has an entrance that the Access verifier does not guard. The
-// MCP endpoint is wrapped in its middleware here; the pages are built with it as
-// their guard, which they cannot be built without, so that it also covers what the
-// pages answer on their own (a path that is no page, a method that is refused). The
-// pages are also mounted at /app, which they send on to /app/ once the guard has let
-// the request through: the mux would otherwise do it before the guard has looked.
+// under /app/, with the Access verifier and the security headers in front of the
+// whole of it. What the mux answers on its own is behind them too: the redirect to
+// the clean form of a path (//app, /app/./x, /app/../mcp) and the 404 of a path that
+// nothing serves (/, /APP/, /mcp/) are what an unauthenticated request must not be
+// told, and every response, a 401 as much as a page, carries the headers. The
+// pages are also built with the verifier as their guard, which they cannot be built
+// without, so that they do not rely on being mounted behind it: for a page that is a
+// second check of a token that the first has let through. The pages are mounted at
+// /app too, which they send on to /app/.
 func newHTTPHandler(registry *mcpserver.Registry, pages *webserver.Registry, verifier *cfaccess.Verifier) (http.Handler, error) {
 	web, err := pages.Pages(userFromAccess, verifier.Middleware)
 	if err != nil {
 		return nil, fmt.Errorf("build the pages: %w", err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", verifier.Middleware(registry.HTTPHandler(callerFromAccess)))
+	mux.Handle("/mcp", registry.HTTPHandler(callerFromAccess))
 	mux.Handle(webserver.Prefix+"/", web)
 	mux.Handle(webserver.Prefix, web)
-	return mux, nil
+	return webserver.Secure(verifier.Middleware(mux)), nil
 }
 
 // callerFromAccess attributes a request to the identity the Access middleware

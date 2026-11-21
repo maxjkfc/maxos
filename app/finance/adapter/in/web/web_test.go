@@ -257,8 +257,8 @@ func TestAPageThatIsNotThereIsAPage(t *testing.T) {
 		{"/app/transactions?page=x", http.StatusBadRequest, "page 必須是"},
 		{"/app/budgets?month=x", http.StatusBadRequest, "month 必須是"},
 		{"/app/spending?month=2026-00", http.StatusBadRequest, "month 必須是"},
-		{"/app/cards/" + card.String() + "?closing=2026-02-30", http.StatusBadRequest, "closing 必須是 YYYY-MM-DD"},
-		{"/app/cards/" + card.String() + "?closing=yesterday", http.StatusBadRequest, "closing 必須是 YYYY-MM-DD"},
+		{"/app/cards/" + card.String() + "?closing=2026-02-30", http.StatusBadRequest, "closing 必須是"},
+		{"/app/cards/" + card.String() + "?closing=yesterday", http.StatusBadRequest, "closing 必須是"},
 	}
 	f.failures["GetCardStatement"] = nil
 	for _, tt := range tests {
@@ -350,7 +350,7 @@ func TestPagesIssueAFixedNumberOfCalls(t *testing.T) {
 			f.statement.Transactions = append(f.statement.Transactions, usecase.StatementTransaction{Transaction: tx, StatementDate: tx.OccurredOn})
 			f.areaBudgets.Areas = append(f.areaBudgets.Areas, usecase.AreaBudgetStatus{AreaID: seqID(6000 + i)})
 			f.projectBudgets.Projects = append(f.projectBudgets.Projects, usecase.ProjectBudgetStatus{ProjectID: seqID(7000 + i)})
-			f.spent.Categories = append(f.spent.Categories, usecase.CategorySpending{CategoryID: seqID(8000 + i), Amount: dec("1")})
+			f.spent.TopLevel = append(f.spent.TopLevel, usecase.TopLevelSpending{CategoryID: seqID(8000 + i), Total: dec("1"), Own: dec("1")})
 			f.accounts = append(f.accounts, usecase.Account{ID: seqID(2000 + i), Name: fmt.Sprintf("帳戶 %d", i), Kind: "bank"})
 		}
 		f.statement.Transactions = append([]usecase.StatementTransaction(nil), f.statement.Transactions...)

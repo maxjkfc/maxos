@@ -39,29 +39,44 @@ type GetSpendingInput struct {
 	Month time.Time
 }
 
-// CategorySpending is what was spent on one category in a month.
+// CategorySpending is what was spent on one subcategory in a month.
 type CategorySpending struct {
 	CategoryID uuid.UUID
-	// ParentID is the top-level category that CategoryID is a subcategory of; nil
-	// when CategoryID is a top-level category itself. It is how a caller adds the
-	// subcategories up under their parent.
-	ParentID *uuid.UUID
 	// Amount is in the base currency, whatever the instrument of the expenses was:
 	// the amount of the day each was spent on fixed it.
 	Amount decimal.Decimal
+}
+
+// TopLevelSpending is what was spent on a top-level category in a month, and on
+// the subcategories under it: the total of the category, which is what a chart of
+// the categories shows, with what it is made of. A subcategory is never alone: it is
+// under its parent, whether anything was spent on the parent itself or not.
+type TopLevelSpending struct {
+	CategoryID uuid.UUID
+	// Total is all that was spent on the category and under it: Own and the Amount
+	// of every one of Children.
+	Total decimal.Decimal
+	// Own is what was spent on the category itself, on none of its subcategories.
+	Own decimal.Decimal
+	// Children are the subcategories that something was spent on, the largest Amount
+	// first and, for the same Amount, by category id. A subcategory that nothing
+	// was spent on is not in it.
+	Children []CategorySpending
 }
 
 // GetSpendingOutput holds what was spent in the month.
 type GetSpendingOutput struct {
 	// Month is the first day of the month, as a date at midnight UTC.
 	Month time.Time
-	// Total is all that was spent in the month: the Amount of every category added
-	// up, whether the expense belongs to an area, a project, both or neither.
+	// Total is all that was spent in the month: the Total of every top-level
+	// category added up, whether the expense belongs to an area, a project, both or
+	// neither.
 	Total decimal.Decimal
-	// Categories are the categories that something was spent on in the month, the
-	// archived ones too, the largest Amount first and, for the same Amount, by
-	// category id. A category that nothing was spent on is not in it.
-	Categories []CategorySpending
+	// TopLevel are the top-level categories that something was spent on in the
+	// month, or on a subcategory of which, the archived ones too, the largest Total
+	// first and, for the same Total, by category id. A category that nothing was
+	// spent on, directly or under it, is not in it.
+	TopLevel []TopLevelSpending
 }
 
 // GetSpendingTrend returns what was spent in each month of a range of months, as

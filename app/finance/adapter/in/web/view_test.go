@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
@@ -25,7 +24,7 @@ func TestRoleOf(t *testing.T) {
 		{"expense", usecase.Posting{Book: "account"}, "帳戶"},
 		{"expense", usecase.Posting{Book: "expense"}, "主要金額"},
 		{"expense", usecase.Posting{Book: "dealing", Quantity: dec("300")}, "分攤"},
-		{"expense", usecase.Posting{Book: "dealing", Quantity: dec("-300")}, "別人代付"},
+		{"expense", usecase.Posting{Book: "dealing", Quantity: dec("-300")}, "往來（我欠對方）"},
 		{"expense", usecase.Posting{Book: "instalment", Quantity: dec("-300")}, "未到期分期"},
 		{"income", usecase.Posting{Book: "income"}, "主要金額"},
 		// An expense posting of any other kind is a fee; of an instalment, interest; of a
@@ -112,90 +111,43 @@ func TestADiscountIsAPartOfItsOwn(t *testing.T) {
 	}
 }
 
-// statementOf builds the transactions of a statement of the card, each with what it
-// moved on the card, the way the use case hands them over.
-func statementOf(txns ...usecase.Transaction) []usecase.StatementTransaction {
-	var out []usecase.StatementTransaction
-	for _, t := range txns {
-		st := usecase.StatementTransaction{Transaction: t, StatementDate: t.OccurredOn}
-		for _, p := range t.Postings {
-			if p.Book == "account" && *p.AccountID == card {
-				st.Amounts = append(st.Amounts, usecase.StatementAmount{InstrumentID: p.InstrumentID, Quantity: p.Quantity})
-			}
-		}
-		out = append(out, st)
-	}
-	return out
-}
-
-func TestTheChargesByCategoryAddUpToWhatTheCardWasCharged(t *testing.T) {
+func TestTheChargesAreLaidOutAsTheUseCaseDividedThem(t *testing.T) {
 	r := &refs{
 		instruments: map[uuid.UUID]usecase.Instrument{
 			twd: {ID: twd, Code: "TWD", Decimals: 2}, usd: {ID: usd, Code: "USD", Decimals: 2},
 		},
-		categories: map[uuid.UUID]usecase.Category{
-			food: {ID: food, Name: "飲食"}, lunch: {ID: lunch, Name: "午餐", ParentID: &food},
-			rent: {ID: rent, Name: "房租"}, interst: {ID: interst, Name: "利息"},
-		},
+		categories: map[uuid.UUID]usecase.Category{food: {ID: food, Name: "飲食"}, rent: {ID: rent, Name: "房租"}},
 	}
-	txns := statementOf(
-		// 300 of lunch (under food) and 200 of rent, paid with one charge of 500.
-		transaction(seqID(1), "expense", "confirmed", date(2026, 10, 8),
-			accountPosting(1, card, twd, "-500"), expensePosting(2, lunch, twd, "300", "300"), expensePosting(3, rent, twd, "200", "200")),
-		// 900 paid, of which 300 is mine and 600 is what two parties owe me.
-		transaction(seqID(2), "expense", "confirmed", date(2026, 10, 9),
-			accountPosting(1, card, twd, "-900"), expensePosting(2, food, twd, "300", "300"),
-			dealingPosting(3, alice, twd, "300"), dealingPosting(4, bob, twd, "300")),
-		// A transfer out of the card, and the interest of a period of an instalment.
-		transaction(seqID(3), "transfer", "confirmed", date(2026, 10, 10),
-			accountPosting(1, card, twd, "-1000"), accountPosting(2, cash, twd, "1000")),
-		transaction(seqID(4), "instalment", "confirmed", date(2026, 10, 11),
-			accountPosting(1, card, twd, "-1030"), expensePosting(2, interst, twd, "30", "30")),
-		// A payment into the card is no charge.
-		transaction(seqID(5), "transfer", "confirmed", date(2026, 10, 12),
-			accountPosting(1, cash, twd, "-800"), accountPosting(2, card, twd, "800")),
-		// A charge in another instrument.
-		transaction(seqID(6), "expense", "confirmed", date(2026, 10, 13),
-			accountPosting(1, card, usd, "-20"), expensePosting(2, food, usd, "20", "640")),
-	)
+	// What the use case says: the lines of each instrument in the order it gives, and the
+	// figures that the lines add up to. The page does not add them up or put them in order.
+	charges := []usecase.StatementCharges{
+		{InstrumentID: twd, Categories: []usecase.CategoryCharge{{CategoryID: rent, Amount: dec("2000")}, {CategoryID: food, Amount: dec("600")}}, Shares: dec("600"), Other: dec("200")},
+		{InstrumentID: usd, Categories: []usecase.CategoryCharge{{CategoryID: food, Amount: dec("20")}}},
+	}
+	figures := []usecase.StatementFigures{{InstrumentID: twd, Charges: dec("3400")}, {InstrumentID: usd, Charges: dec("20")}}
 
-	got := chargesOf(r, txns)
+	got := chargesViews(r, charges, figures)
+
 	if len(got) != 2 || got[0].Instrument != "TWD" || got[1].Instrument != "USD" {
 		t.Fatalf("charges are of %v, want TWD and then USD", got)
 	}
-	twdRows := map[string]string{}
+	var rows []string
 	for _, row := range got[0].Rows {
-		twdRows[row.Label] = row.Amount.Text
+		rows = append(rows, row.Label+" "+row.Amount.Text+" "+row.Share)
 	}
-	want := map[string]string{
-		"飲食":         "600.00",
-		"房租":         "200.00",
-		"分攤（我替別人付的）": "600.00",
-		"其他（轉帳、往來、手續費、分期利息等）": "2,030.00",
+	want := []string{
+		"房租 2,000.00 58.8%",
+		"飲食 600.00 17.6%",
+		"分攤（我替別人付） 600.00 17.6%",
+		"其他（轉帳、往來、分期本金等） 200.00 5.9%",
 	}
-	if fmt.Sprint(twdRows) != fmt.Sprint(want) {
-		t.Errorf("rows = %v, want %v", twdRows, want)
+	if fmt.Sprint(rows) != fmt.Sprint(want) {
+		t.Errorf("rows = %q, want %q", rows, want)
 	}
-	// What the rows add up to is what the statement counts as charges: 500 + 900 +
-	// 1000 + 1030.
-	if got[0].Total.Text != "3,430.00" {
-		t.Errorf("total = %s, want 3,430.00", got[0].Total.Text)
+	if got[0].Total.Text != "3,400.00" {
+		t.Errorf("total = %s, want 3,400.00, which the figures say", got[0].Total.Text)
 	}
-	sum := decimal.Zero
-	for _, row := range got[0].Rows {
-		d, err := decimal.NewFromString(removeCommas(row.Amount.Text))
-		if err != nil {
-			t.Fatal(err)
-		}
-		sum = sum.Add(d)
-	}
-	if !sum.Equal(dec("3430")) {
-		t.Errorf("rows add up to %s, want the total of 3430", sum)
-	}
-	if got[0].Rows[0].Label != "飲食" && got[0].Rows[0].Label != "房租" {
-		t.Errorf("the categories are not first, largest first: %v", got[0].Rows)
-	}
-	if got[1].Total.Text != "20.00" || len(got[1].Rows) != 1 || got[1].Rows[0].Label != "飲食" {
+	if got[1].Total.Text != "20.00" || len(got[1].Rows) != 1 || got[1].Rows[0].Label != "飲食" || got[1].Rows[0].Share != "100.0%" {
 		t.Errorf("usd = %+v", got[1])
 	}
 	if got[0].Chart == "" || got[1].Chart == "" {
@@ -203,24 +155,8 @@ func TestTheChargesByCategoryAddUpToWhatTheCardWasCharged(t *testing.T) {
 	}
 }
 
-func removeCommas(s string) string {
-	out := make([]rune, 0, len(s))
-	for _, c := range s {
-		if c != ',' {
-			out = append(out, c)
-		}
-	}
-	return string(out)
-}
-
 func TestNoChargesIsNoChart(t *testing.T) {
-	r := &refs{instruments: map[uuid.UUID]usecase.Instrument{twd: {ID: twd, Code: "TWD", Decimals: 2}}}
-	payment := statementOf(transaction(seqID(1), "transfer", "confirmed", date(2026, 10, 12),
-		accountPosting(1, cash, twd, "-800"), accountPosting(2, card, twd, "800")))
-	if got := chargesOf(r, payment); len(got) != 0 {
-		t.Errorf("charges = %+v, want none: a payment is not a charge", got)
-	}
-	if got := chargesOf(r, nil); len(got) != 0 {
+	if got := chargesViews(&refs{}, nil, nil); len(got) != 0 {
 		t.Errorf("charges = %+v, want none", got)
 	}
 }
@@ -366,6 +302,7 @@ func TestWhatAUseCaseSaysBecomesWhatThePageAnswers(t *testing.T) {
 		{fmt.Errorf("list: %w", model.ErrInvalidStatus), 400},
 		{fmt.Errorf("list: %w", model.ErrInvalidKind), 400},
 		{fmt.Errorf("list: %w", model.ErrInvalidPage), 400},
+		{fmt.Errorf("list: %w", model.ErrConflictingFilters), 400},
 		{model.ErrDateRangeReversed, 400},
 		{model.ErrMonthRequired, 400},
 		{errors.New("connection refused"), 0}, // not the user's to see: it is left as it is

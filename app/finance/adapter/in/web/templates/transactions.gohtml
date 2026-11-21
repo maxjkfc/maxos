@@ -38,7 +38,7 @@
 <td role="cell" data-label="類別">{{.Categories}}</td>
 <td role="cell" data-label="說明" class="memo">{{.Description}}{{if .Merchant}}<span class="line muted small">{{.Merchant}}</span>{{end}}</td>
 <td role="cell" data-label="帳戶">{{.Accounts}}</td>
-<td role="cell" data-label="金額" class="num">{{range .Movements}}<span class="line">{{if $many}}<span class="muted small">{{.Where}}　</span>{{end}}{{template "amount" .Amount}}</span>{{end}}</td>
+<td role="cell" data-label="金額" class="num">{{range .Movements}}<span class="line">{{if or $many .Indirect}}<span class="where muted small">{{.Where}}　</span>{{end}}{{template "amount" .Amount}}</span>{{end}}</td>
 <td role="cell" data-label="領域／專案">{{if .Area}}<span class="line">{{.Area}}</span>{{end}}{{if .Project}}<span class="line muted small">專案：{{.Project}}</span>{{end}}</td>
 <td role="cell" data-label="狀態"><span class="badge badge-{{.StatusKey}}">{{.Status}}</span></td>
 </tr>

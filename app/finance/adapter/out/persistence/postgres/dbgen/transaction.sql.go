@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
 )
 
@@ -447,141 +448,65 @@ func (q *Queries) ListDealings(ctx context.Context, arg ListDealingsParams) ([]L
 	return items, nil
 }
 
-const listDraftAccounts = `-- name: ListDraftAccounts :many
-SELECT date_trunc('month', t.occurred_on::timestamp)::date AS month,
-       p.account_id,
-       count(DISTINCT t.id) AS drafts
+const listDraftPostings = `-- name: ListDraftPostings :many
+SELECT t.id AS transaction_id, t.kind, t.occurred_on, t.plan_id, t.plan_seq,
+       p.account_id, a.name AS account_name, p.book,
+       p.instrument_id, i.code AS instrument_code, p.quantity
 FROM fin_transaction t
-LEFT JOIN fin_posting p ON p.transaction_id = t.id AND p.book = 'account'
+LEFT JOIN fin_posting p ON p.transaction_id = t.id AND p.account_id IS NOT NULL
 LEFT JOIN fin_account a ON a.id = p.account_id
+LEFT JOIN fin_instrument i ON i.id = p.instrument_id
 WHERE t.status = 'draft'
-GROUP BY date_trunc('month', t.occurred_on::timestamp), p.account_id, a.name
-ORDER BY date_trunc('month', t.occurred_on::timestamp) DESC, a.name, p.account_id
+ORDER BY t.id, p.seq
 `
 
-type ListDraftAccountsRow struct {
-	Month     time.Time
-	AccountID uuid.NullUUID
-	Drafts    int64
+type ListDraftPostingsRow struct {
+	TransactionID  uuid.UUID
+	Kind           string
+	OccurredOn     time.Time
+	PlanID         uuid.NullUUID
+	PlanSeq        *int32
+	AccountID      uuid.NullUUID
+	AccountName    pgtype.Text
+	Book           pgtype.Text
+	InstrumentID   uuid.NullUUID
+	InstrumentCode pgtype.Text
+	Quantity       decimal.NullDecimal
 }
 
-// How many drafts of each month move each account: a draft is counted once for each
-// account it has an account posting to, however many such postings it has to it, so a
-// transfer between two accounts is counted for both, and a transfer with a fee from
-// one of them only once for that one. A draft that has no account posting (an expense
-// a party paid, the origin of a purchase paid in instalments, whose posting is of the
-// instalment book) is counted for no account: its account_id is NULL. The newest month
-// first; in a month by the name of the account and then its id, with the drafts that
-// have no account last (NULL sorts after any account in an ascending order).
-func (q *Queries) ListDraftAccounts(ctx context.Context) ([]ListDraftAccountsRow, error) {
-	rows, err := q.db.Query(ctx, listDraftAccounts)
+// What the summary of the drafts is worked out from, which is the model's to do
+// (SummarizeDrafts): every transaction whose status is draft, whatever day it
+// happened on, with the postings that have an account (account_id is not NULL: those
+// of the account book and of the instalment book), one row for each, and one row with
+// no posting for a draft that has none, such as an expense that a party paid. The
+// periods of an instalment plan are drafts of their own in the table and are here
+// with the origin of their plan, as plan_id and plan_seq say: which of them is a draft
+// that counts, in which month, and which postings change a balance today is not
+// decided here. account_name and instrument_code are what the model puts the accounts
+// and the instruments in order by. By transaction, and in it by the position of its
+// postings. It is one statement, so every row is of one snapshot.
+func (q *Queries) ListDraftPostings(ctx context.Context) ([]ListDraftPostingsRow, error) {
+	rows, err := q.db.Query(ctx, listDraftPostings)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListDraftAccountsRow
+	var items []ListDraftPostingsRow
 	for rows.Next() {
-		var i ListDraftAccountsRow
-		if err := rows.Scan(&i.Month, &i.AccountID, &i.Drafts); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listDraftAmounts = `-- name: ListDraftAmounts :many
-SELECT date_trunc('month', t.occurred_on::timestamp)::date AS month,
-       p.account_id::uuid AS account_id,
-       i.id AS instrument_id,
-       i.code AS instrument_code,
-       COALESCE(-sum(p.quantity) FILTER (WHERE p.quantity < 0), 0)::numeric AS outflow,
-       COALESCE(sum(p.quantity) FILTER (WHERE p.quantity > 0), 0)::numeric AS inflow
-FROM fin_posting p
-JOIN fin_transaction t ON t.id = p.transaction_id
-JOIN fin_account a ON a.id = p.account_id
-JOIN fin_instrument i ON i.id = p.instrument_id
-WHERE t.status = 'draft' AND p.book = 'account'
-GROUP BY date_trunc('month', t.occurred_on::timestamp), p.account_id, a.name, i.id, i.code
-ORDER BY date_trunc('month', t.occurred_on::timestamp) DESC, a.name, p.account_id, i.code COLLATE "C", i.id
-`
-
-type ListDraftAmountsRow struct {
-	Month          time.Time
-	AccountID      uuid.UUID
-	InstrumentID   uuid.UUID
-	InstrumentCode string
-	Outflow        decimal.Decimal
-	Inflow         decimal.Decimal
-}
-
-// What the drafts of each month would move of each instrument in each account: the
-// account postings of the drafts added up. outflow is the negative postings as a
-// positive number, and inflow the positive ones. There is a row for each month,
-// account and instrument with a posting, so an instrument that none moves is not
-// listed. The newest month first; in a month by the name of the account and then its
-// id, and for an account by the code of the instrument, compared bytewise (COLLATE
-// "C") as the use case does when it adds the amounts of accounts up.
-func (q *Queries) ListDraftAmounts(ctx context.Context) ([]ListDraftAmountsRow, error) {
-	rows, err := q.db.Query(ctx, listDraftAmounts)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListDraftAmountsRow
-	for rows.Next() {
-		var i ListDraftAmountsRow
+		var i ListDraftPostingsRow
 		if err := rows.Scan(
-			&i.Month,
+			&i.TransactionID,
+			&i.Kind,
+			&i.OccurredOn,
+			&i.PlanID,
+			&i.PlanSeq,
 			&i.AccountID,
+			&i.AccountName,
+			&i.Book,
 			&i.InstrumentID,
 			&i.InstrumentCode,
-			&i.Outflow,
-			&i.Inflow,
+			&i.Quantity,
 		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listDraftMonths = `-- name: ListDraftMonths :many
-SELECT date_trunc('month', t.occurred_on::timestamp)::date AS month,
-       count(*) AS drafts
-FROM fin_transaction t
-WHERE t.status = 'draft'
-GROUP BY date_trunc('month', t.occurred_on::timestamp)
-ORDER BY date_trunc('month', t.occurred_on::timestamp) DESC
-`
-
-type ListDraftMonthsRow struct {
-	Month  time.Time
-	Drafts int64
-}
-
-// How many drafts happened in each month, the newest month first: the month is the
-// first day of the month of the day a draft happened on (occurred_on), cut from a
-// timestamp so that no time zone is in it. Only the transactions that are drafts
-// count, whatever day they happened on: today does not limit them. A draft is one
-// row of fin_transaction, so it is counted once. It is the first of three statements
-// that DraftSummary reads in one snapshot (ListDraftAccounts, ListDraftAmounts).
-func (q *Queries) ListDraftMonths(ctx context.Context) ([]ListDraftMonthsRow, error) {
-	rows, err := q.db.Query(ctx, listDraftMonths)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListDraftMonthsRow
-	for rows.Next() {
-		var i ListDraftMonthsRow
-		if err := rows.Scan(&i.Month, &i.Drafts); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

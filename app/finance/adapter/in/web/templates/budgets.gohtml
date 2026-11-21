@@ -43,7 +43,8 @@
 {{end}}
 
 <h2>專案</h2>
-{{range .Projects}}{{template "budget" .}}
+{{if .Projects}}<p class="muted small">專案的預算和已花是整個專案的總額，不分月份，不會隨上面切換的月份改變。</p>
+{{end}}{{range .Projects}}{{template "budget" .}}
 {{else}}<p class="empty">還沒有專案設了預算或花過錢。專案的預算是整個專案一個總額，不分月份。</p>
 {{end}}
 {{end}}{{end}}

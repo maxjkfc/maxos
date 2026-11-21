@@ -282,7 +282,7 @@ func newFake() *fake {
 			{ID: spareCard, Name: "備用卡", Kind: "card", InstitutionID: &bank},
 			{ID: emptyAcct, Name: "空帳戶", Kind: "bank", InstitutionID: &bank},
 			{ID: cash, Name: "現金", Kind: "cash"},
-			{ID: checking, Name: "活期存款", Kind: "bank", InstitutionID: &bank},
+			{ID: checking, Name: "活期戶頭", Kind: "bank", InstitutionID: &bank},
 			{ID: oldSaving, Name: "舊存摺", Kind: "bank", ArchivedAt: new(date(2026, 1, 1))},
 		},
 		categories: []usecase.Category{
@@ -348,13 +348,15 @@ func (s *site) do(req *http.Request) response {
 	return response{Code: rec.Code, Header: rec.Header(), Body: rec.Body.String()}
 }
 
-// page is the body of a page that is there.
+// page is the body of a page that is there, which is read against the glossary: no
+// page of any test uses a word that CONTEXT.md says to avoid.
 func (s *site) page(target string) string {
 	s.t.Helper()
 	res := s.get(target)
 	if res.Code != http.StatusOK {
 		s.t.Fatalf("GET %s = %d, want 200:\n%s", target, res.Code, res.Body)
 	}
+	wantNoAvoidedWords(s.t, target, res.Body)
 	return res.Body
 }
 

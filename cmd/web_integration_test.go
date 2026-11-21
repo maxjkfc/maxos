@@ -281,9 +281,11 @@ func TestThePagesShowTheLedgerThroughTheRealWiring(t *testing.T) {
 			"2026-12-08", money("6,000.00", "TWD"),
 			// Alice owes me what I lent.
 			">Alice</th>", money("1,000.00", "TWD"), "對方欠我",
-			// Two drafts wait: a lunch of 450, and a withdrawal that moves 3,000 out of one
-			// account into another.
-			"有 <strong>2</strong> 筆草稿等著確認", money("3,450.00", "TWD"), money("3,000.00", "TWD"), money("−450.00", "TWD"),
+			// Two drafts wait: a lunch of 450, and a withdrawal that moves 3,000 from one of my
+			// accounts to another: it changes no total, so only the lunch is in what confirming
+			// them would change, and the withdrawal is a line of its own.
+			"有 <strong>2</strong> 筆草稿等著確認", money("450.00", "TWD"), money("−450.00", "TWD"),
+			"自己帳戶之間的轉帳：1 筆",
 		)
 		if strings.Contains(body, "淨資產") {
 			t.Error("the overview shows a net worth")
@@ -327,9 +329,21 @@ func TestThePagesShowTheLedgerThroughTheRealWiring(t *testing.T) {
 	})
 
 	t.Run("the drafts", func(t *testing.T) {
-		wantIn("the drafts", page("/app/drafts"),
-			"共有 <strong>2</strong> 筆草稿等著確認", "<h2>2026-11 ", "好銀行活期", ">現金<", money("3,000.00", "TWD"), money("450.00", "TWD"), money("−450.00", "TWD"),
+		body := page("/app/drafts")
+		wantIn("the drafts", body,
+			"共有 <strong>2</strong> 筆草稿等著確認", "<h2>2026-11 ", "好銀行活期", ">現金<",
+			// The accounts have the legs of the withdrawal: 3,000 out of the one and in to the
+			// other, and the cash the lunch of 450.
+			money("3,000.00", "TWD"), money("450.00", "TWD"), money("−450.00", "TWD"),
+			// The withdrawal moves money between two of my own accounts: it is a line of its
+			// own, and the month has only what the lunch changes.
+			"自己帳戶之間的轉帳", "不計入合計的流出和流入",
 		)
+		wantIn("the link of an account", body, `href="/app/transactions?account=`+cash.String()+`&amp;month=2026-11&amp;status=draft"`)
+		// The link lists the drafts that the row counts: the lunch and the withdrawal, which
+		// is a draft of the cash too.
+		linked := page("/app/transactions?account=" + cash.String() + "&month=2026-11&status=draft")
+		wantIn("the drafts of the cash", linked, "草稿午餐", "提款")
 	})
 
 	t.Run("the statements of the card", func(t *testing.T) {

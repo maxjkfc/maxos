@@ -326,11 +326,12 @@ func TestWhatIsDatedAfterTodayCountsFromItsDayThroughTheRealUseCases(t *testing.
 	}
 }
 
-// What a caller that confirms every draft it lists does: ListTransactions lists the
-// origin of a plan and each of its periods, which are drafts of their own, and the
-// ids all go to ConfirmTransactions together. The plan is confirmed once, as a
-// whole, and what comes back is what was sent.
-func TestConfirmingEveryDraftListedConfirmsAPlanOnceThroughTheRealUseCases(t *testing.T) {
+// What a caller that confirms all it lists does: the drafts, which have the origin of a
+// plan and not its periods, and the plan as ListTransactions lists it by its id, which has
+// the origin and each of its periods, which are transactions of their own. The ids all go to
+// ConfirmTransactions together. The plan is confirmed once, as a whole, and what comes back
+// is what was sent.
+func TestConfirmingEverythingListedConfirmsAPlanOnceThroughTheRealUseCases(t *testing.T) {
 	ctx := context.Background()
 	clk := newTestClock(dateOn(2027, time.March, 1))
 	l := newLedgerAppOn(t, testpg.New(t), clk)
@@ -354,30 +355,36 @@ func TestConfirmingEveryDraftListedConfirmsAPlanOnceThroughTheRealUseCases(t *te
 	}
 	names := map[uuid.UUID]string{bank.ID: "bank", card.ID: "card"}
 
-	if _, err := l.RecordExpense.RecordExpense(ctx, usecase.RecordExpenseInput{
+	recorded, err := l.RecordExpense.RecordExpense(ctx, usecase.RecordExpenseInput{
 		RecordDetails: l.details("instalment-tv-0004"), AccountID: &card.ID, InstrumentID: twd,
 		Lines:       []usecase.CategoryLine{{CategoryID: food.ID, Amount: dec("12000")}},
 		Instalments: instalmentsOf(interest.ID),
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("RecordExpense in instalments: %v", err)
 	}
-	if _, err := l.RecordExpense.RecordExpense(ctx, usecase.RecordExpenseInput{
+	origin := recorded.Transaction
+	lunch, err := l.RecordExpense.RecordExpense(ctx, usecase.RecordExpenseInput{
 		RecordDetails: l.details("lunch-0000000001"), AccountID: &bank.ID, InstrumentID: twd,
 		Lines: []usecase.CategoryLine{{CategoryID: food.ID, Amount: dec("120")}},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("RecordExpense: %v", err)
 	}
 
+	// The drafts are the origin of the plan, which stands for the whole plan, and the lunch. The
+	// plan, listed by its id, has its periods beside the origin.
 	drafts, err := l.ListTransactions.ListTransactions(ctx, usecase.ListTransactionsInput{Status: "draft", Limit: 200})
-	if err != nil {
-		t.Fatalf("ListTransactions: %v", err)
+	if err != nil || len(drafts.Transactions) != 2 {
+		t.Fatalf("drafts listed = %d, %v, want the origin of the plan and the lunch: a plan is one draft", len(drafts.Transactions), err)
 	}
-	listed := make([]uuid.UUID, len(drafts.Transactions))
-	for i, txn := range drafts.Transactions {
-		listed[i] = txn.ID
+	inPlan, err := l.ListTransactions.ListTransactions(ctx, usecase.ListTransactionsInput{PlanID: &origin.ID, Limit: 200})
+	if err != nil || len(inPlan.Transactions) != 13 {
+		t.Fatalf("transactions of the plan listed = %d, %v, want its origin and its 12 periods", len(inPlan.Transactions), err)
 	}
-	if len(listed) != 14 {
-		t.Fatalf("%d drafts listed, want the origin of the plan, its 12 periods and the lunch", len(listed))
+	listed := []uuid.UUID{lunch.Transaction.ID}
+	for _, txn := range inPlan.Transactions {
+		listed = append(listed, txn.ID)
 	}
 
 	confirmed, err := l.Confirm.ConfirmTransactions(ctx, usecase.ConfirmTransactionsInput{IDs: listed})

@@ -76,8 +76,12 @@ type dealingLine struct {
 
 // draftBox is the drafts that wait, as the overview shows them.
 type draftBox struct {
-	Count   int
-	Href    string
+	Count int
+	// OwnTransfers is how many of them only move money between my own accounts,
+	// which Amounts do not count.
+	OwnTransfers int
+	Href         string
+	// Amounts is what confirming them today would change in the balances.
 	Amounts []draftAmount
 }
 
@@ -91,6 +95,7 @@ type draftAmount struct {
 const (
 	noInstitution = "沒有機構"
 	unbilledLabel = "未到期分期"
+	dealingLabel  = "往來"
 )
 
 // overview reads the balances, the plans that still have something to charge, the
@@ -268,9 +273,9 @@ func dealingMeaning(d usecase.Dealing) string {
 	}
 }
 
-// draftsBox is the count of the drafts and what they would move.
+// draftsBox is the count of the drafts and what they would change in the balances.
 func draftsBox(r *refs, drafts usecase.GetDraftSummaryOutput) draftBox {
-	box := draftBox{Count: drafts.Count, Href: "/app/drafts"}
+	box := draftBox{Count: drafts.Count, OwnTransfers: drafts.OwnTransfers, Href: "/app/drafts"}
 	for _, a := range drafts.Amounts {
 		box.Amounts = append(box.Amounts, draftAmountOf(r, a))
 	}

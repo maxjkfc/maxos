@@ -19,24 +19,22 @@ import (
 	"github.com/maxjkfc/maxos/internal/testpg"
 )
 
-// The reads of what was spent and of the drafts that are waiting, through the real use
-// cases on a real PostgreSQL: the ledger of the budget tests, with a few more of what
-// counts as spent, and what is the same in the budgets of the areas and in the spending
-// of a month.
+// The reads of what was spent, through the real use cases on a real PostgreSQL: the ledger
+// of the budget tests, with a few more of what counts as spent, and what is the same in the
+// budgets of the areas and in the spending of a month.
 
-// spendingApp is the use cases that read what was spent and the drafts that wait, which
-// the ledger app of the other tests does not hold.
+// spendingApp is the use cases that read what was spent, which the ledger app of the other
+// tests does not hold.
 type spendingApp struct {
 	fx.In
 
 	GetSpending      usecase.GetSpending
 	GetSpendingTrend usecase.GetSpendingTrend
-	GetDraftSummary  usecase.GetDraftSummary
 }
 
-// spendingWorld is the budget world, with the reads of spending and of drafts: two areas,
-// a project of the area Work and one of no area, categories (Food with a subcategory Lunch,
-// Rent, Fun, Fees and Interest), accounts, US dollars, and a clock that the test moves.
+// spendingWorld is the budget world, with the reads of spending: two areas, a project of
+// the area Work and one of no area, categories (Food with a subcategory Lunch, Rent, Fun,
+// Fees and Interest), accounts, US dollars, and a clock that the test moves.
 type spendingWorld struct {
 	*budgetWorld
 	spendingApp
@@ -163,14 +161,19 @@ func (w *spendingWorld) spendingOf(month time.Time) usecase.GetSpendingOutput {
 	return out
 }
 
-// categoryLines writes what was spent in the month by category, one to a line, in the
-// order they come: "Food 21645", and "Lunch 200 (under Food)" for a subcategory.
+// categoryLines writes what was spent in the month by top-level category, one to a line,
+// in the order they come: "Food 21845 (own 21645): Lunch 200", with the subcategories that
+// something was spent on after the colon, in the order they come.
 func (w *spendingWorld) categoryLines(out usecase.GetSpendingOutput) []string {
-	lines := make([]string, len(out.Categories))
-	for i, c := range out.Categories {
-		lines[i] = fmt.Sprintf("%s %s", w.names[c.CategoryID], c.Amount)
-		if c.ParentID != nil {
-			lines[i] += " (under " + w.names[*c.ParentID] + ")"
+	lines := make([]string, len(out.TopLevel))
+	for i, c := range out.TopLevel {
+		lines[i] = fmt.Sprintf("%s %s (own %s)", w.names[c.CategoryID], c.Total, c.Own)
+		for j, child := range c.Children {
+			sep := ", "
+			if j == 0 {
+				sep = ": "
+			}
+			lines[i] += fmt.Sprintf("%s%s %s", sep, w.names[child.CategoryID], child.Amount)
 		}
 	}
 	return lines
@@ -266,11 +269,18 @@ func TestWhatWasSpentInAMonthIsWhatTheAreasSpentWithTheirProjectsPlusTheExpenses
 			t.Errorf("%s: %s was spent, want %s", when, spending.Total, want)
 		}
 		var sum decimal.Decimal
-		for _, c := range spending.Categories {
-			sum = sum.Add(c.Amount)
+		for _, c := range spending.TopLevel {
+			sum = sum.Add(c.Total)
+			parts := c.Own
+			for _, child := range c.Children {
+				parts = parts.Add(child.Amount)
+			}
+			if !parts.Equal(c.Total) {
+				t.Errorf("%s: %s has %s, and what was spent on it and under it adds up to %s", when, w.names[c.CategoryID], c.Total, parts)
+			}
 		}
 		if !sum.Equal(spending.Total) {
-			t.Errorf("%s: the categories add up to %s, and %s was spent", when, sum, spending.Total)
+			t.Errorf("%s: the top-level categories add up to %s, and %s was spent", when, sum, spending.Total)
 		}
 	}
 
@@ -278,11 +288,11 @@ func TestWhatWasSpentInAMonthIsWhatTheAreasSpentWithTheirProjectsPlusTheExpenses
 	// 843. The rent of the 20th, the draft and the void expense are not in it.
 	check("November, on the 14th", november, "22798")
 	wantStatus(t, "November by category, on the 14th", w.categoryLines(w.spendingOf(november)),
-		"Food 21645", "Rent 777", "Lunch 200 (under Food)", "Fun 150", "Fees 26")
+		"Food 21845 (own 21645): Lunch 200", "Rent 777 (own 777)", "Fun 150 (own 150)", "Fees 26 (own 26)")
 	check("October", october, "11")
 	check("December, on the 14th of November", december, "0")
 	wantStatus(t, "the months, on the 14th", w.trendOf(october, december), "2026-10 11", "2026-11 22798", "2026-12 0")
-	if got := w.spendingOf(december); len(got.Categories) != 0 || !got.Total.IsZero() {
+	if got := w.spendingOf(december); len(got.TopLevel) != 0 || !got.Total.IsZero() {
 		t.Errorf("December has %+v, want nothing: it has not begun", got)
 	}
 
@@ -290,7 +300,7 @@ func TestWhatWasSpentInAMonthIsWhatTheAreasSpentWithTheirProjectsPlusTheExpenses
 	w.clk.setDay(dateOn(2026, time.November, 20))
 	check("November, on the 20th", november, "27798")
 	wantStatus(t, "November by category, on the 20th", w.categoryLines(w.spendingOf(november)),
-		"Food 21645", "Rent 5777", "Lunch 200 (under Food)", "Fun 150", "Fees 26")
+		"Food 21845 (own 21645): Lunch 200", "Rent 5777 (own 5777)", "Fun 150 (own 150)", "Fees 26 (own 26)")
 
 	// Confirming the draft makes it count.
 	w.confirm(t, draft)
@@ -302,7 +312,7 @@ func TestWhatWasSpentInAMonthIsWhatTheAreasSpentWithTheirProjectsPlusTheExpenses
 	check("December, the 4th", december, "22")
 	w.clk.setDay(dateOn(2026, time.December, 5))
 	check("December, the 5th", december, "52")
-	wantStatus(t, "December by category, the 5th", w.categoryLines(w.spendingOf(december)), "Interest 30", "Fun 22")
+	wantStatus(t, "December by category, the 5th", w.categoryLines(w.spendingOf(december)), "Interest 30 (own 30)", "Fun 22 (own 22)")
 	wantStatus(t, "the months, on the 5th of December", w.trendOf(october, december), "2026-10 11", "2026-11 32798", "2026-12 52")
 
 	// Each month of a trend is what the spending of the month says, whatever the range it is asked in.
@@ -331,6 +341,129 @@ func TestWhatWasSpentInAMonthIsWhatTheAreasSpentWithTheirProjectsPlusTheExpenses
 	check("December without the interest", december, "22")
 }
 
+func TestTheCategoriesOfAMonthAreAddedUpUnderTheirTopLevelCategoryThroughTheRealUseCases(t *testing.T) {
+	ctx := context.Background()
+	w := newSpendingWorld(t)
+	november := dateOn(2026, time.November, 1)
+	category := func(name string, parent *uuid.UUID) uuid.UUID {
+		t.Helper()
+		c, err := w.CreateCategory.CreateCategory(ctx, usecase.CreateCategoryInput{Direction: "expense", ParentID: parent, Name: name})
+		if err != nil {
+			t.Fatalf("CreateCategory(%q): %v", name, err)
+		}
+		w.names[c.ID] = name
+		return c.ID
+	}
+	dinner := category("Dinner", &w.food)
+	transport := category("Transport", nil)
+	taxi, bus := category("Taxi", &transport), category("Bus", &transport)
+
+	// Rent is spent on itself and has nothing under it. Food is spent on itself and under it: on Lunch,
+	// twice, once of them in an area and a project, and on Dinner. Transport is spent on only under it,
+	// on Taxi and on Bus: nothing is spent on Transport itself. Fun is spent on and archived since.
+	w.spend(dateOn(2026, time.November, 2), nil, nil, w.cash, w.rent, "5000")
+	w.spend(dateOn(2026, time.November, 3), nil, nil, w.cash, w.food, "300")
+	w.spend(dateOn(2026, time.November, 3), nil, nil, w.cash, w.lunch, "200")
+	w.spend(dateOn(2026, time.November, 4), &w.work, &w.trip, w.cash, w.lunch, "10")
+	w.spend(dateOn(2026, time.November, 5), &w.home, nil, w.cash, dinner, "100")
+	w.spend(dateOn(2026, time.November, 6), nil, nil, w.cash, taxi, "40")
+	w.spend(dateOn(2026, time.November, 7), &w.work, nil, w.cash, bus, "25")
+	w.spend(dateOn(2026, time.November, 8), nil, nil, w.cash, w.fun, "150")
+	if _, err := w.ArchiveCat.ArchiveCategory(ctx, w.fun); err != nil {
+		t.Fatalf("ArchiveCategory: %v", err)
+	}
+	// A draft and an expense that was voided are not spent.
+	w.expense(dateOn(2026, time.November, 9), nil, nil, w.cash, transport, "9999")
+	voided := w.spend(dateOn(2026, time.November, 10), nil, nil, w.cash, w.rent, "7777")
+	if _, err := w.Void.VoidTransaction(ctx, voided.ID); err != nil {
+		t.Fatalf("VoidTransaction: %v", err)
+	}
+
+	out := w.spendingOf(november)
+
+	wantStatus(t, "by top-level category", w.categoryLines(out),
+		"Rent 5000 (own 5000)",
+		"Food 610 (own 300): Lunch 210, Dinner 100",
+		"Fun 150 (own 150)",
+		"Transport 65 (own 0): Taxi 40, Bus 25",
+	)
+	if !out.Total.Equal(dec("5825")) {
+		t.Errorf("total = %s, want 5825", out.Total)
+	}
+	sum := decimal.Zero
+	for _, c := range out.TopLevel {
+		sum = sum.Add(c.Total)
+	}
+	if !sum.Equal(out.Total) {
+		t.Errorf("the top-level categories add up to %s, and %s was spent", sum, out.Total)
+	}
+	if got := w.trendOf(november, november); len(got) != 1 || got[0] != "2026-11 5825" {
+		t.Errorf("trend = %v, want the same 5825 for the month", got)
+	}
+}
+
+// overLines writes where each allocation stands, one to a line, in the order they come:
+// "Food 1000 of 1000: not over".
+func (w *spendingWorld) overLines(statuses []usecase.AllocationStatus) []string {
+	lines := make([]string, len(statuses))
+	for i, a := range statuses {
+		lines[i] = fmt.Sprintf("%s %s of %s: ", w.names[a.CategoryID], a.Spent, a.Amount)
+		if !a.Over {
+			lines[i] += "not "
+		}
+		lines[i] += "over"
+	}
+	return lines
+}
+
+func TestAnAllocationIsOverOnlyWhenMoreThanItsAmountWasSpentIntoItThroughTheRealUseCases(t *testing.T) {
+	ctx := context.Background()
+	w := newSpendingWorld(t)
+	november := dateOn(2026, time.November, 1)
+	w.setArea(w.work, november, "20000", allocation(w.food, "1000"), allocation(w.rent, "2000"), allocation(w.fun, "500"))
+	w.setProject(w.trip, "9000", allocation(w.food, "1000"), allocation(w.rent, "2000"))
+
+	// Work: Food has all of its 1,000, which is not more (600 on food, and 400 on Lunch, which falls into
+	// it), Rent is a cent over its 2,000, and nothing is spent on Fun. The budget of 20,000 is far off.
+	w.spend(dateOn(2026, time.November, 2), &w.work, nil, w.cash, w.food, "600")
+	w.spend(dateOn(2026, time.November, 3), &w.work, nil, w.cash, w.lunch, "400")
+	w.spend(dateOn(2026, time.November, 4), &w.work, nil, w.cash, w.rent, "2000.01")
+	// The trip: Food is a cent over its 1,000 by a subcategory alone, and Rent has all of its 2,000.
+	w.spend(dateOn(2026, time.November, 5), nil, &w.trip, w.cash, w.lunch, "1000.01")
+	w.spend(dateOn(2026, time.November, 6), nil, &w.trip, w.cash, w.rent, "2000")
+
+	areas, err := w.GetAreaBudgets.GetAreaBudgets(ctx, usecase.GetAreaBudgetsInput{Month: november})
+	if err != nil {
+		t.Fatalf("GetAreaBudgets: %v", err)
+	}
+	var work usecase.AreaBudgetStatus
+	for _, a := range areas.Areas {
+		if a.AreaID == w.work {
+			work = a
+		}
+	}
+	wantStatus(t, "the allocations of Work", w.overLines(work.Allocations),
+		"Food 1000 of 1000: not over", "Fun 0 of 500: not over", "Rent 2000.01 of 2000: over")
+	if work.Over {
+		t.Errorf("Work is over its budget with %s of 20000, want an allocation over and the budget not", work.Spent)
+	}
+
+	projects, err := w.GetProjectBudgets.GetProjectBudgets(ctx, usecase.GetProjectBudgetsInput{})
+	if err != nil {
+		t.Fatalf("GetProjectBudgets: %v", err)
+	}
+	var trip usecase.ProjectBudgetStatus
+	for _, p := range projects.Projects {
+		if p.ProjectID == w.trip {
+			trip = p
+		}
+	}
+	wantStatus(t, "the allocations of the trip", w.overLines(trip.Allocations), "Food 1000.01 of 1000: over", "Rent 2000 of 2000: not over")
+	if trip.Over {
+		t.Errorf("the trip is over its budget with %s of 9000, want an allocation over and the budget not", trip.Spent)
+	}
+}
+
 func TestTheSpendingReadsRefuseWhatIsNotAMonthOrARangeThroughTheRealUseCases(t *testing.T) {
 	ctx := context.Background()
 	w := newSpendingWorld(t)
@@ -348,106 +481,5 @@ func TestTheSpendingReadsRefuseWhatIsNotAMonthOrARangeThroughTheRealUseCases(t *
 		if _, err := w.GetSpendingTrend.GetSpendingTrend(ctx, in); err == nil {
 			t.Errorf("GetSpendingTrend of %s: no error, want it refused", name)
 		}
-	}
-}
-
-// draftLines writes the summary of the drafts, one line to the drafts of all, to each month
-// and to each account of a month, with how many drafts there are and what they would move:
-// "2026-11: 3 [TWD out 1135 in 1000 net -135]", the newest month first.
-func (w *spendingWorld) draftLines(out usecase.GetDraftSummaryOutput) []string {
-	amounts := func(amounts []usecase.DraftAmount) string {
-		parts := make([]string, len(amounts))
-		for i, a := range amounts {
-			parts[i] = fmt.Sprintf("%s out %s in %s net %s", w.names[a.InstrumentID], a.Outflow, a.Inflow, a.Net)
-		}
-		return strings.Join(parts, ", ")
-	}
-	lines := []string{fmt.Sprintf("all: %d [%s]", out.Count, amounts(out.Amounts))}
-	for _, m := range out.Months {
-		lines = append(lines, fmt.Sprintf("%s: %d [%s]", m.Month.Format("2006-01"), m.Count, amounts(m.Amounts)))
-		for _, a := range m.Accounts {
-			name := "(none)"
-			if a.AccountID != nil {
-				name = w.names[*a.AccountID]
-			}
-			lines = append(lines, fmt.Sprintf("  %s: %d [%s]", name, a.Count, amounts(a.Amounts)))
-		}
-	}
-	return lines
-}
-
-// draftSummary reads the summary of the drafts, and fails the test when it cannot.
-func (w *spendingWorld) draftSummary() usecase.GetDraftSummaryOutput {
-	w.t.Helper()
-	out, err := w.GetDraftSummary.GetDraftSummary(context.Background(), usecase.GetDraftSummaryInput{})
-	if err != nil {
-		w.t.Fatalf("GetDraftSummary: %v", err)
-	}
-	return out
-}
-
-func TestTheDraftsThatAreWaitingAreSummarizedByMonthAndAccountAndConfirmingTakesThemOutThroughTheRealUseCases(t *testing.T) {
-	ctx := context.Background()
-	w := newSpendingWorld(t)
-
-	// Nothing waits yet: the openings were confirmed.
-	if got := w.draftSummary(); got.Count != 0 || len(got.Months) != 0 {
-		t.Fatalf("summary = %+v, want nothing waiting: the opening balances are confirmed", got)
-	}
-
-	// A confirmed expense is not a draft. The drafts are: an expense from cash, a transfer with a fee
-	// from the bank into the wallet, and a purchase of 12,000 on the card in 12 periods, whose first has
-	// 30 of interest and which fall due on the 5th of each month from December.
-	w.spend(dateOn(2026, time.November, 5), nil, nil, w.cash, w.food, "9999")
-	lunch := w.expense(dateOn(2026, time.November, 14), nil, nil, w.cash, w.food, "120")
-	d := w.details(w.key())
-	d.OccurredOn = dateOn(2026, time.November, 15)
-	transfer, err := w.RecordTransfer.RecordTransfer(ctx, usecase.RecordTransferInput{
-		RecordDetails: d, FromAccountID: w.bank, ToAccountID: w.wallet, InstrumentID: model.BaseCurrencyID, Amount: dec("1000"),
-		Fees: []usecase.Fee{{AccountID: w.bank, InstrumentID: model.BaseCurrencyID, CategoryID: w.fees, Amount: dec("15")}},
-	})
-	if err != nil {
-		t.Fatalf("RecordTransfer: %v", err)
-	}
-	origin := w.plan(dateOn(2026, time.November, 14), nil)
-
-	got := w.draftSummary()
-
-	if got.Count != 15 || len(got.Months) != 13 {
-		t.Fatalf("%d drafts in %d months, want 15 in 13: the expense, the transfer, and the purchase with its 12 periods", got.Count, len(got.Months))
-	}
-	lines := w.draftLines(got)
-	// The first month of what the periods charge, the last, and then November with all that is
-	// waiting in it: the accounts by name, and the drafts of no account, which are the origin of
-	// the purchase, last.
-	wantStatus(t, "all the drafts and the newest month", lines[:3],
-		"all: 15 [TWD out 13165 in 1000 net -12165]",
-		"2027-11: 1 [TWD out 1000 in 0 net -1000]",
-		"  card: 1 [TWD out 1000 in 0 net -1000]",
-	)
-	wantStatus(t, "December and November", lines[len(lines)-7:],
-		"2026-12: 1 [TWD out 1030 in 0 net -1030]",
-		"  card: 1 [TWD out 1030 in 0 net -1030]",
-		"2026-11: 3 [TWD out 1135 in 1000 net -135]",
-		"  bank: 1 [TWD out 1015 in 0 net -1015]",
-		"  cash: 1 [TWD out 120 in 0 net -120]",
-		"  wallet: 1 [TWD out 0 in 1000 net 1000]",
-		"  (none): 1 []",
-	)
-
-	// Confirming the expense and the transfer takes them out; the origin of the purchase, which moves
-	// no account, stays with the periods.
-	w.confirm(t, lunch, transfer.Transaction)
-	got = w.draftSummary()
-	if got.Count != 13 || len(got.Months) != 13 {
-		t.Fatalf("%d drafts in %d months, want 13 in 13: the purchase with its 12 periods", got.Count, len(got.Months))
-	}
-	lines = w.draftLines(got)
-	wantStatus(t, "November with the expense and the transfer confirmed", lines[len(lines)-2:], "2026-11: 1 []", "  (none): 1 []")
-
-	// Confirming the purchase through its origin confirms its periods: nothing waits.
-	w.confirm(t, origin)
-	if got = w.draftSummary(); got.Count != 0 || len(got.Months) != 0 || len(got.Amounts) != 0 {
-		t.Errorf("summary = %+v, want nothing waiting once every draft is confirmed", got)
 	}
 }

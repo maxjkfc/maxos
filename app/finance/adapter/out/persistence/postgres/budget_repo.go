@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -161,57 +160,24 @@ func (r *BudgetRepo) ProjectBudgets(ctx context.Context, projectID *uuid.UUID) (
 	return budgets, nil
 }
 
-// AreaSpending adds up the base amounts of the expense postings of the confirmed
-// transactions of the areas that happened from the day from to the day to, for each
-// area, category and whether the transaction belongs to a project.
-func (r *BudgetRepo) AreaSpending(ctx context.Context, from, to time.Time) ([]model.AreaSpending, error) {
-	rows, err := r.q.ListAreaSpending(ctx, dbgen.ListAreaSpendingParams{FromDay: from, ToDay: to})
-	if err != nil {
-		return nil, err
-	}
-	spending := make([]model.AreaSpending, len(rows))
-	for i, row := range rows {
-		spending[i] = model.AreaSpending{
-			AreaID:    row.AreaID,
-			InProject: row.InProject,
-			Spending:  model.Spending{CategoryID: row.CategoryID, ParentID: optionalUUID(row.ParentID), Amount: row.Amount},
-		}
-	}
-	return spending, nil
-}
-
-// ProjectSpending adds up the base amounts of the expense postings of the
-// confirmed transactions of the projects that happened up to the day to, for each
-// project and category; of one project when projectID is set.
-func (r *BudgetRepo) ProjectSpending(ctx context.Context, projectID *uuid.UUID, to time.Time) ([]model.ProjectSpending, error) {
-	rows, err := r.q.ListProjectSpending(ctx, dbgen.ListProjectSpendingParams{ToDay: to, ProjectID: nullUUID(projectID)})
-	if err != nil {
-		return nil, err
-	}
-	spending := make([]model.ProjectSpending, len(rows))
-	for i, row := range rows {
-		spending[i] = model.ProjectSpending{
-			ProjectID: row.ProjectID,
-			Spending:  model.Spending{CategoryID: row.CategoryID, ParentID: optionalUUID(row.ParentID), Amount: row.Amount},
-		}
-	}
-	return spending, nil
-}
-
 // Spending adds up the base amounts of the expense postings of the confirmed
-// transactions that happened from the day from to the day to, for each month and
-// category, whether the transaction has an area, a project or neither: one statement
-// that has the conditions of AreaSpending and ProjectSpending and groups by neither.
-func (r *BudgetRepo) Spending(ctx context.Context, from, to time.Time) ([]model.MonthCategorySpending, error) {
-	rows, err := r.q.ListSpending(ctx, dbgen.ListSpendingParams{FromDay: from, ToDay: to})
+// transactions, for each month, area, project and category, in one statement. It is
+// the one place that says what counts as spent; what an area, a project or a month
+// has spent is for the model to make of its rows.
+func (r *BudgetRepo) Spending(ctx context.Context, filter repo.SpendingFilter) ([]model.SpendingRow, error) {
+	rows, err := r.q.ListSpending(ctx, dbgen.ListSpendingParams{
+		FromDay: filter.From, ToDay: filter.To, ProjectID: nullUUID(filter.ProjectID),
+	})
 	if err != nil {
 		return nil, err
 	}
-	spending := make([]model.MonthCategorySpending, len(rows))
+	spending := make([]model.SpendingRow, len(rows))
 	for i, row := range rows {
-		spending[i] = model.MonthCategorySpending{
-			Month:    row.Month,
-			Spending: model.Spending{CategoryID: row.CategoryID, ParentID: optionalUUID(row.ParentID), Amount: row.Amount},
+		spending[i] = model.SpendingRow{
+			Month:     row.Month,
+			AreaID:    optionalUUID(row.AreaID),
+			ProjectID: optionalUUID(row.ProjectID),
+			Spending:  model.Spending{CategoryID: row.CategoryID, ParentID: optionalUUID(row.ParentID), Amount: row.Amount},
 		}
 	}
 	return spending, nil

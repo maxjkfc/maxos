@@ -12,18 +12,22 @@ import (
 
 // What was spent has one definition, whatever it is read by: the base amount of
 // the expense postings (see Spending) of the confirmed transactions that happened
-// on a day that is not after today, of every kind of transaction. The reads differ
-// in what they group it by, an area, a project or a month, and never in what they
-// count; the days that count for the months a read is about are SpendingRange's,
-// and the month an expense belongs to is the month of the day it happened on
-// (MonthOf).
+// on a day that is not after today, of every kind of transaction. The repo adds
+// them up once, for each month, area, project and category (SpendingRow); the reads
+// of the areas, of the projects and of a month are what the functions below make of
+// those rows, and never count anything of their own. The days that count for the
+// months a read is about are SpendingRange's, and the month an expense belongs to is
+// the month of the day it happened on (MonthOf).
 
-// MonthCategorySpending is what was spent on a category in a month: Spending, for
-// the transactions that happened in the month, whether they belong to an area or a
-// project or to neither.
-type MonthCategorySpending struct {
+// SpendingRow is what was spent on a category in a month, in an area and in a
+// project: Spending, for the transactions that happened in the month and belong to
+// the area and to the project.
+type SpendingRow struct {
 	// Month is the first day of the month, as a date at midnight UTC (see MonthOf).
 	Month time.Time
+	// AreaID and ProjectID are the area and the project the transactions belong to;
+	// nil when they belong to none.
+	AreaID, ProjectID *uuid.UUID
 	Spending
 }
 
@@ -78,7 +82,7 @@ func MonthsBetween(first, last time.Time) []time.Time {
 // row has a total of zero, so that no month of the range is left out; a row of a
 // month outside the range is in none of them. There are no totals when last falls in
 // an earlier month than first.
-func TotalsByMonth(first, last time.Time, rows []MonthCategorySpending) []MonthTotal {
+func TotalsByMonth(first, last time.Time, rows []SpendingRow) []MonthTotal {
 	months := MonthsBetween(first, last)
 	totals := make([]MonthTotal, len(months))
 	for i, month := range months {
@@ -92,34 +96,137 @@ func TotalsByMonth(first, last time.Time, rows []MonthCategorySpending) []MonthT
 	return totals
 }
 
-// SpendingOfMonth adds up what the rows say was spent on each category in the month
-// the time falls on, and returns the categories with what was spent on each, the
-// largest first and, for the same amount, by category id, with what was spent in all.
-// A category may have several rows, which are added up; the rows of other months are
-// not counted, and a category that has no row in the month is not in the result.
-func SpendingOfMonth(month time.Time, rows []MonthCategorySpending) ([]Spending, decimal.Decimal) {
+// AreaSpendingOfMonth returns what the rows say was spent in the areas in the month
+// the time falls on: for each area and category, and whether the transactions belong
+// to a project, with the rows that have the same three added up, so that the
+// transactions of every project of an area are one. What belongs to no area is in
+// none of them, and the rows of other months are not counted. The result is in the
+// order its entries first come in the rows.
+func AreaSpendingOfMonth(month time.Time, rows []SpendingRow) []AreaSpending {
+	type key struct {
+		area, category uuid.UUID
+		inProject      bool
+	}
 	var (
-		categories []Spending
-		index      = make(map[uuid.UUID]int) // category id to its place in categories
-		total      decimal.Decimal
+		spending []AreaSpending
+		index    = make(map[key]int) // the place of each key in spending
 	)
+	for _, row := range rows {
+		if row.AreaID == nil || !sameMonth(month, row.Month) {
+			continue
+		}
+		k := key{*row.AreaID, row.CategoryID, row.ProjectID != nil}
+		i, seen := index[k]
+		if !seen {
+			i = len(spending)
+			index[k] = i
+			spending = append(spending, AreaSpending{
+				AreaID: k.area, InProject: k.inProject, Spending: Spending{CategoryID: k.category, ParentID: row.ParentID},
+			})
+		}
+		spending[i].Amount = spending[i].Amount.Add(row.Amount)
+	}
+	return spending
+}
+
+// ProjectSpendingOf returns what the rows say was spent in the projects, whatever
+// the month and the area: for each project and category, with the rows that have the
+// same two added up. What belongs to no project is in none of them. The result is in
+// the order its entries first come in the rows.
+func ProjectSpendingOf(rows []SpendingRow) []ProjectSpending {
+	type key struct{ project, category uuid.UUID }
+	var (
+		spending []ProjectSpending
+		index    = make(map[key]int) // the place of each key in spending
+	)
+	for _, row := range rows {
+		if row.ProjectID == nil {
+			continue
+		}
+		k := key{*row.ProjectID, row.CategoryID}
+		i, seen := index[k]
+		if !seen {
+			i = len(spending)
+			index[k] = i
+			spending = append(spending, ProjectSpending{
+				ProjectID: k.project, Spending: Spending{CategoryID: k.category, ParentID: row.ParentID},
+			})
+		}
+		spending[i].Amount = spending[i].Amount.Add(row.Amount)
+	}
+	return spending
+}
+
+// TopLevelSpending is what was spent on a top-level category in a month, and on the
+// subcategories under it. A subcategory is never alone: it is under its parent,
+// whether anything was spent on the parent itself or not.
+type TopLevelSpending struct {
+	CategoryID uuid.UUID
+	// Total is all that was spent on the category and under it: Own and the Amount of
+	// every one of Children.
+	Total decimal.Decimal
+	// Own is what was spent on the category itself, on none of its subcategories.
+	Own decimal.Decimal
+	// Children are the subcategories that something was spent on, the largest Amount
+	// first and, for the same Amount, by category id. Each is a Spending of which
+	// ParentID is CategoryID.
+	Children []Spending
+}
+
+// TopLevelSpendingOfMonth returns what the rows say was spent in the month the time
+// falls on, for each top-level category, and what was spent in all, which is the
+// totals of the categories added up. The rows of one category, a row for each area and
+// project it was spent in, are added up; a subcategory goes under its parent; the rows
+// of other months are not counted, and a category that has no row in the month, and
+// none of its subcategories, is not in the result. The categories are the largest
+// Total first and, for the same Total, by category id.
+func TopLevelSpendingOfMonth(month time.Time, rows []SpendingRow) ([]TopLevelSpending, decimal.Decimal) {
+	byCategory := make(map[uuid.UUID]Spending)
 	for _, row := range rows {
 		if !sameMonth(month, row.Month) {
 			continue
 		}
-		i, seen := index[row.CategoryID]
+		s, seen := byCategory[row.CategoryID]
 		if !seen {
-			i = len(categories)
-			index[row.CategoryID] = i
-			categories = append(categories, Spending{CategoryID: row.CategoryID, ParentID: row.ParentID})
+			s = Spending{CategoryID: row.CategoryID, ParentID: row.ParentID}
 		}
-		categories[i].Amount = categories[i].Amount.Add(row.Amount)
-		total = total.Add(row.Amount)
+		s.Amount = s.Amount.Add(row.Amount)
+		byCategory[row.CategoryID] = s
 	}
-	slices.SortFunc(categories, func(a, b Spending) int {
-		return cmp.Or(b.Amount.Cmp(a.Amount), bytes.Compare(a.CategoryID[:], b.CategoryID[:]))
+
+	var (
+		topLevel []TopLevelSpending
+		index    = make(map[uuid.UUID]int) // the place of each top-level category in topLevel
+		total    decimal.Decimal
+	)
+	for _, s := range byCategory {
+		top := s.CategoryID
+		if s.ParentID != nil {
+			top = *s.ParentID
+		}
+		i, seen := index[top]
+		if !seen {
+			i = len(topLevel)
+			index[top] = i
+			topLevel = append(topLevel, TopLevelSpending{CategoryID: top})
+		}
+		topLevel[i].Total = topLevel[i].Total.Add(s.Amount)
+		if s.ParentID == nil {
+			topLevel[i].Own = s.Amount
+		} else {
+			topLevel[i].Children = append(topLevel[i].Children, s)
+		}
+		total = total.Add(s.Amount)
+	}
+	for _, t := range topLevel {
+		slices.SortFunc(t.Children, func(a, b Spending) int {
+			return cmp.Or(b.Amount.Cmp(a.Amount), bytes.Compare(a.CategoryID[:], b.CategoryID[:]))
+		})
+	}
+	slices.SortFunc(topLevel, func(a, b TopLevelSpending) int {
+		return cmp.Or(b.Total.Cmp(a.Total), bytes.Compare(a.CategoryID[:], b.CategoryID[:]))
 	})
-	return categories, total
+	return topLevel, total
 }
 
 // sameMonth reports whether the two times fall on the same month, each as its own

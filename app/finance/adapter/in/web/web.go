@@ -14,8 +14,6 @@ import (
 	"embed"
 	"time"
 
-	"go.uber.org/fx"
-
 	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
@@ -27,10 +25,9 @@ import (
 var templateFS embed.FS
 
 // Ports are the use cases the pages call, and the clock that says what day it is.
-// Fx fills it.
+// The app fills it (cmd/web.go): the adapter only takes what it is given, as the
+// registrar of the MCP tools does.
 type Ports struct {
-	fx.In
-
 	// Clock is the only source of today: it is what makes a month "this month", and
 	// the timezone it is read in is the one dates are shown in.
 	Clock clock.Clock

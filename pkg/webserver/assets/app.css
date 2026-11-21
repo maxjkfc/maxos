@@ -422,6 +422,13 @@ tfoot td {
   font-variant-numeric: tabular-nums;
 }
 
+/* A note that takes the place of the figures of a row: it spans them, right-aligned
+   where they would be, and wraps, as a figure that is not to be broken does not. */
+.note-cell {
+  text-align: right;
+  font-weight: 400;
+}
+
 .amt {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -637,6 +644,13 @@ table.wide {
     display: block;
   }
 
+  /* A caption that is seen takes the whole width of the table: left as a table
+     caption inside a block it shrinks to the width of its longest word. */
+  .stack caption:not(.sr-only) {
+    display: block;
+    padding: 0.6rem 0.8rem 0.2rem;
+  }
+
   .stack thead {
     position: absolute;
     width: 1px;
@@ -664,6 +678,18 @@ table.wide {
     position: relative;
     min-height: 1.4em;
     padding-left: 7.4rem;
+  }
+
+  /* A note has no label to make room for: it is a line of its own. */
+  .stack td.note-cell {
+    padding-left: 0;
+    text-align: left;
+  }
+
+  /* What an amount is of goes above it: beside it, a long name pushes the amount
+     past the edge of a phone. */
+  .stack .where {
+    display: block;
   }
 
   .stack td::before {

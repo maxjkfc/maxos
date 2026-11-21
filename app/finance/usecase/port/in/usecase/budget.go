@@ -46,6 +46,10 @@ type AllocationStatus struct {
 	// Spent is what fell into the allocation: the expenses of the category, and of
 	// its subcategories, that count toward the budget.
 	Spent decimal.Decimal
+	// Over is true when Spent is more than Amount: spending the whole of an
+	// allocation is not over it. It says nothing of the budget, which has its own
+	// Over, and nothing is blocked either way.
+	Over bool
 }
 
 // SetAreaBudget sets what an area may spend in a month, from that month on: the

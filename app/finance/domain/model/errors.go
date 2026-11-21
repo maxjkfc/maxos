@@ -171,6 +171,10 @@ var (
 	// offset.
 	ErrInvalidPage = errors.New("the page size and offset must not be negative")
 
+	// ErrConflictingFilters is returned for a list that is asked to be of an account
+	// and of no account at once: no transaction is both.
+	ErrConflictingFilters = errors.New("a list is of an account or of no account, not both")
+
 	// ErrNoPayer is returned for an expense that does not say who paid: neither
 	// the account the money came out of nor the party that paid.
 	ErrNoPayer = errors.New("an expense needs the account it is paid from, or the party that paid it")

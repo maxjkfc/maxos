@@ -156,18 +156,6 @@ func (r *refs) categoryName(id uuid.UUID) string {
 	return id.String()
 }
 
-// topCategory is the top-level category that a category belongs to: its parent,
-// or itself when it has none.
-func (r *refs) topCategory(id uuid.UUID, parent *uuid.UUID) uuid.UUID {
-	if parent != nil {
-		return *parent
-	}
-	if c, ok := r.categories[id]; ok && c.ParentID != nil {
-		return *c.ParentID
-	}
-	return id
-}
-
 // amountView is an amount as a page writes it.
 type amountView struct {
 	// Text is the number, with the places of the instrument, the commas between its

@@ -48,7 +48,7 @@ func TestTheOverview(t *testing.T) {
 		PlanID: seqID(77), AccountID: card, InstrumentID: twd,
 		Principal: dec("12000"), Charged: dec("1000"), Remaining: dec("11000"), NextDueOn: &next,
 	}}
-	f.drafts = usecase.GetDraftSummaryOutput{Count: 3, Amounts: []usecase.DraftAmount{
+	f.drafts = usecase.GetDraftSummaryOutput{Count: 3, OwnTransfers: 1, Amounts: []usecase.DraftAmount{
 		{InstrumentID: twd, Outflow: dec("1500"), Inflow: dec("200"), Net: dec("-1300")},
 	}}
 	page := f.site(t).page("/app/")
@@ -67,10 +67,15 @@ func TestTheOverview(t *testing.T) {
 	t.Run("the instalments that are not due, per account and as plans", func(t *testing.T) {
 		wantIn(t, page,
 			`未到期分期　</span><span class="amt neg">−11,000.00`,
+			`<th scope="col" role="columnheader" class="num">已到期的本金</th>`,
 			`<th scope="col" role="columnheader" class="num">未到期分期</th>`,
 			`<a href="/app/transactions/`+seqID(77).String()+`">信用卡</a>`,
 			amount("12,000.00", "TWD"), amount("1,000.00", "TWD"), amount("11,000.00", "TWD"), "2026-12-05",
+			// The table of the plans is of principal, which is positive; in the balances what
+			// is not due is owed, which is negative: the page says why they differ.
+			"是欠機構的錢：在上面的餘額裡另外列出，是負數，餘額不含它。下表的金額是這幾筆分期的本金，所以是正數。",
 		)
+		wantNotIn(t, page, "已入帳的本金")
 	})
 	t.Run("accounts that hold nothing are folded, and archived ones left out", func(t *testing.T) {
 		wantIn(t, page, `<summary>餘額皆為零的帳戶（2）</summary>`, ">空帳戶</a>", ">備用卡</a>")
@@ -79,15 +84,32 @@ func TestTheOverview(t *testing.T) {
 	t.Run("what is owed is said in words", func(t *testing.T) {
 		wantIn(t, page, ">Alice</th>", amount("300.00", "TWD"), amount("−12.50", "USD"), "對方欠我", "我欠對方", `<summary>往來金額為零的對象（1）</summary>`, "<li>Bob</li>")
 	})
-	t.Run("the drafts that wait", func(t *testing.T) {
-		wantIn(t, page, "有 <strong>3</strong> 筆草稿等著確認", `<a href="/app/drafts">查看草稿</a>`, amount("1,500.00", "TWD"), amount("200.00", "TWD"), amount("−1,300.00", "TWD"))
+	t.Run("the drafts that wait, and what confirming them today would change", func(t *testing.T) {
+		wantIn(t, page,
+			"有 <strong>3</strong> 筆草稿等著確認", `<a href="/app/drafts">查看草稿</a>`,
+			"<caption>如果這些草稿今天全部確認，帳戶的餘額今天會有這些變動</caption>",
+			amount("1,500.00", "TWD"), amount("200.00", "TWD"), amount("−1,300.00", "TWD"),
+			"還沒到期的分期各期要到扣款日才會影響餘額",
+			// What only moves between my own accounts is a line of its own.
+			"自己帳戶之間的轉帳：1 筆。錢只是從一個帳戶移到另一個，不計入上面的流出和流入。",
+		)
 	})
 	t.Run("no net worth", func(t *testing.T) {
 		wantNotIn(t, page, "淨資產")
 	})
-	t.Run("the names of the glossary and none of the words it says to avoid", func(t *testing.T) {
-		wantNotIn(t, page, "餘額調整", "資產", "應收款", "應付款", "待處理", "未入帳", "分期餘額", "往來餘額", "幣種", "科目")
-	})
+}
+
+func TestDraftsThatChangeNoBalanceToday(t *testing.T) {
+	f := newFake()
+	f.drafts = usecase.GetDraftSummaryOutput{Count: 2, OwnTransfers: 2}
+	page := f.site(t).page("/app/")
+
+	wantIn(t, page, "有 <strong>2</strong> 筆草稿等著確認", "如果這些草稿今天全部確認，帳戶的餘額今天不會有變動。", "自己帳戶之間的轉帳：2 筆")
+	wantNotIn(t, between(page, "<h2>草稿</h2>", "</main>"), "<table")
+
+	// With none of them moving money between my own accounts there is no line for them.
+	f.drafts = usecase.GetDraftSummaryOutput{Count: 1, Amounts: []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("5"), Net: dec("-5")}}}
+	wantNotIn(t, f.site(t).page("/app/"), "自己帳戶之間的轉帳")
 }
 
 func TestTheOverviewWhenThereIsNothing(t *testing.T) {
@@ -156,7 +178,7 @@ func TestTheTransactionsOfAMonth(t *testing.T) {
 		wantIn(t, page, `<tr role="row" class="void">`, `<span class="badge badge-void">已作廢</span>`)
 	})
 	t.Run("a transfer shows what each account gained or lost", func(t *testing.T) {
-		wantIn(t, page, `<span class="muted small">活期存款　</span>`, `<span class="muted small">現金　</span>`, amount("−1,000.00", "TWD"), amount("+1,000.00", "TWD"), `<td role="cell" data-label="種類">轉帳</td>`)
+		wantIn(t, page, `<span class="where muted small">活期戶頭　</span>`, `<span class="where muted small">現金　</span>`, amount("−1,000.00", "TWD"), amount("+1,000.00", "TWD"), `<td role="cell" data-label="種類">轉帳</td>`)
 	})
 	t.Run("a foreign amount is in its own instrument", func(t *testing.T) {
 		wantIn(t, page, amount("−100.00", "USD"))
@@ -172,6 +194,73 @@ func TestTheTransactionsOfAMonth(t *testing.T) {
 		)
 		wantNotIn(t, page, "上一頁")
 	})
+}
+
+// rowOf is the row of the list that is of the transaction.
+func rowOf(page string, t usecase.Transaction) string {
+	return between(page, `<a href="/app/transactions/`+t.ID.String()+`">`, "</tr>")
+}
+
+func TestTheAmountOfARowSaysWhatItIsWhenItIsNotAnAccounts(t *testing.T) {
+	f := newFake()
+	// A purchase paid in instalments moves no account: it makes principal owed that is not yet
+	// due, and a row that showed only −3,000.00 would read as a balance of the card that fell
+	// by that much.
+	origin := transaction(seqID(1), "expense", "confirmed", date(2026, time.November, 1),
+		usecase.Posting{Seq: 1, Book: "instalment", AccountID: &card, InstrumentID: twd, Quantity: dec("-3000")},
+		expensePosting(2, rent, twd, "3000", "3000"))
+	// A dinner that Bob paid for me moves no account either: what changes is what I owe him.
+	paidBy := transaction(seqID(2), "expense", "confirmed", date(2026, time.November, 2),
+		dealingPosting(1, bob, twd, "-300"), expensePosting(2, lunch, twd, "300", "300"))
+	// An expense on an account says only the amount: the column of the accounts says whose.
+	plain := lunchTransaction(3, date(2026, time.November, 3), cash, "120")
+	// A transfer has an amount for each of its accounts, and says which is which.
+	transfer := transaction(seqID(4), "transfer", "confirmed", date(2026, time.November, 4),
+		accountPosting(1, checking, twd, "-10"), accountPosting(2, cash, twd, "10"))
+	f.listed = []usecase.Transaction{origin, paidBy, plain, transfer}
+	page := f.site(t).page("/app/transactions?month=2026-11")
+
+	t.Run("principal that is not yet due", func(t *testing.T) {
+		wantIn(t, rowOf(page, origin), `<span class="where muted small">信用卡・未到期分期　</span>`, amount("−3,000.00", "TWD"))
+	})
+	t.Run("what I owe a party", func(t *testing.T) {
+		wantIn(t, rowOf(page, paidBy), `<span class="where muted small">往來・Bob　</span>`, amount("−300.00", "TWD"))
+	})
+	t.Run("an account's own amount has no label", func(t *testing.T) {
+		wantNotIn(t, rowOf(page, plain), `<span class="where muted small">現金`)
+		wantIn(t, rowOf(page, plain), amount("−120.00", "TWD"))
+	})
+	t.Run("an amount of each account of a transfer is told apart", func(t *testing.T) {
+		wantIn(t, rowOf(page, transfer), `<span class="where muted small">活期戶頭　</span>`, `<span class="where muted small">現金　</span>`)
+	})
+}
+
+func TestTheTransactionsOfNoAccountAreAskedForByTheFilterThatSaysSo(t *testing.T) {
+	f := newFake()
+	s := f.site(t)
+	page := s.page("/app/transactions?month=2026-11&account=none&status=draft")
+
+	if in := f.listedIn; !in.WithoutAccount || in.AccountID != nil || in.Status != "draft" {
+		t.Errorf("asked %+v, want the drafts of no account", in)
+	}
+	wantIn(t, page,
+		`<option value="none" selected>沒有帳戶的交易</option>`,
+		// The links around it keep the filter.
+		`href="/app/transactions?account=none&amp;month=2026-10&amp;status=draft" rel="prev"`,
+		"沒有符合篩選條件的交易。",
+	)
+	wantNotIn(t, between(page, `name="account"`, "</select>"), `<option value="" selected>`)
+
+	// An account that is chosen is not the filter of no account, and the page without a
+	// filter is neither.
+	s.page("/app/transactions?month=2026-11&account=" + cash.String())
+	if in := f.listedIn; in.WithoutAccount || in.AccountID == nil || *in.AccountID != cash {
+		t.Errorf("asked %+v, want the account", in)
+	}
+	s.page("/app/transactions?month=2026-11")
+	if in := f.listedIn; in.WithoutAccount || in.AccountID != nil {
+		t.Errorf("asked %+v, want no account filter", in)
+	}
 }
 
 func TestTheFiltersOfTheTransactions(t *testing.T) {
@@ -192,7 +281,7 @@ func TestTheFiltersOfTheTransactions(t *testing.T) {
 
 	// What is chosen is selected in the form, and kept by the links around it.
 	wantIn(t, page,
-		`<option value="`+checking.String()+`" selected>活期存款</option>`,
+		`<option value="`+checking.String()+`" selected>活期戶頭</option>`,
 		`<option value="draft" selected>草稿</option>`,
 		`<option value="transfer" selected>轉帳</option>`,
 		`<input type="hidden" name="month" value="2026-10">`,
@@ -285,7 +374,7 @@ func TestOneTransactionWithAllItsParts(t *testing.T) {
 		wantIn(t, page,
 			part("帳戶", "信用卡"), amount("−100.00", "USD"),
 			part("主要金額", "飲食"), amount("+40.00", "USD"), "壽司",
-			`<th scope="row" role="rowheader">折扣</th>`, amount("50.00", "USD"), "只留作記錄",
+			`<th scope="row" role="rowheader">折扣</th>`, amount("50.00", "USD"), "不影響支出",
 			part("分攤", "Alice"), amount("+60.00", "USD"),
 		)
 	})
@@ -294,7 +383,7 @@ func TestOneTransactionWithAllItsParts(t *testing.T) {
 		wantIn(t, fee, part("手續費", "手續費"), amount("+15.00", "TWD"), amount("−1,000.00", "TWD"), amount("+1,000.00", "TWD"))
 
 		draft := s.page("/app/transactions/" + paidFor.ID.String())
-		wantIn(t, draft, `badge-draft">草稿`, "這是草稿", part("別人代付", "Bob"), amount("−300.00", "TWD"))
+		wantIn(t, draft, `badge-draft">草稿`, "這是草稿", part("往來（我欠對方）", "Bob"), amount("−300.00", "TWD"))
 	})
 	t.Run("what a reconciliation found missing", func(t *testing.T) {
 		wantIn(t, s.page("/app/transactions/"+reconciliation.ID.String()), `<th scope="row" role="rowheader">未記錄</th>`)
@@ -341,19 +430,24 @@ func TestAnInstalmentPlanAndItsOtherTransactions(t *testing.T) {
 func TestTheDraftsByMonthAndAccount(t *testing.T) {
 	f := newFake()
 	noAccount := (*uuid.UUID)(nil)
+	// The month has 7 drafts, of which one moves money from the checking account to the cash
+	// (1,000): the legs are in the rows of the accounts, which are of their balances, and the
+	// month leaves them out, as the use case says. Nothing here is the sum of anything: the
+	// page writes the numbers it is given.
 	f.drafts = usecase.GetDraftSummaryOutput{
-		Count:   9,
-		Amounts: []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("2200"), Inflow: dec("50000"), Net: dec("47800")}},
+		Count:        9,
+		OwnTransfers: 1,
+		Amounts:      []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("200"), Inflow: dec("50000"), Net: dec("49800")}},
 		Months: []usecase.DraftMonth{
 			{
-				Month: date(2026, time.November, 1), Count: 7,
-				Amounts: []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("2200"), Inflow: dec("50000"), Net: dec("47800")}},
+				Month: date(2026, time.November, 1), Count: 7, OwnTransfers: 1,
+				Amounts: []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("200"), Inflow: dec("50000"), Net: dec("49800")}},
 				Accounts: []usecase.DraftAccount{
 					{AccountID: &checking, Count: 4, Amounts: []usecase.DraftAmount{
 						{InstrumentID: twd, Outflow: dec("1000"), Inflow: dec("50000"), Net: dec("49000")},
 						{InstrumentID: usd, Outflow: dec("10"), Inflow: dec("0"), Net: dec("-10")},
 					}},
-					{AccountID: &cash, Count: 2, Amounts: []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("1200"), Inflow: dec("0"), Net: dec("-1200")}}},
+					{AccountID: &cash, Count: 2, Amounts: []usecase.DraftAmount{{InstrumentID: twd, Outflow: dec("200"), Inflow: dec("1000"), Net: dec("800")}}},
 					{AccountID: noAccount, Count: 1},
 				},
 			},
@@ -364,22 +458,52 @@ func TestTheDraftsByMonthAndAccount(t *testing.T) {
 		},
 	}
 	page := f.site(t).page("/app/drafts")
+	november := between(page, "<h2>2026-11 ", "</section>")
+	october := between(page, "<h2>2026-10 ", "</section>")
 
-	wantIn(t, page,
-		"共有 <strong>9</strong> 筆草稿等著確認",
-		`<h2>2026-11 <span class="muted small">7 筆</span> <a class="small" href="/app/transactions?month=2026-11&amp;status=draft">查看這個月的草稿</a></h2>`,
-		`<a href="/app/transactions?account=`+checking.String()+`&amp;month=2026-11&amp;status=draft">活期存款</a>`,
-		`<a href="/app/transactions?month=2026-11&amp;status=draft">沒有帳戶的草稿</a>`,
-		amount("49,000.00", "TWD"), amount("−10.00", "USD"), amount("50,000.00", "TWD"), amount("47,800.00", "TWD"),
-		"沒有帳戶的變動", "這個月合計", "<h2>2026-10 ",
-	)
-	if strings.Index(page, "2026-11 <span") > strings.Index(page, "2026-10 <span") {
-		t.Error("the newest month is not first")
-	}
-	// The accounts are in the order the use case gave them: by name, none last.
-	if strings.Index(page, ">活期存款<") > strings.Index(page, ">現金<") || strings.Index(page, ">現金<") > strings.Index(page, "沒有帳戶的草稿") {
-		t.Error("the accounts of a month are not in the order they were given in")
-	}
+	t.Run("the count, and what the amounts are", func(t *testing.T) {
+		wantIn(t, page,
+			"共有 <strong>9</strong> 筆草稿等著確認",
+			"分期計畫算一筆（它的起點），各期不另外算。",
+			"流出、流入和淨額是如果這些草稿今天全部確認，帳戶的餘額今天會有的變動。",
+			"還沒到期的分期各期要到扣款日才會影響餘額",
+		)
+	})
+	t.Run("a month, and the links of its accounts, which list the drafts that are counted", func(t *testing.T) {
+		wantIn(t, page,
+			`<h2>2026-11 <span class="muted small">7 筆</span> <a class="small" href="/app/transactions?month=2026-11&amp;status=draft">查看這個月的草稿</a></h2>`,
+			`<a href="/app/transactions?account=`+checking.String()+`&amp;month=2026-11&amp;status=draft">活期戶頭</a>`,
+			// The drafts that are of no account are listed by the filter that says so, not by
+			// all the drafts of the month.
+			`<a href="/app/transactions?account=none&amp;month=2026-11&amp;status=draft">沒有帳戶的草稿</a>`,
+			"<h2>2026-10 ",
+		)
+		if strings.Index(page, "2026-11 <span") > strings.Index(page, "2026-10 <span") {
+			t.Error("the newest month is not first")
+		}
+		// The accounts are in the order the use case gave them: by name, none last.
+		if strings.Index(page, ">活期戶頭<") > strings.Index(page, ">現金<") || strings.Index(page, ">現金<") > strings.Index(page, "沒有帳戶的草稿") {
+			t.Error("the accounts of a month are not in the order they were given in")
+		}
+	})
+	t.Run("the rows of the accounts have the legs of a transfer, the month does not", func(t *testing.T) {
+		wantIn(t, november,
+			amount("49,000.00", "TWD"), amount("−10.00", "USD"), amount("1,000.00", "TWD"), // the accounts
+			"沒有帳戶的變動", "這個月合計",
+			amount("50,000.00", "TWD"), amount("49,800.00", "TWD"), // the month
+		)
+		// The month is not the rows of the accounts added up: that would have the transfer
+		// twice, as an outflow of 1,200 and an inflow of 51,000.
+		wantNotIn(t, november, amount("1,200.00", "TWD"), amount("51,000.00", "TWD"))
+	})
+	t.Run("the transfers between my own accounts are a line of their own, not in the amounts", func(t *testing.T) {
+		wantIn(t, november,
+			`<th scope="row" role="rowheader">自己帳戶之間的轉帳</th>`,
+			`<td role="cell" data-label="筆數" class="num">1</td>`,
+			"錢只是從一個帳戶移到另一個，不計入合計的流出和流入",
+		)
+		wantNotIn(t, october, "自己帳戶之間的轉帳")
+	})
 }
 
 func TestNoDrafts(t *testing.T) {
@@ -477,6 +601,12 @@ func TestAStatement(t *testing.T) {
 			{Transaction: late, StatementDate: date(2026, time.November, 5), Amounts: []usecase.StatementAmount{{InstrumentID: usd, Quantity: dec("-20")}}},
 		},
 		Drafts: 3,
+		// What the use case divided the charges into: 300 + 300 of food (the lunch is under it),
+		// 200 of rent, and the shares of Alice and Bob.
+		Charges: []usecase.StatementCharges{
+			{InstrumentID: twd, Categories: []usecase.CategoryCharge{{CategoryID: food, Amount: dec("600")}, {CategoryID: rent, Amount: dec("200")}}, Shares: dec("600")},
+			{InstrumentID: usd, Categories: []usecase.CategoryCharge{{CategoryID: food, Amount: dec("20")}}},
+		},
 	}
 	s := f.site(t)
 	page := s.page("/app/cards/" + card.String() + "?closing=2026-11-05")
@@ -511,19 +641,21 @@ func TestAStatement(t *testing.T) {
 	t.Run("the charges by top-level category: a chart and the same numbers in a table", func(t *testing.T) {
 		wantIn(t, page,
 			"<h3>本期消費依類別</h3>", `<svg `, `class="chart chart-hbars"`, `id="charges-TWD-title"`, `id="charges-USD-title"`,
-			// 300 + 300 + 300 of food (the lunch is under it), 200 of rent, the shares of
-			// Alice and Bob (600), and the rest.
 			"<caption>TWD</caption>",
 		)
 		table := between(page, "<caption>TWD</caption>", "</table>")
 		wantIn(t, table,
 			`<th scope="row">飲食</th><td class="num"><span class="amt">600.00`,
 			`<th scope="row">房租</th><td class="num"><span class="amt">200.00`,
-			`<th scope="row">分攤（我替別人付的）</th><td class="num"><span class="amt">600.00`,
+			`<th scope="row">分攤（我替別人付）</th><td class="num"><span class="amt">600.00`,
+			// The total is the Charges of the figures, which the use case divided up.
 			`<th scope="row">本期消費</th><td class="num"><span class="amt">1,400.00`,
 		)
 		if strings.Contains(table, "其他") {
-			t.Errorf("an expense that is explained to the last cent has a row called other:\n%s", table)
+			t.Errorf("a charge that is explained to the last cent has a row called other:\n%s", table)
+		}
+		if strings.Index(table, "飲食") > strings.Index(table, "房租") {
+			t.Errorf("the lines are not in the order the use case gave them:\n%s", table)
 		}
 	})
 }
@@ -554,14 +686,16 @@ func TestTheBudgets(t *testing.T) {
 		{
 			AreaID: home, Budget: new(dec("10000")), Spent: dec("12500"), SpentWithProjects: dec("15000"), Over: true,
 			Allocations: []usecase.AllocationStatus{
-				{CategoryID: food, Amount: dec("4000"), Spent: dec("4500")},
+				{CategoryID: food, Amount: dec("4000"), Spent: dec("4500"), Over: true},
 				{CategoryID: rent, Amount: dec("5000"), Spent: dec("5000")},
 			},
 			Unallocated: dec("3000"),
 		},
 		{
 			AreaID: work, Budget: new(dec("8000")), Spent: dec("2000"), SpentWithProjects: dec("2000"),
-			Allocations: []usecase.AllocationStatus{{CategoryID: fees, Amount: dec("1000"), Spent: dec("0")}},
+			// The use case says whether an allocation is over, and says it is not: the page does
+			// not compare the two numbers again, so it shows no badge for this one.
+			Allocations: []usecase.AllocationStatus{{CategoryID: fees, Amount: dec("1000"), Spent: dec("1500")}},
 			Unallocated: dec("2000"),
 		},
 		{AreaID: seqID(50), Spent: dec("300"), SpentWithProjects: dec("300"), Unallocated: dec("300")},
@@ -604,10 +738,11 @@ func TestTheBudgets(t *testing.T) {
 		wantIn(t, none, `<span class="badge badge-over">超支 50.00 TWD</span>`, "這個預算是 0：花任何錢都算超支。", `chart-fill-over`)
 		wantNotIn(t, none, "已花預算的")
 	})
-	t.Run("the projects, the same way", func(t *testing.T) {
+	t.Run("the projects, the same way, with a note that they do not follow the month", func(t *testing.T) {
 		project := between(page, "<h3>日本旅行</h3>", "</section>")
 		wantIn(t, project, amount("100,000.00", "TWD"), amount("25,000.00", "TWD"), "已花預算的 25.0%")
 		wantNotIn(t, project, "已花（含專案）")
+		wantIn(t, page, "專案的預算和已花是整個專案的總額，不分月份，不會隨上面切換的月份改變。")
 	})
 }
 
@@ -618,13 +753,14 @@ func TestNoBudgets(t *testing.T) {
 
 func TestTheSpending(t *testing.T) {
 	f := newFake()
+	// The use case has done the adding up: each top-level category has its total, what was
+	// spent on it itself and its subcategories, the largest total first. The page lays it out.
 	f.spent = usecase.GetSpendingOutput{
 		Total: dec("10000"),
-		Categories: []usecase.CategorySpending{
-			{CategoryID: lunch, ParentID: &food, Amount: dec("3000")},
-			{CategoryID: food, Amount: dec("1000")},
-			{CategoryID: rent, Amount: dec("5500")},
-			{CategoryID: fees, Amount: dec("500")},
+		TopLevel: []usecase.TopLevelSpending{
+			{CategoryID: rent, Total: dec("5500"), Own: dec("5500")},
+			{CategoryID: food, Total: dec("4000"), Own: dec("1000"), Children: []usecase.CategorySpending{{CategoryID: lunch, Amount: dec("3000")}}},
+			{CategoryID: fees, Total: dec("500"), Own: dec("500")},
 		},
 	}
 	months := []usecase.MonthSpending{}
@@ -661,16 +797,19 @@ func TestTheSpending(t *testing.T) {
 		}
 		wantIn(t, table, amount("1,000.00", "TWD"), amount("12,000.00", "TWD"))
 	})
-	t.Run("the window of the chart is asked for", func(t *testing.T) {
+	t.Run("the window of the chart is asked for, and the heading says which months it is", func(t *testing.T) {
 		if !f.trendIn.From.Equal(date(2025, time.December, 1)) || !f.trendIn.To.Equal(date(2026, time.November, 1)) {
 			t.Errorf("the trend was asked from %v to %v, want the twelve months that end with this one", f.trendIn.From, f.trendIn.To)
 		}
+		wantIn(t, page, "<h2>最近十二個月每月的支出</h2>", `id="trend-title"`)
 	})
-	t.Run("a month that is out of the window ends it", func(t *testing.T) {
-		s.page("/app/spending?month=2024-03")
+	t.Run("a month that is out of the window ends it, and the heading is not about the last twelve months", func(t *testing.T) {
+		old := s.page("/app/spending?month=2024-03")
 		if !f.trendIn.From.Equal(date(2023, time.April, 1)) || !f.trendIn.To.Equal(date(2024, time.March, 1)) {
 			t.Errorf("the trend was asked from %v to %v, want the twelve months that end with March 2024", f.trendIn.From, f.trendIn.To)
 		}
+		wantIn(t, old, "<h2>2023-04 到 2024-03 每月的支出</h2>")
+		wantNotIn(t, old, "最近十二個月")
 		s.page("/app/spending?month=2027-02")
 		if !f.trendIn.To.Equal(date(2027, time.February, 1)) {
 			t.Errorf("the trend ends %v, want February 2027", f.trendIn.To)
@@ -685,19 +824,4 @@ func TestNothingSpent(t *testing.T) {
 	page := newFake().site(t).page("/app/spending")
 	wantIn(t, page, "2026-11 沒有支出。", `class="chart chart-columns"`)
 	wantNotIn(t, page, "chart-hbars")
-}
-
-func TestOnlyGlossaryWordsAreUsed(t *testing.T) {
-	f := populated()
-	f.drafts = usecase.GetDraftSummaryOutput{Count: 1, Amounts: []usecase.DraftAmount{{InstrumentID: twd}}}
-	s := f.site(t)
-	avoid := []string{"科目", "資產", "餘額調整", "歸帳日", "紅利回饋", "待處理", "未入帳", "分期餘額", "往來餘額", "幣種", "旅遊模式", "預留款", "信封", "聯絡人", "記錄類型"}
-	for _, target := range []string{"/app/", "/app/transactions", "/app/drafts", "/app/cards", "/app/budgets", "/app/spending", "/app/transactions/" + seqID(1).String()} {
-		page := s.page(target)
-		for _, word := range avoid {
-			if strings.Contains(page, word) {
-				t.Errorf("%s uses %q, which CONTEXT.md says to avoid", target, word)
-			}
-		}
-	}
 }

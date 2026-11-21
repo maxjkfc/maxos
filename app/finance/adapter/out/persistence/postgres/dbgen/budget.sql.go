@@ -103,73 +103,6 @@ func (q *Queries) ListAreaBudgets(ctx context.Context) ([]ListAreaBudgetsRow, er
 	return items, nil
 }
 
-const listAreaSpending = `-- name: ListAreaSpending :many
-SELECT t.area_id::uuid AS area_id,
-       p.category_id::uuid AS category_id,
-       c.parent_id,
-       (t.project_id IS NOT NULL)::boolean AS in_project,
-       sum(p.base_amount)::numeric AS amount
-FROM fin_posting p
-JOIN fin_transaction t ON t.id = p.transaction_id
-JOIN fin_category c ON c.id = p.category_id
-WHERE t.status = 'confirmed' AND p.book = 'expense'
-  AND t.area_id IS NOT NULL
-  AND t.occurred_on >= $1 AND t.occurred_on <= $2
-GROUP BY t.area_id, p.category_id, c.parent_id, (t.project_id IS NOT NULL)
-ORDER BY t.area_id, p.category_id, (t.project_id IS NOT NULL)
-`
-
-type ListAreaSpendingParams struct {
-	FromDay time.Time
-	ToDay   time.Time
-}
-
-type ListAreaSpendingRow struct {
-	AreaID     uuid.UUID
-	CategoryID uuid.UUID
-	ParentID   uuid.NullUUID
-	InProject  bool
-	Amount     decimal.Decimal
-}
-
-// What was spent in each area: the base amounts of the expense postings of the
-// confirmed transactions that happened on the days from from_day to to_day, both
-// days included, added up for each area and category, and for the transactions
-// that belong to a project apart from those that do not. Every kind of
-// transaction has expense postings that count (the fee of a transfer, the interest
-// of an instalment period); a draft or a void transaction has none that do; a
-// reward is not an expense posting, and a discount is a column of one, not a
-// posting; a share of what I paid for others is a dealing posting. A transaction
-// with no area is in none of them. parent_id is the parent category of the
-// category, NULL for a top-level one: the spending of a subcategory falls into the
-// allocation of its parent when it has none of its own, which is for the use case
-// to say.
-func (q *Queries) ListAreaSpending(ctx context.Context, arg ListAreaSpendingParams) ([]ListAreaSpendingRow, error) {
-	rows, err := q.db.Query(ctx, listAreaSpending, arg.FromDay, arg.ToDay)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListAreaSpendingRow
-	for rows.Next() {
-		var i ListAreaSpendingRow
-		if err := rows.Scan(
-			&i.AreaID,
-			&i.CategoryID,
-			&i.ParentID,
-			&i.InProject,
-			&i.Amount,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listProjectBudgets = `-- name: ListProjectBudgets :many
 SELECT b.id, b.project_id::uuid AS project_id, b.amount, b.created_at,
        a.category_id AS allocation_category_id, a.amount AS allocation_amount
@@ -219,8 +152,10 @@ func (q *Queries) ListProjectBudgets(ctx context.Context, projectID uuid.NullUUI
 	return items, nil
 }
 
-const listProjectSpending = `-- name: ListProjectSpending :many
-SELECT t.project_id::uuid AS project_id,
+const listSpending = `-- name: ListSpending :many
+SELECT date_trunc('month', t.occurred_on::timestamp)::date AS month,
+       t.area_id,
+       t.project_id,
        p.category_id::uuid AS category_id,
        c.parent_id,
        sum(p.base_amount)::numeric AS amount
@@ -228,98 +163,46 @@ FROM fin_posting p
 JOIN fin_transaction t ON t.id = p.transaction_id
 JOIN fin_category c ON c.id = p.category_id
 WHERE t.status = 'confirmed' AND p.book = 'expense'
-  AND t.project_id IS NOT NULL
-  AND t.occurred_on <= $1
-  AND ($2::uuid IS NULL OR t.project_id = $2)
-GROUP BY t.project_id, p.category_id, c.parent_id
-ORDER BY t.project_id, p.category_id
+  AND ($1::date IS NULL OR t.occurred_on >= $1)
+  AND t.occurred_on <= $2
+  AND ($3::uuid IS NULL OR t.project_id = $3)
+GROUP BY date_trunc('month', t.occurred_on::timestamp), t.area_id, t.project_id, p.category_id, c.parent_id
 `
 
-type ListProjectSpendingParams struct {
+type ListSpendingParams struct {
+	FromDay   *time.Time
 	ToDay     time.Time
 	ProjectID uuid.NullUUID
 }
 
-type ListProjectSpendingRow struct {
-	ProjectID  uuid.UUID
-	CategoryID uuid.UUID
-	ParentID   uuid.NullUUID
-	Amount     decimal.Decimal
-}
-
-// What was spent in each project: the base amounts of the expense postings of the
-// confirmed transactions that belong to a project and happened on or before
-// to_day (the day itself is in), whenever the project began, added up for each
-// project and category, as ListAreaSpending adds them up. With a project_id it is
-// that project's only.
-func (q *Queries) ListProjectSpending(ctx context.Context, arg ListProjectSpendingParams) ([]ListProjectSpendingRow, error) {
-	rows, err := q.db.Query(ctx, listProjectSpending, arg.ToDay, arg.ProjectID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListProjectSpendingRow
-	for rows.Next() {
-		var i ListProjectSpendingRow
-		if err := rows.Scan(
-			&i.ProjectID,
-			&i.CategoryID,
-			&i.ParentID,
-			&i.Amount,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listSpending = `-- name: ListSpending :many
-SELECT date_trunc('month', t.occurred_on::timestamp)::date AS month,
-       p.category_id::uuid AS category_id,
-       c.parent_id,
-       sum(p.base_amount)::numeric AS amount
-FROM fin_posting p
-JOIN fin_transaction t ON t.id = p.transaction_id
-JOIN fin_category c ON c.id = p.category_id
-WHERE t.status = 'confirmed' AND p.book = 'expense'
-  AND t.occurred_on >= $1 AND t.occurred_on <= $2
-GROUP BY date_trunc('month', t.occurred_on::timestamp), p.category_id, c.parent_id
-ORDER BY date_trunc('month', t.occurred_on::timestamp), p.category_id
-`
-
-type ListSpendingParams struct {
-	FromDay time.Time
-	ToDay   time.Time
-}
-
 type ListSpendingRow struct {
 	Month      time.Time
+	AreaID     uuid.NullUUID
+	ProjectID  uuid.NullUUID
 	CategoryID uuid.UUID
 	ParentID   uuid.NullUUID
 	Amount     decimal.Decimal
 }
 
-// What was spent, with no area or project in the way: the base amounts of the
-// expense postings of the confirmed transactions that happened on the days from
-// from_day to to_day, both days included, added up for each month (the first day of
-// the month the transaction happened in) and category. It is the definition of
-// ListAreaSpending and ListProjectSpending, the same transactions and postings, but
-// with no area or project to group by and none to keep out: a transaction counts
-// whether it belongs to an area, a project, both or neither, so what a month adds
-// up to is what the areas spent in it, projects included (ListAreaSpending), and
-// the expenses that have no area. Every kind of transaction has expense postings
-// that count (the fee of a transfer, the interest of an instalment period); a draft
-// or a void transaction has none that do; a reward is not an expense posting, and a
-// discount is a column of one, not a posting; a share of what I paid for others is
-// a dealing posting. parent_id is the parent category of the category, NULL for a
-// top-level one. The month is cut from a timestamp, so that no time zone is in it.
-// By month, then category id.
+// What was spent, in one statement: the base amounts of the expense postings of the
+// confirmed transactions that happened on the days from from_day (any day up to
+// to_day when it is NULL) to to_day, both days included, added up for each month (the
+// first day of the month the transaction happened in), area, project and category,
+// and only for the transactions of the project when project_id is given. A transaction
+// that has no area or no project has a row with NULL in its place: it counts as well,
+// so that a month adds up to what the areas spent in it, projects included, and the
+// expenses that have none. What an area, a project or a month has spent is for the
+// model to make of these rows; nothing else decides what counts as spent. Every kind
+// of transaction has expense postings that count (the fee of a transfer, the
+// interest of an instalment period); a draft or a void transaction has none that do;
+// a reward is not an expense posting, and a discount is a column of one, not a
+// posting; a share of what I paid for others is a dealing posting. parent_id is the
+// parent category of the category, NULL for a top-level one: the spending of a
+// subcategory falls into the allocation of its parent when it has none of its own,
+// which is for the model to say. The month is cut from a timestamp, so that no time
+// zone is in it. The rows come in no order that matters.
 func (q *Queries) ListSpending(ctx context.Context, arg ListSpendingParams) ([]ListSpendingRow, error) {
-	rows, err := q.db.Query(ctx, listSpending, arg.FromDay, arg.ToDay)
+	rows, err := q.db.Query(ctx, listSpending, arg.FromDay, arg.ToDay, arg.ProjectID)
 	if err != nil {
 		return nil, err
 	}
@@ -329,6 +212,8 @@ func (q *Queries) ListSpending(ctx context.Context, arg ListSpendingParams) ([]L
 		var i ListSpendingRow
 		if err := rows.Scan(
 			&i.Month,
+			&i.AreaID,
+			&i.ProjectID,
 			&i.CategoryID,
 			&i.ParentID,
 			&i.Amount,

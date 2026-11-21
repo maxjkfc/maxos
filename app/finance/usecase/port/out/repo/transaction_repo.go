@@ -24,8 +24,17 @@ type TransactionFilter struct {
 	// From and To bound the day the transactions happened on, both ends included.
 	// They are dates as model.DateOf makes them; nil leaves that end open.
 	From, To *time.Time
-	// AccountID limits the list to the transactions with a posting to that account.
+	// AccountID limits the list to the transactions with a posting to that account,
+	// of any book: the instalment posting of the origin of a purchase paid in
+	// instalments is one.
 	AccountID *uuid.UUID
+	// WithoutAccount limits the list to the transactions with a posting to no
+	// account, of any book. It does not go with AccountID, which the use case
+	// refuses.
+	WithoutAccount bool
+	// WithoutPlanPeriods leaves the periods of instalment plans out of the list: the
+	// origin of a plan, and the transactions that are in none, stay.
+	WithoutPlanPeriods bool
 	// PartyID limits the list to the transactions with a dealing posting to that
 	// party.
 	PartyID *uuid.UUID
@@ -91,7 +100,7 @@ type StatementContent struct {
 // transaction in several statements and relies on the database to check, when
 // its transaction commits, that the postings add up to zero; and GetForUpdate,
 // whose lock lasts until its transaction ends. The only transaction a repo opens
-// is the read-only snapshot of List, of Statement and of DraftSummary.
+// is the read-only snapshot of List and of Statement.
 type TransactionRepo interface {
 	// Insert stores the transaction, a draft, with its postings and tags, and
 	// returns it as stored, including the fields the store assigns (CreatedAt). A
@@ -202,21 +211,14 @@ type TransactionRepo interface {
 	// figures add up. Call it outside a database transaction, or inside one that is
 	// REPEATABLE READ or stricter, as for List.
 	Statement(ctx context.Context, f StatementFilter) (StatementContent, error)
-	// DraftSummary reads the drafts that are waiting to be confirmed, grouped by the
-	// month they happened in and then by the account they move (see
-	// model.DraftSummary): how many there are in each group and what they would move
-	// of each instrument. Only the transactions that are drafts are in it, whatever day
-	// they happened on, and nothing limits them to today: a draft changes nothing
-	// until it is confirmed, and one dated after today is waiting like any other. An
-	// account posting is a posting of the account book: the instalment posting of the
-	// origin of a purchase paid in instalments is not one, so a draft that has no
-	// account posting is in the group of its month that has no account. The months
-	// come newest first, the accounts of a month by account name and then id with
-	// that group last, and the amounts of an account by instrument code. It reads all
-	// of it in one snapshot, as Statement does, so that the counts and the amounts
-	// are of the same drafts: a draft that is confirmed or discarded while it runs is
-	// in all of them or none. Call it outside a database transaction, or inside one
-	// that is REPEATABLE READ or stricter, as for List. There is nothing to return
-	// for no draft: no months.
-	DraftSummary(ctx context.Context) (model.DraftSummary, error)
+	// DraftTransactions returns every transaction whose status is draft, whatever day
+	// it happened on: the ordinary ones, the origins of instalment plans, and their
+	// periods, which are drafts of their own in the store. Each has the postings that
+	// have an account, of the account book or of the instalment book, in the order of
+	// their positions, with the name of the account and the code of the instrument; a
+	// draft that has none has no postings. It is what model.SummarizeDrafts works the
+	// summary of the drafts out from, and they come in no particular order. It is one
+	// statement, so what it returns is of one moment: a draft that is confirmed or
+	// discarded while it runs is in it with all its postings, or not at all.
+	DraftTransactions(ctx context.Context) ([]model.DraftTransaction, error)
 }

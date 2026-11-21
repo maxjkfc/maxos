@@ -64,7 +64,11 @@ type allocationRow struct {
 // projects there are.
 func (h *handlers) budgets(r *http.Request) (webserver.Page, error) {
 	ctx := r.Context()
-	month, err := monthParam(r.URL.Query(), h.today())
+	q, err := queryOf(r, "month")
+	if err != nil {
+		return webserver.Page{}, err
+	}
+	month, err := monthParam(q, h.today())
 	if err != nil {
 		return webserver.Page{}, err
 	}
@@ -167,7 +171,7 @@ func buildBudget(r *refs, in budgetInput) budgetView {
 			Category: r.categoryName(a.CategoryID),
 			Amount:   r.base(a.Amount),
 			Spent:    r.base(a.Spent),
-			Over:     a.Spent.GreaterThan(a.Amount),
+			Over:     a.Over,
 		})
 	}
 	return v

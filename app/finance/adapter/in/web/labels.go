@@ -49,20 +49,20 @@ func statusLabel(status string) string { return labelOf(statusOptions, status) }
 
 // accountKindLabel is what an account of that kind is.
 func accountKindLabel(kind string) string {
-	switch kind {
-	case "cash":
+	switch model.AccountKind(kind) {
+	case model.AccountKindCash:
 		return "現金"
-	case "bank":
+	case model.AccountKindBank:
 		return "銀行戶頭"
-	case "card":
+	case model.AccountKindCard:
 		return "信用卡"
-	case "exchange":
+	case model.AccountKindExchange:
 		return "交易所"
-	case "brokerage":
+	case model.AccountKindBrokerage:
 		return "投資帳戶"
-	case "wallet":
+	case model.AccountKindWallet:
 		return "錢包"
-	case "loan":
+	case model.AccountKindLoan:
 		return "貸款"
 	default:
 		return kind

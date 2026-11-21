@@ -1,12 +1,10 @@
 package web
 
 import (
-	"cmp"
 	"fmt"
 	"html/template"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"time"
 
@@ -215,7 +213,11 @@ func (h *handlers) card(r *http.Request) (webserver.Page, error) {
 	if err != nil {
 		return webserver.Page{}, err
 	}
-	closing, err := dateParam(r.URL.Query(), "closing")
+	q, err := queryOf(r, "closing")
+	if err != nil {
+		return webserver.Page{}, err
+	}
+	closing, err := dateParam(q, "closing")
 	if err != nil {
 		return webserver.Page{}, err
 	}
@@ -271,108 +273,57 @@ func buildStatement(r *refs, card uuid.UUID, s usecase.CardStatement) statementV
 		}
 		v.Rows = append(v.Rows, row)
 	}
-	v.Charges = chargesOf(r, s.Transactions)
+	v.Charges = chargesViews(r, s.Charges, s.Figures)
 	return v
 }
 
-// chargeBucket is what one instrument was charged for.
-type chargeBucket struct {
-	byCategory map[uuid.UUID]decimal.Decimal
-	// shares is what I paid for others, which they owe me, and other what no category
-	// explains: a transfer, a dealing, a fee, the interest of an instalment.
-	shares, other, total decimal.Decimal
-}
+// The names of the lines of the charges that are not a category.
+const (
+	sharesLabel = "分攤（我替別人付）"
+	otherLabel  = "其他（轉帳、往來、分期本金等）"
+)
 
-// chargesOf adds up what the card was charged on the transactions of a statement,
-// for each instrument, by the top-level category of what it was spent on. The
-// charge of an expense goes to the categories of its lines, less what I paid for
-// others, which is a row of its own; the charge of any other kind of transaction (a
-// transfer out of the card, a dealing, a fee, the interest of a period of an
-// instalment) is a row called other. So the rows of an instrument add up to what the
-// statement says the card was charged in it.
-func chargesOf(r *refs, txns []usecase.StatementTransaction) []chargesView {
-	buckets := make(map[uuid.UUID]*chargeBucket)
-	for _, st := range txns {
-		for _, amount := range st.Amounts {
-			if !amount.Quantity.IsNegative() {
-				continue
-			}
-			charge := amount.Quantity.Neg()
-			b, ok := buckets[amount.InstrumentID]
-			if !ok {
-				b = &chargeBucket{byCategory: make(map[uuid.UUID]decimal.Decimal)}
-				buckets[amount.InstrumentID] = b
-			}
-			b.total = b.total.Add(charge)
-			if st.Transaction.Kind != string(model.KindExpense) {
-				b.other = b.other.Add(charge)
-				continue
-			}
-			explained := decimal.Zero
-			for _, p := range st.Transaction.Postings {
-				if p.InstrumentID != amount.InstrumentID {
-					continue
-				}
-				switch {
-				case p.Book == string(model.BookExpense) && p.CategoryID != nil:
-					top := r.topCategory(*p.CategoryID, nil)
-					b.byCategory[top] = b.byCategory[top].Add(p.Quantity)
-					explained = explained.Add(p.Quantity)
-				case p.Book == string(model.BookDealing) && p.Quantity.IsPositive():
-					b.shares = b.shares.Add(p.Quantity)
-					explained = explained.Add(p.Quantity)
-				}
-			}
-			b.other = b.other.Add(charge.Sub(explained))
+// chargesViews lays out what the card was charged for in each instrument, as the use
+// case divided it up: a line for each category, for what was paid for others and for
+// the rest, the chart and the table with the same numbers. The total of an instrument
+// is the Charges of the figures of the statement, which the lines add up to: the use
+// case says so, and the page writes them.
+func chargesViews(r *refs, charges []usecase.StatementCharges, figures []usecase.StatementFigures) []chargesView {
+	charged := make(map[uuid.UUID]decimal.Decimal, len(figures))
+	for _, f := range figures {
+		charged[f.InstrumentID] = f.Charges
+	}
+	views := make([]chargesView, 0, len(charges))
+	for _, c := range charges {
+		type line struct {
+			label  string
+			amount decimal.Decimal
 		}
-	}
+		lines := make([]line, 0, len(c.Categories)+2)
+		for _, category := range c.Categories {
+			lines = append(lines, line{r.categoryName(category.CategoryID), category.Amount})
+		}
+		if c.Shares.IsPositive() {
+			lines = append(lines, line{sharesLabel, c.Shares})
+		}
+		if !c.Other.IsZero() {
+			lines = append(lines, line{otherLabel, c.Other})
+		}
 
-	instruments := make([]uuid.UUID, 0, len(buckets))
-	for id := range buckets {
-		instruments = append(instruments, id)
-	}
-	slices.SortFunc(instruments, func(a, b uuid.UUID) int { return cmp.Compare(r.code(a), r.code(b)) })
-
-	var views []chargesView
-	for _, id := range instruments {
-		views = append(views, chargesViewOf(r, id, buckets[id]))
+		total := charged[c.InstrumentID]
+		code := r.code(c.InstrumentID)
+		v := chargesView{Instrument: code, Total: r.money(c.InstrumentID, total)}
+		bars := make([]svgchart.Bar, len(lines))
+		for i, l := range lines {
+			amount := r.money(c.InstrumentID, l.amount)
+			v.Rows = append(v.Rows, chargeRow{Label: l.label, Amount: amount, Share: webserver.FormatPercent(l.amount, total)})
+			bars[i] = svgchart.Bar{Label: l.label, Value: l.amount, Text: amount.Text + " " + amount.Unit}
+		}
+		v.Chart = svgchart.HBars(svgchart.Chart{
+			ID:    "charges-" + code,
+			Title: fmt.Sprintf("本期消費依類別（%s）", code),
+		}, bars)
+		views = append(views, v)
 	}
 	return views
-}
-
-func chargesViewOf(r *refs, instrument uuid.UUID, b *chargeBucket) chargesView {
-	type line struct {
-		label  string
-		amount decimal.Decimal
-	}
-	var lines []line
-	for id, amount := range b.byCategory {
-		lines = append(lines, line{r.categoryName(id), amount})
-	}
-	slices.SortFunc(lines, func(x, y line) int {
-		if c := y.amount.Cmp(x.amount); c != 0 {
-			return c
-		}
-		return cmp.Compare(x.label, y.label)
-	})
-	if b.shares.IsPositive() {
-		lines = append(lines, line{"分攤（我替別人付的）", b.shares})
-	}
-	if !b.other.IsZero() {
-		lines = append(lines, line{"其他（轉帳、往來、手續費、分期利息等）", b.other})
-	}
-
-	code := r.code(instrument)
-	v := chargesView{Instrument: code, Total: r.money(instrument, b.total)}
-	bars := make([]svgchart.Bar, len(lines))
-	for i, l := range lines {
-		amount := r.money(instrument, l.amount)
-		v.Rows = append(v.Rows, chargeRow{Label: l.label, Amount: amount, Share: webserver.FormatPercent(l.amount, b.total)})
-		bars[i] = svgchart.Bar{Label: l.label, Value: l.amount, Text: amount.Text + " " + amount.Unit}
-	}
-	v.Chart = svgchart.HBars(svgchart.Chart{
-		ID:    "charges-" + code,
-		Title: fmt.Sprintf("本期消費依類別（%s）", code),
-	}, bars)
-	return v
 }

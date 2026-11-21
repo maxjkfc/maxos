@@ -7,6 +7,7 @@ import (
 
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
+	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
 )
 
 // GetSpending returns what was spent in the month the request names, by category,
@@ -17,8 +18,9 @@ import (
 // an area, a project, both or neither, so the total of a month is what the areas
 // spent in it, projects included, and what no area has.
 //
-// The month is for the domain to take what it needs from the rows of the repo
-// (model.SpendingOfMonth): the categories, the largest first, and their total.
+// The categories are for the domain to make of the rows of the repo
+// (model.TopLevelSpendingOfMonth): the top-level ones, the largest first, with the
+// subcategories under them, and their total.
 func (s *Service) GetSpending(ctx context.Context, in usecase.GetSpendingInput) (usecase.GetSpendingOutput, error) {
 	if in.Month.IsZero() {
 		return usecase.GetSpendingOutput{}, model.ErrMonthRequired
@@ -29,11 +31,14 @@ func (s *Service) GetSpending(ctx context.Context, in usecase.GetSpendingInput) 
 	if err != nil {
 		return usecase.GetSpendingOutput{}, err
 	}
-	categories, total := model.SpendingOfMonth(month, rows)
+	topLevel, total := model.TopLevelSpendingOfMonth(month, rows)
 
-	out := usecase.GetSpendingOutput{Month: month, Total: total, Categories: make([]usecase.CategorySpending, len(categories))}
-	for i, c := range categories {
-		out.Categories[i] = usecase.CategorySpending{CategoryID: c.CategoryID, ParentID: c.ParentID, Amount: c.Amount}
+	out := usecase.GetSpendingOutput{Month: month, Total: total, TopLevel: make([]usecase.TopLevelSpending, len(topLevel))}
+	for i, t := range topLevel {
+		out.TopLevel[i] = usecase.TopLevelSpending{CategoryID: t.CategoryID, Total: t.Total, Own: t.Own}
+		for _, c := range t.Children {
+			out.TopLevel[i].Children = append(out.TopLevel[i].Children, usecase.CategorySpending{CategoryID: c.CategoryID, Amount: c.Amount})
+		}
 	}
 	return out, nil
 }
@@ -79,16 +84,17 @@ func (s *Service) GetSpendingTrend(ctx context.Context, in usecase.GetSpendingTr
 	return out, nil
 }
 
-// spentIn returns what the repo adds up as spent, by month and category, in the
-// months from first to last, up to today: for the days of the months that count by
-// today (model.SpendingRange), in one call. It asks for nothing when the first month
-// has not begun.
-func (s *Service) spentIn(ctx context.Context, first, last time.Time) ([]model.MonthCategorySpending, error) {
+// spentIn returns what the repo adds up as spent in the months from first to last, up
+// to today: for the days of the months that count by today (model.SpendingRange), in
+// one call. It asks for nothing when the first month has not begun. It is the one
+// place that asks for what was spent by month, for the budgets of the areas, for the
+// spending of a month and for the trend.
+func (s *Service) spentIn(ctx context.Context, first, last time.Time) ([]model.SpendingRow, error) {
 	from, through, begun := model.SpendingRange(first, last, s.today())
 	if !begun {
 		return nil, nil
 	}
-	rows, err := s.budgets.Spending(ctx, from, through)
+	rows, err := s.budgets.Spending(ctx, repo.SpendingFilter{From: &from, To: through})
 	if err != nil {
 		return nil, fmt.Errorf("get what was spent from %s to %s: %w", from.Format(time.DateOnly), through.Format(time.DateOnly), err)
 	}

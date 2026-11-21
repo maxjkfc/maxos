@@ -148,14 +148,15 @@ func TestAnExpenseOfAnAreaFallsIntoTheAllocationOfItsCategoryElseOfItsParentElse
 	fun := e.category("娛樂", nil)
 	games := e.category("遊戲", nil)
 	unrecorded := e.addCategory(model.Category{ID: model.UnrecordedExpenseCategoryID, Direction: model.DirectionExpense, Name: "未記錄"})
-	e.setArea(work, day(2026, 11, 1), "20000", allocation(food, "6000"), allocation(rent, "8000"), allocation(games, "1000"))
+	e.setArea(work, day(2026, 11, 1), "20000", allocation(food, "6000"), allocation(rent, "8000"), allocation(games, "1000"), allocation(fun, "25"))
 	for _, expense := range []struct {
 		category model.Category
 		amount   string
 	}{
 		{food, "100"}, {lunch, "200"}, {dinner, "400"}, // all food
 		{rent, "8000.50"}, {hostel, "3000"}, // all rent, which is more than the allocation
-		{taxi, "50"}, {fun, "25"}, {unrecorded, "5"}, // none: the parent of the taxi is not allocated, and a system category has none
+		{fun, "25"},                     // all of its allocation
+		{taxi, "50"}, {unrecorded, "5"}, // none: the parent of the taxi is not allocated, and a system category has none
 	} {
 		e.spend(day(2026, 11, 5), &work, nil, expense.category, expense.amount)
 	}
@@ -163,16 +164,18 @@ func TestAnExpenseOfAnAreaFallsIntoTheAllocationOfItsCategoryElseOfItsParentElse
 	got := e.areaOf(work, day(2026, 11, 1))
 
 	wantMoney(t, "spent", got.Spent, "11780.50")
-	if len(got.Allocations) != 3 {
-		t.Fatalf("allocations = %+v, want the three, in the order they were set", got.Allocations)
+	if len(got.Allocations) != 4 {
+		t.Fatalf("allocations = %+v, want the four, in the order they were set", got.Allocations)
 	}
 	for i, want := range []struct {
 		category      model.Category
 		amount, spent string
+		over          bool
 	}{
-		{food, "6000", "700"},
-		{rent, "8000", "11000.50"},
-		{games, "1000", "0"},
+		{food, "6000", "700", false},
+		{rent, "8000", "11000.50", true}, // its own 8000.50 and the 3000 of its subcategory
+		{games, "1000", "0", false},      // nothing fell into it
+		{fun, "25", "25", false},         // all of it, which is not more than it
 	} {
 		a := got.Allocations[i]
 		if a.CategoryID != want.category.ID {
@@ -180,100 +183,50 @@ func TestAnExpenseOfAnAreaFallsIntoTheAllocationOfItsCategoryElseOfItsParentElse
 		}
 		wantMoney(t, want.category.Name+": the allocation", a.Amount, want.amount)
 		wantMoney(t, want.category.Name+": spent into it", a.Spent, want.spent)
+		if a.Over != want.over {
+			t.Errorf("%s: over = %v, want %v with %s of %s", want.category.Name, a.Over, want.over, want.spent, want.amount)
+		}
 	}
-	wantMoney(t, "unallocated", got.Unallocated, "80")
+	wantMoney(t, "unallocated", got.Unallocated, "55")
 	if got.Over {
 		t.Error("over, want not: an allocation can be spent beyond, the budget is over when all of it is")
 	}
 }
 
-func TestAnExpenseCountsInTheMonthOfItsDayAndOnlyOnceThatDayHasComeByTodayInTheTimezoneOfTheClock(t *testing.T) {
-	e := newEnv(t)
-	work := e.area("工作", false)
-	food := e.category("飲食", nil)
-	e.setArea(work, day(2026, 11, 1), "100000")
-	// An amount for each day, so that the total says which of them it adds up.
-	for _, expense := range []struct {
-		on     time.Time
-		amount string
-	}{
-		{day(2026, 10, 31), "1"},     // the day before the month
-		{day(2026, 11, 1), "10"},     // its first day
-		{day(2026, 11, 14), "100"},   // today
-		{day(2026, 11, 15), "1000"},  // tomorrow
-		{day(2026, 11, 30), "10000"}, // its last day
-		{day(2026, 12, 1), "100000"}, // the day after the month
-	} {
-		e.spend(expense.on, &work, nil, food, expense.amount)
-	}
-
-	tests := []struct {
-		name      string
-		now       time.Time
-		want      string
-		wantAsked bool // whether the repo is asked at all
-	}{
-		{"before the month", time.Date(2026, 10, 31, 12, 0, 0, 0, taipei), "0", false},
-		{"the first day of the month", time.Date(2026, 11, 1, 0, 0, 0, 0, taipei), "10", true},
-		{"in the middle of it: what is dated later is not counted yet", time.Date(2026, 11, 14, 23, 59, 0, 0, taipei), "110", true},
-		// It is still the 14th in UTC then: the day is the one in the timezone of the clock.
-		{"just after midnight in Taipei, the day after", time.Date(2026, 11, 15, 0, 30, 0, 0, taipei), "1110", true},
-		{"the last day of the month", time.Date(2026, 11, 30, 18, 0, 0, 0, taipei), "11110", true},
-		{"the first day of the next month: its expense is not this month's", time.Date(2026, 12, 1, 0, 30, 0, 0, taipei), "11110", true},
-		{"long after", time.Date(2027, 6, 1, 9, 0, 0, 0, taipei), "11110", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			e.clock.now = tt.now
-			e.budgets.areaSpendingAsked = nil
-
-			got := e.areaOf(work, day(2026, 11, 15)) // any day of the month will do
-
-			wantMoney(t, "spent", got.Spent, tt.want)
-			wantMoney(t, "spent with projects", got.SpentWithProjects, tt.want)
-			if asked := len(e.budgets.areaSpendingAsked) > 0; asked != tt.wantAsked {
-				t.Errorf("repo asked about the spending: %v, want %v", asked, tt.wantAsked)
-			}
-		})
-	}
-}
-
-func TestTheSpendingOfAMonthIsAskedForFromItsFirstDayToItsLastOrToTodayWhicheverComesFirst(t *testing.T) {
+func TestTheSpendingOfAMonthIsAskedForFromItsFirstDayToItsLastOrToTodayInTheTimezoneOfTheClockWhicheverComesFirst(t *testing.T) {
 	e := newEnv(t)
 	work := e.area("工作", false)
 	e.setArea(work, day(2026, 1, 1), "1000")
 
+	// noon in Taipei on the day.
+	noon := func(year int, month time.Month, d int) time.Time {
+		return time.Date(year, month, d, 12, 0, 0, 0, taipei)
+	}
 	tests := []struct {
-		name         string
-		today        time.Time
-		month        time.Time
-		wantFrom     time.Time
-		wantTo       time.Time
-		wantNotAsked bool
+		name  string
+		now   time.Time
+		month time.Time
+		want  []string // none for a month that has not begun
 	}{
-		{"the current month, to today", day(2026, 11, 14), day(2026, 11, 3), day(2026, 11, 1), day(2026, 11, 14), false},
-		{"a month that is over, to its last day", day(2026, 11, 14), day(2026, 10, 3), day(2026, 10, 1), day(2026, 10, 31), false},
-		{"February of a leap year", day(2028, 6, 1), day(2028, 2, 3), day(2028, 2, 1), day(2028, 2, 29), false},
-		{"the first day of the month is today", day(2026, 11, 1), day(2026, 11, 20), day(2026, 11, 1), day(2026, 11, 1), false},
-		{"a month that has not begun asks for nothing", day(2026, 11, 14), day(2026, 12, 1), time.Time{}, time.Time{}, true},
+		{"the current month, to today", noon(2026, 11, 14), day(2026, 11, 3), []string{"2026-11-01..2026-11-14"}},
+		{"a month that is over, to its last day", noon(2026, 11, 14), day(2026, 10, 3), []string{"2026-10-01..2026-10-31"}},
+		{"February of a leap year", noon(2028, 6, 1), day(2028, 2, 3), []string{"2028-02-01..2028-02-29"}},
+		{"the first day of the month is today", noon(2026, 11, 1), day(2026, 11, 20), []string{"2026-11-01..2026-11-01"}},
+		{"a month that has not begun asks for nothing", noon(2026, 11, 14), day(2026, 12, 1), nil},
+		{"before the month", noon(2026, 10, 31), day(2026, 11, 15), nil},
+		// It is still the 14th in UTC at 00:30 on the 15th in Taipei: the day is the one in the timezone of the clock.
+		{"just after midnight in Taipei, the day after", time.Date(2026, 11, 15, 0, 30, 0, 0, taipei), day(2026, 11, 15), []string{"2026-11-01..2026-11-15"}},
+		{"the last day of the month", time.Date(2026, 11, 30, 18, 0, 0, 0, taipei), day(2026, 11, 15), []string{"2026-11-01..2026-11-30"}},
+		{"the first day of the next month: its expenses are not this month's", time.Date(2026, 12, 1, 0, 30, 0, 0, taipei), day(2026, 11, 15), []string{"2026-11-01..2026-11-30"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			e.clock.setDay(tt.today.Year(), tt.today.Month(), tt.today.Day())
-			e.budgets.areaSpendingAsked = nil
+			e.clock.now = tt.now
+			e.budgets.asked = nil
 
 			e.areas(tt.month)
 
-			if tt.wantNotAsked {
-				if len(e.budgets.areaSpendingAsked) != 0 {
-					t.Errorf("asked for %v, want nothing asked for a month that has not begun", e.budgets.areaSpendingAsked)
-				}
-				return
-			}
-			if len(e.budgets.areaSpendingAsked) != 1 ||
-				!e.budgets.areaSpendingAsked[0][0].Equal(tt.wantFrom) || !e.budgets.areaSpendingAsked[0][1].Equal(tt.wantTo) {
-				t.Errorf("asked for %v, want one call for %s to %s", e.budgets.areaSpendingAsked, tt.wantFrom.Format(time.DateOnly), tt.wantTo.Format(time.DateOnly))
-			}
+			e.wantAsked(tt.want...)
 		})
 	}
 }
@@ -429,6 +382,10 @@ func TestAProjectStandsAgainstItsBudgetWithAllItsExpensesWheneverTheyWereMade(t 
 	wantMoney(t, "spent into food, which takes its subcategory lunch too", got.Allocations[0].Spent, "15000")
 	wantMoney(t, "spent into the stay, which is more than its allocation", got.Allocations[1].Spent, "31000")
 	wantMoney(t, "unallocated", got.Unallocated, "9000")
+	if got.Allocations[0].Over || !got.Allocations[1].Over {
+		t.Errorf("allocations over: food %v, stay %v, want food not over (15000 of 20000) and the stay over (31000 of 30000)",
+			got.Allocations[0].Over, got.Allocations[1].Over)
+	}
 	if got.Over {
 		t.Error("over, want not: 55000 of 80000, whatever one allocation did")
 	}
@@ -439,34 +396,28 @@ func TestAProjectStandsAgainstItsBudgetWithAllItsExpensesWheneverTheyWereMade(t 
 	}
 }
 
-func TestAProjectExpenseCountsOnceItsDayHasCome(t *testing.T) {
+func TestProjectsAreAskedForEveryDayUpToTodayInTheTimezoneOfTheClockWhenTheyBegan(t *testing.T) {
 	e := newEnv(t)
 	trip := e.project("日本旅行", false)
-	food := e.category("飲食", nil)
 	e.setProject(trip, "1000")
-	e.spend(day(2026, 11, 14), nil, &trip, food, "10") // today
-	e.spend(day(2026, 11, 15), nil, &trip, food, "100")
-	e.spend(day(2026, 12, 25), nil, &trip, food, "1000")
 
 	tests := []struct {
 		now  time.Time
 		want string
 	}{
-		{time.Date(2026, 11, 14, 23, 59, 0, 0, taipei), "10"},
-		{time.Date(2026, 11, 15, 0, 30, 0, 0, taipei), "110"}, // the 14th in UTC still
-		{time.Date(2026, 12, 24, 12, 0, 0, 0, taipei), "110"},
-		{time.Date(2026, 12, 25, 12, 0, 0, 0, taipei), "1110"},
+		{time.Date(2026, 11, 14, 23, 59, 0, 0, taipei), "..2026-11-14"},
+		{time.Date(2026, 11, 15, 0, 30, 0, 0, taipei), "..2026-11-15"}, // the 14th in UTC still
+		{time.Date(2026, 12, 24, 12, 0, 0, 0, taipei), "..2026-12-24"},
+		{time.Date(2027, 12, 25, 12, 0, 0, 0, taipei), "..2027-12-25"},
 	}
 	for _, tt := range tests {
 		e.clock.now = tt.now
-		e.budgets.projectSpendingAsked = nil
+		e.budgets.asked = nil
 
-		got := e.projectOf(trip)
+		e.projects()
 
-		wantMoney(t, "spent on "+tt.now.Format(time.DateTime), got.Spent, tt.want)
-		if want := model.DateOf(tt.now); len(e.budgets.projectSpendingAsked) != 1 || !e.budgets.projectSpendingAsked[0].Equal(want) {
-			t.Errorf("on %s the repo was asked up to %v, want today as the clock reads it, %s", tt.now, e.budgets.projectSpendingAsked, want.Format(time.DateOnly))
-		}
+		// No first day: a project's budget is for all of it, whenever it began. No project: all of them.
+		e.wantAsked(tt.want)
 	}
 }
 
@@ -559,8 +510,8 @@ func TestOneProjectIsAskedForWithoutListingAllTheOthers(t *testing.T) {
 	food := e.category("飲食", nil)
 	e.setProject(trip, "5000")
 	e.setProject(other, "300")
+	// What the repo gives when it is limited to the trip: the expenses of the trip.
 	e.spend(day(2026, 11, 2), nil, &trip, food, "120")
-	e.spend(day(2026, 11, 2), nil, &other, food, "99")
 
 	out, err := e.svc.GetProjectBudgets(context.Background(), usecase.GetProjectBudgetsInput{ProjectID: &trip})
 	if err != nil {
@@ -574,9 +525,7 @@ func TestOneProjectIsAskedForWithoutListingAllTheOthers(t *testing.T) {
 	if e.catalog.listProjectsCalls != 0 {
 		t.Error("the catalog was asked for the list of projects, want the one project checked and nothing to put in order")
 	}
-	if len(e.budgets.projectFilters) != 1 || e.budgets.projectFilters[0] == nil || *e.budgets.projectFilters[0] != trip {
-		t.Errorf("the repo was asked for %v, want it limited to the trip", e.budgets.projectFilters)
-	}
+	e.wantAsked("..2026-11-14 of 日本旅行")
 }
 
 func TestAProjectThatHasNothingIsNotListedAndOneTheCatalogDoesNotKnowIsNotFound(t *testing.T) {
@@ -599,7 +548,7 @@ func TestAProjectThatHasNothingIsNotListedAndOneTheCatalogDoesNotKnowIsNotFound(
 		if !errors.Is(err, model.ErrNotFound) || !strings.Contains(err.Error(), unknown.String()) {
 			t.Errorf("err = %v, want ErrNotFound naming the project", err)
 		}
-		if e.budgets.projectBudgetReads != 0 || len(e.budgets.projectSpendingAsked) != 0 {
+		if e.budgets.projectBudgetReads != 0 || len(e.budgets.asked) != 0 {
 			t.Error("the repo was asked, want a project that does not exist to be an error and not an empty result")
 		}
 	})
@@ -615,7 +564,7 @@ func TestAProjectThatHasNothingIsNotListedAndOneTheCatalogDoesNotKnowIsNotFound(
 		if !errors.Is(err, model.ErrNotFound) || !strings.Contains(err.Error(), trip.String()) {
 			t.Errorf("err = %v, want ErrNotFound naming the project: an error that does not say it is archived is not a pass", err)
 		}
-		if e.budgets.projectBudgetReads != 0 || len(e.budgets.projectSpendingAsked) != 0 {
+		if e.budgets.projectBudgetReads != 0 || len(e.budgets.asked) != 0 {
 			t.Error("the repo was asked, want the project refused before it")
 		}
 	})
