@@ -169,10 +169,11 @@ func (s *Service) GetProjectBudgets(ctx context.Context, in usecase.GetProjectBu
 
 // requireProject checks with the catalog that the project exists. It is the one
 // check of a project that lets an archived one through: what it spent still
-// counts. A project the catalog does not know is model.ErrNotFound; the catalog's
-// own *ReferenceError is not what the callers of the ledger can be expected to
-// match. Any other failure of the catalog is returned as it is, with what was being
-// done.
+// counts. A project the catalog does not know is model.ErrNotFound, and so is any
+// *ReferenceError that does not say the project is archived (see allArchived); the
+// catalog's own *ReferenceError is not what the callers of the ledger can be
+// expected to match. Any other failure of the catalog is returned as it is, with
+// what was being done.
 func (s *Service) requireProject(ctx context.Context, id uuid.UUID) error {
 	err := s.references.VerifyReferences(ctx, catalogusecase.VerifyReferencesInput{ProjectIDs: []uuid.UUID{id}})
 	var refErr *catalogusecase.ReferenceError
@@ -182,10 +183,8 @@ func (s *Service) requireProject(ctx context.Context, id uuid.UUID) error {
 		}
 		return nil
 	}
-	for _, problem := range refErr.Problems {
-		if !problem.Archived {
-			return fmt.Errorf("project %s: %w", id, model.ErrNotFound)
-		}
+	if !allArchived(refErr.Problems) {
+		return fmt.Errorf("project %s: %w", id, model.ErrNotFound)
 	}
 	return nil
 }

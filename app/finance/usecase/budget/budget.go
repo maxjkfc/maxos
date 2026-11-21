@@ -122,8 +122,11 @@ func endsBudget(in usecase.SetAreaBudgetInput) bool {
 	return in.Amount.IsZero() && len(in.Allocations) == 0
 }
 
-// allArchived reports whether there are problems, and each is an entry that exists
-// and is archived, as against one that does not exist.
+// allArchived reports whether the problems of a *ReferenceError say that the entry
+// is there and archived, as against one that is not there: there are some, and each
+// is an archived entry. An error with no problem in it says neither, and is not taken
+// for archived. It is the one place that decides it, for the callers that let an
+// archived entry through (verifyArea, to end a budget, and requireProject).
 func allArchived(problems []catalogusecase.ReferenceProblem) bool {
 	for _, p := range problems {
 		if !p.Archived {

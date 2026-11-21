@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
 )
@@ -600,6 +601,22 @@ func TestAProjectThatHasNothingIsNotListedAndOneTheCatalogDoesNotKnowIsNotFound(
 		}
 		if e.budgets.projectBudgetReads != 0 || len(e.budgets.projectSpendingAsked) != 0 {
 			t.Error("the repo was asked, want a project that does not exist to be an error and not an empty result")
+		}
+	})
+	t.Run("a reference error that says nothing about the project", func(t *testing.T) {
+		e := newEnv(t)
+		trip := e.project("日本旅行", false)
+		// No problem in it: it does not say the project is archived, which is the one
+		// thing that lets a project the catalog refused through.
+		e.catalog.verifyErr = &catalogusecase.ReferenceError{}
+
+		_, err := e.svc.GetProjectBudgets(context.Background(), usecase.GetProjectBudgetsInput{ProjectID: &trip})
+
+		if !errors.Is(err, model.ErrNotFound) || !strings.Contains(err.Error(), trip.String()) {
+			t.Errorf("err = %v, want ErrNotFound naming the project: an error that does not say it is archived is not a pass", err)
+		}
+		if e.budgets.projectBudgetReads != 0 || len(e.budgets.projectSpendingAsked) != 0 {
+			t.Error("the repo was asked, want the project refused before it")
 		}
 	})
 	t.Run("an archived project", func(t *testing.T) {
