@@ -25,9 +25,10 @@ const (
 	// that has none yet.
 	indentStep = 2
 
-	// The paths of the two sections of categories, as additions and ids name them.
-	pathExpense = secCategories + "." + secExpense
-	pathIncome  = secCategories + "." + secIncome
+	// The paths of the two sections of categories, as additions name them and as the
+	// model names the entries of a mapping.
+	pathExpense = model.SectionExpense
+	pathIncome  = model.SectionIncome
 )
 
 // newFileHeader is what a mapping file begins with when the import creates it. It
@@ -59,6 +60,13 @@ const newFileHeader = `# maxos import moze 的對應表：MOZE 匯出檔裡的�
 // that says what it is. A file is replaced in one step, with the permissions it had,
 // and the new lines end the way its lines do.
 //
+// Before anything is written the new text is read back, and what it says of every
+// entry has to be what the file said, and, of the entries put in, what was asked,
+// value for value. When it is not, Append returns an error that names the first entry
+// that would read differently and writes nothing. That is how a layout it cannot put
+// lines into is found out: a block scalar that has a line like a comment in it, which
+// a new entry would cut short.
+//
 // A section that is written between braces with entries in it, {a: b}, cannot be
 // added to: that is an error, and the file is left as it is. {} with nothing in it
 // is made the key of a section of lines.
@@ -79,7 +87,7 @@ func (*MappingYAML) Append(ctx context.Context, path string, guessed model.Mappi
 		return err
 	}
 
-	updated, changed, err := extend(data, renderAdditions(guessed))
+	updated, changed, err := extend(data, guessed)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
@@ -208,7 +216,8 @@ func renderInstrument(code string, in model.InstrumentMap) (string, error) {
 	return entryLine(code, m)
 }
 
-// renderAccount writes an account, with what it has of the keys.
+// renderAccount writes an account, with what it has of the keys; an opening date is
+// written as a date, which is not quoted.
 func renderAccount(name string, a model.AccountMap) (string, error) {
 	m := newFlow()
 	putText(m, keyName, a.Name)
@@ -216,26 +225,17 @@ func renderAccount(name string, a model.AccountMap) (string, error) {
 	putText(m, keyInstitution, a.Institution)
 	putInt(m, keyClosingDay, a.ClosingDay)
 	putInt(m, keyPaymentDueDay, a.PaymentDueDay)
+	putDay(m, keyOpeningDate, a.OpeningDate)
 	return entryLine(name, m)
 }
 
-// renderProject writes a project, with what it has of the keys. A period is written
-// when it has its days, both of them: Load would not read half of one.
+// renderProject writes a project, with what it has of the keys.
 func renderProject(value string, p model.ProjectMap) (string, error) {
 	m := newFlow()
 	putText(m, keyKind, p.Kind)
 	putText(m, keyName, p.Name)
 	putText(m, keyDefaultArea, p.DefaultArea)
 	putText(m, keyParty, p.Party)
-	if !p.ActiveFrom.IsZero() || !p.ActiveTo.IsZero() {
-		if p.ActiveFrom.IsZero() || p.ActiveTo.IsZero() {
-			return "", fmt.Errorf("%s needs both %s and %s", keyActivePeriod, keyFrom, keyTo)
-		}
-		period := newFlow()
-		put(period, keyFrom, scalarNode("!!timestamp", p.ActiveFrom.Format(time.DateOnly)))
-		put(period, keyTo, scalarNode("!!timestamp", p.ActiveTo.Format(time.DateOnly)))
-		put(m, keyActivePeriod, period)
-	}
 	return entryLine(value, m)
 }
 
@@ -339,6 +339,13 @@ func putInt(m *yaml.Node, key string, n int) {
 	}
 }
 
+// putDay adds a key with a day, written as a date, unless it is the zero time.
+func putDay(m *yaml.Node, key string, day time.Time) {
+	if !day.IsZero() {
+		put(m, key, scalarNode("!!timestamp", day.Format(time.DateOnly)))
+	}
+}
+
 // textNode is a text, which the encoder quotes when it would be read as something
 // else, a number or a truth.
 func textNode(text string) *yaml.Node { return scalarNode("!!str", text) }
@@ -349,37 +356,9 @@ func scalarNode(tag, value string) *yaml.Node {
 	return &yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: value}
 }
 
-// entryIDs lists the entries of a mapping, each as the path of its section and its
-// key; a default is there when it is set.
-func entryIDs(m model.Mapping) map[string]bool {
-	ids := map[string]bool{}
-	addIDs(ids, secInstruments, m.Instruments)
-	addIDs(ids, secAccounts, m.Accounts)
-	addIDs(ids, secProjects, m.Projects)
-	addIDs(ids, pathExpense, m.Expense)
-	addIDs(ids, pathIncome, m.Income)
-	addIDs(ids, secParties, m.Parties)
-	addIDs(ids, secTags, m.Tags)
-	addIDs(ids, secRows, m.Rows)
-	for _, f := range defaultFields(m.Defaults) {
-		if f.value != "" {
-			ids[entryID(secDefaults, f.key)] = true
-		}
-	}
-	return ids
-}
-
-func addIDs[V any](ids map[string]bool, path string, entries map[string]V) {
-	for key := range entries {
-		ids[entryID(path, key)] = true
-	}
-}
-
-func entryID(path, key string) string { return path + "/" + key }
-
-// extend adds the additions to the text of a mapping file, and says whether there
-// was anything to add: when there was not, the text is as it was.
-func extend(data []byte, adds additions) (updated []byte, changed bool, err error) {
+// extend adds the entries of guessed that the text of a mapping file does not have, and
+// says whether there was anything to add: when there was not, the text is as it was.
+func extend(data []byte, guessed model.Mapping) (updated []byte, changed bool, err error) {
 	doc, err := parseDocument(data)
 	if err != nil {
 		return nil, false, err
@@ -388,6 +367,7 @@ func extend(data []byte, adds additions) (updated []byte, changed bool, err erro
 	if err != nil {
 		return nil, false, err
 	}
+	adds := renderAdditions(guessed)
 	for _, name := range sectionOrder {
 		if name == secCategories {
 			err = ed.categories(adds)
@@ -406,22 +386,129 @@ func extend(data []byte, adds additions) (updated []byte, changed bool, err erro
 	}
 	updated = ed.text()
 
-	// What is written has to read back as the file with the additions, whatever the
-	// layout of the file: one that the editing does not understand is an error here,
-	// with the file as it was, and not a file that has lost what it said.
+	// What is written has to read back as the file with the entries put in, whatever
+	// the layout of the file, and value for value: a layout that the editing does not
+	// understand is an error here, with the file as it was, and not a file whose
+	// entries have lost what they said.
 	const cannot = "the entries cannot be added to the file as it is laid out; nothing is written"
 	back, err := parseDocument(updated)
 	if err != nil {
 		return nil, false, fmt.Errorf("%s (%w)", cannot, err)
 	}
-	want := entryIDs(doc.content)
-	for _, id := range ed.added {
-		want[id] = true
-	}
-	if !maps.Equal(entryIDs(back.content), want) {
-		return nil, false, errors.New(cannot)
+	want := doc.content.Merge(addedOf(guessed, ed.added))
+	if ref, differs := firstDifference(back.content, want); differs {
+		return nil, false, fmt.Errorf("%s (%s would read differently)", cannot, ref)
 	}
 	return updated, true, nil
+}
+
+// addedOf returns the entries of guessed that are put in, which are the ones that
+// the file did not have: what the mapping the file says gains.
+func addedOf(guessed model.Mapping, added []model.EntryRef) model.Mapping {
+	set := make(map[model.EntryRef]bool, len(added))
+	for _, ref := range added {
+		set[ref] = true
+	}
+	var defaults model.Defaults
+	if set[model.EntryRef{Section: model.SectionDefaults, Key: keyFeeCategory}] {
+		defaults.FeeCategory = guessed.Defaults.FeeCategory
+	}
+	if set[model.EntryRef{Section: model.SectionDefaults, Key: keyInterestCategory}] {
+		defaults.InterestCategory = guessed.Defaults.InterestCategory
+	}
+	if set[model.EntryRef{Section: model.SectionDefaults, Key: keyRefundCategory}] {
+		defaults.RefundCategory = guessed.Defaults.RefundCategory
+	}
+	return model.Mapping{
+		Instruments: only(model.SectionInstruments, guessed.Instruments, set),
+		Accounts:    only(model.SectionAccounts, guessed.Accounts, set),
+		Projects:    only(model.SectionProjects, guessed.Projects, set),
+		Expense:     only(model.SectionExpense, guessed.Expense, set),
+		Income:      only(model.SectionIncome, guessed.Income, set),
+		Parties:     only(model.SectionParties, guessed.Parties, set),
+		Tags:        only(model.SectionTags, guessed.Tags, set),
+		Defaults:    defaults,
+		Rows:        only(model.SectionRows, guessed.Rows, set),
+	}
+}
+
+// only returns the entries of a section that are in the set.
+func only[V any](section string, entries map[string]V, set map[model.EntryRef]bool) map[string]V {
+	out := make(map[string]V, len(entries))
+	for key, v := range entries {
+		if set[model.EntryRef{Section: section, Key: key}] {
+			out[key] = v
+		}
+	}
+	return out
+}
+
+// firstDifference returns the first entry, section by section as Mapping.Items has
+// them, that the two mappings do not have the same way: one has it and the other does
+// not, or it says another thing. It tells whether there is one.
+func firstDifference(got, want model.Mapping) (model.EntryRef, bool) {
+	if ref, ok := differing(model.SectionInstruments, got.Instruments, want.Instruments, equal); ok {
+		return ref, true
+	}
+	if ref, ok := differing(model.SectionAccounts, got.Accounts, want.Accounts, sameAccount); ok {
+		return ref, true
+	}
+	if ref, ok := differing(model.SectionProjects, got.Projects, want.Projects, equal); ok {
+		return ref, true
+	}
+	if ref, ok := differing(model.SectionExpense, got.Expense, want.Expense, equal); ok {
+		return ref, true
+	}
+	if ref, ok := differing(model.SectionIncome, got.Income, want.Income, equal); ok {
+		return ref, true
+	}
+	if ref, ok := differing(model.SectionParties, got.Parties, want.Parties, equal); ok {
+		return ref, true
+	}
+	if ref, ok := differing(model.SectionTags, got.Tags, want.Tags, equal); ok {
+		return ref, true
+	}
+	g, w := defaultFields(got.Defaults), defaultFields(want.Defaults)
+	for i := range w {
+		if g[i].value != w[i].value {
+			return model.EntryRef{Section: model.SectionDefaults, Key: w[i].key}, true
+		}
+	}
+	return differing(model.SectionRows, got.Rows, want.Rows, sameRow)
+}
+
+// differing returns the first entry of a section, in the order of the keys, that the
+// two maps do not have the same way: what want has, then what only got has.
+func differing[V any](section string, got, want map[string]V, same func(a, b V) bool) (model.EntryRef, bool) {
+	for _, key := range slices.Sorted(maps.Keys(want)) {
+		if g, ok := got[key]; !ok || !same(g, want[key]) {
+			return model.EntryRef{Section: section, Key: key}, true
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(got)) {
+		if _, ok := want[key]; !ok {
+			return model.EntryRef{Section: section, Key: key}, true
+		}
+	}
+	return model.EntryRef{}, false
+}
+
+func equal[V comparable](a, b V) bool { return a == b }
+
+// sameAccount tells whether two accounts say the same. An opening date is a day: two
+// times of the same instant are the same, whatever zone they are held in.
+func sameAccount(a, b model.AccountMap) bool {
+	ad, bd := a.OpeningDate, b.OpeningDate
+	a.OpeningDate, b.OpeningDate = time.Time{}, time.Time{}
+	return a == b && ad.Equal(bd)
+}
+
+// sameRow tells whether two overrides say the same. A quantity is a number: 1.50 and
+// 1.5 are the same, though the decimals that hold them are not equal as values.
+func sameRow(a, b model.RowOverride) bool {
+	aq, bq := a.Quantity, b.Quantity
+	a.Quantity, b.Quantity = nil, nil
+	return a == b && (aq == nil) == (bq == nil) && (aq == nil || aq.Equal(*bq))
 }
 
 // editor adds lines to the text of a file, and leaves the rest of it as it is.
@@ -437,7 +524,7 @@ type editor struct {
 	after   map[int][]string // the lines to add after the line of the index
 	changed map[int]string   // the lines that are written another way
 	tail    [][]string       // the sections to add at the end of the file
-	added   []string         // the ids of the entries that are to be added
+	added   []model.EntryRef // the entries that are to be added
 
 	flowRoot bool // the whole file is one mapping between braces, which lines cannot be added to
 }
@@ -683,10 +770,11 @@ func (ed *editor) addAfter(i int, lines ...string) {
 	ed.after[i] = append(ed.after[i], lines...)
 }
 
-// record notes the entries of a section as added.
+// record notes the entries of a section as added; the path is the name of the section
+// that the model gives its entries.
 func (ed *editor) record(path string, entries []entry) {
 	for _, e := range entries {
-		ed.added = append(ed.added, entryID(path, e.key))
+		ed.added = append(ed.added, model.EntryRef{Section: path, Key: e.key})
 	}
 }
 

@@ -164,23 +164,23 @@ func (b *builder) instalments() {
 		}
 		if len(names) > 1 {
 			slices.Sort(names)
-			b.skip(model.ReasonInstalmentAccounts, strings.Join(names, "、"), all...)
+			b.skipWith(model.ReasonInstalmentAccounts, names, all...)
 			continue
 		}
 		if !b.instalmentFits(g) {
-			b.skip(model.ReasonTooManyDecimals, g.origin[0].Currency, all...)
+			b.skipWith(model.ReasonTooManyDecimals, []string{g.origin[0].Currency}, all...)
 			continue
 		}
 		b.addInstalment(g, names[0])
 	}
 	if len(unmatched) > 0 {
-		b.skip(model.ReasonInstalmentUnmatched, "", unmatched...)
+		b.skip(model.ReasonInstalmentUnmatched, unmatched...)
 	}
 	// What no conversion has is left: the payments that nothing converted, which
 	// nothing records, and the interest, which is an expense.
 	for _, r := range b.rows {
 		if !b.handled[r.Pos] && r.Type == model.TypeInstalmentPayment {
-			b.skip(model.ReasonInstalmentUnmatched, "", r)
+			b.skip(model.ReasonInstalmentUnmatched, r)
 		}
 	}
 }
@@ -189,6 +189,11 @@ func (b *builder) instalmentFits(g instalmentGroup) bool {
 	code := g.origin[0].Currency
 	if !b.fits(code, g.net) {
 		return false
+	}
+	for _, r := range g.origin {
+		if !b.fits(code, r.Fee) {
+			return false
+		}
 	}
 	for i, p := range g.payments {
 		if !b.fits(code, p.Amount) {
@@ -206,26 +211,29 @@ func (b *builder) instalmentFits(g instalmentGroup) bool {
 // addInstalment makes the unit of a plan from its rows.
 func (b *builder) addInstalment(g instalmentGroup, account string) {
 	first := g.origin[0]
-	keys := make([]string, 0, len(g.rows()))
-	var names []string
-	for _, r := range g.rows() {
+	rows := g.rows()
+	keys := make([]string, 0, len(rows))
+	for _, r := range rows {
 		keys = append(keys, r.Key)
 		b.handled[r.Pos] = true
 	}
-	for _, r := range g.origin {
-		if r.Name != "" && !slices.Contains(names, r.Name) {
-			names = append(names, r.Name)
-		}
-	}
+	j := b.join(rows...)
 	u := model.Unit{
 		Kind:        model.KindBillInstalment,
-		Key:         model.KeyPrefix + "plan-" + keys[0],
+		ID:          "plan-" + keys[0],
 		Rows:        keys,
 		Date:        first.Date,
 		Clock:       first.Clock,
 		Order:       first.Pos,
-		Description: joinNonEmpty("\n", strings.Join(names, " / "), categoryNote(first)),
+		Description: instalmentDescription(rows, j.notes),
+		Merchant:    j.merchant,
+		Area:        j.area,
+		Project:     j.project,
+		Tags:        j.tags,
 		Main:        model.Leg{Account: account, Instrument: first.Currency, Amount: g.net},
+	}
+	for _, r := range g.origin {
+		u.Fees = append(u.Fees, b.feeOf(r)...)
 	}
 	hasInterest := false
 	for i, p := range g.payments {
@@ -244,6 +252,23 @@ func (b *builder) addInstalment(g instalmentGroup, account string) {
 		u.InterestCategory = b.m.Defaults.InterestCategory
 	}
 	b.add(u)
+}
+
+// instalmentDescription is what the rows of a plan say of themselves: the name and
+// the description of each, in the order of the rows, every text once; then what the
+// plan has no place for, and the category the conversion had.
+func instalmentDescription(rows []model.Row, notes []string) string {
+	var lines []string
+	for _, r := range rows {
+		for _, text := range []string{r.Name, r.Description} {
+			if text = strings.TrimSpace(text); text != "" && !slices.Contains(lines, text) {
+				lines = append(lines, text)
+			}
+		}
+	}
+	lines = append(lines, notes...)
+	lines = append(lines, categoryNote(rows[0]))
+	return joinNonEmpty("\n", lines...)
 }
 
 // mainAccount is the account of MOZE the conversion was made in: the one of its

@@ -13,8 +13,8 @@ func TestExpenseIsOneLineAtThePriceWithItsFeeAsAnotherLine(t *testing.T) {
 		fee("-2"), project("Daily"), tags("family")))
 	u := unitOf(t, p)
 
-	if u.Kind != model.KindExpense || u.Key != model.KeyPrefix+p.Rows[0].Key {
-		t.Errorf("unit = %s %q, want an expense keyed by its row", u.Kind, u.Key)
+	if u.Kind != model.KindExpense || u.ID != p.Rows[0].Key {
+		t.Errorf("unit = %s %q, want an expense whose ID is its row", u.Kind, u.ID)
 	}
 	if u.Description != "Noodles" || u.Merchant != "Fake Shop" || u.Area != "Daily" || u.Project != "" {
 		t.Errorf("text = %q, %q, area %q, project %q", u.Description, u.Merchant, u.Area, u.Project)
@@ -61,7 +61,7 @@ func TestExpenseWhoseDiscountIsTheWholePriceIsTheExpenseAndAReward(t *testing.T)
 	if u.Reward == nil || !u.Reward.Amount.Equal(d("100")) || u.Reward.Description != "Coffee （折抵）" {
 		t.Errorf("reward = %+v, want 100", u.Reward)
 	}
-	if keys := u.Keys(); len(keys) != 2 || keys[1] != u.Key+model.RewardKeySuffix {
+	if keys := u.Keys(); len(keys) != 2 || keys[1] != u.Key()+model.RewardKeySuffix {
 		t.Errorf("keys = %v, want the key and the key of the reward", keys)
 	}
 	if len(p.Caveats) != 0 {
@@ -105,8 +105,9 @@ func TestUSDTTakesTheRatesOfUSD(t *testing.T) {
 
 func TestRateThatTheRatesLackIsAProblemNotAGuess(t *testing.T) {
 	p := plan(row(model.TypeExpense, "Bank USD", "USD", "-10", main_("Food", "Lunch"), on("2026-02-01")))
-	if len(p.Problems) != 1 || p.Problems[0].Subject != "rates.USD" {
-		t.Fatalf("problems = %v, want one about the rates of USD", p.Problems)
+	want := model.Problem{Code: model.ProblemRateMissing, Subject: "rates.USD", Args: []string{"USD", "2026-02-01"}}
+	if len(p.Problems) != 1 || !reflect.DeepEqual(p.Problems[0], want) {
+		t.Fatalf("problems = %+v, want %+v: the rates of USD lack the first day they are needed", p.Problems, want)
 	}
 	if !p.Blocked() {
 		t.Error("plan is not blocked, but a base amount is missing")
@@ -310,6 +311,60 @@ func TestOpeningBalanceOfAnAccountWithNoRowFallsBackToItsLedgerAccountThenTheFil
 	}
 }
 
+func TestOpeningDateOfTheMappingIsTheDayOfEveryOpeningBalanceOfItsAccount(t *testing.T) {
+	backdated := row(model.TypeExpense, "Cash", "TWD", "-10", main_("Food", "Lunch"), on("2025-12-01"))
+	for _, tt := range []struct {
+		name    string
+		fixed   bool
+		extra   []model.Row
+		want    string
+		caveats []model.Caveat
+	}{
+		// Without the mapping, the day is by the rows, and moves when a row is dated back.
+		{"by the rows", false, nil, "2026-01-19", []model.Caveat{{Kind: model.CaveatOpeningDate, Args: []string{model.OpeningFromLedgerAccount}}}},
+		{"by the rows, one of them dated back", false, []model.Row{backdated}, "2025-11-30", []model.Caveat{{Kind: model.CaveatOpeningDate, Args: []string{model.OpeningFromLedgerAccount}}}},
+		// With it, the day is the mapping's, however the rows are dated, and nothing is told.
+		{"by the mapping", true, nil, "2026-01-01", nil},
+		{"by the mapping, one of the rows dated back", true, []model.Row{backdated}, "2026-01-01", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := testMapping()
+			if tt.fixed {
+				cash := m.Accounts["Cash"]
+				cash.OpeningDate = day("2026-01-01")
+				m.Accounts["Cash"] = cash
+			}
+			// The account has an opening balance in two currencies, and rows in one.
+			rows := append([]model.Row{
+				row(model.TypeInitial, "Cash", "TWD", "1000", on("0001-01-01"), at("")),
+				row(model.TypeInitial, "Cash", "USD", "5", on("0001-01-01"), at("")),
+				row(model.TypeExpense, "Cash", "TWD", "-10", main_("Food", "Lunch"), on("2026-01-20")),
+			}, tt.extra...)
+			p := serviceBuild(rowsOf(rows...), m)
+
+			var days []string
+			for _, u := range p.Units {
+				if u.Kind == model.KindOpening {
+					days = append(days, u.Date.Format("2006-01-02"))
+				}
+			}
+			if !reflect.DeepEqual(days, []string{tt.want, tt.want}) {
+				t.Errorf("openings are dated %v, want both %s", days, tt.want)
+			}
+			var got []model.Caveat
+			for _, c := range p.Caveats {
+				if c.Kind == model.CaveatOpeningDate {
+					c.Row = ""
+					got = append(got, c)
+				}
+			}
+			if !reflect.DeepEqual(got, tt.caveats) {
+				t.Errorf("caveats = %+v, want %+v", got, tt.caveats)
+			}
+		})
+	}
+}
+
 func TestAdjustmentIsNotRecordedWithTheRestAndKeepsItsBaseAmount(t *testing.T) {
 	p := plan(
 		row(model.TypeAdjustment, "Bank USD", "USD", "-2.5", name("fix")),
@@ -432,8 +487,9 @@ func TestOverridesChangeASingleRow(t *testing.T) {
 	if got := skippedReasons(p); !reflect.DeepEqual(got, []model.Reason{model.ReasonSkipped}) {
 		t.Errorf("skipped = %v", got)
 	}
-	if len(p.Warnings) != 1 {
-		t.Errorf("warnings = %v, want one for the key that no row has", p.Warnings)
+	wantWarning := model.Warning{Code: model.WarningRowUnknown, Subject: "rows.no-such-row-1"}
+	if len(p.Warnings) != 1 || !reflect.DeepEqual(p.Warnings[0], wantWarning) {
+		t.Errorf("warnings = %+v, want %+v for the key that no row has", p.Warnings, wantWarning)
 	}
 	if len(p.Unrecorded) != 1 || !p.Unrecorded[0].Quantity.Equal(d("700")) {
 		t.Errorf("unrecorded = %+v, want the effect of the skipped row", p.Unrecorded)
@@ -445,8 +501,9 @@ func TestOverrideThatDoesNotFitTheRowIsAProblem(t *testing.T) {
 	m := testMapping()
 	m.Rows = map[string]model.RowOverride{rows[0].Key: {Treatment: model.TreatmentReward}}
 	p := serviceBuild(rows, m)
-	if len(p.Problems) != 1 {
-		t.Fatalf("problems = %v, want the reward that a 支出 cannot be", p.Problems)
+	want := model.Problem{Code: model.ProblemOverrideNotFit, Subject: "rows." + rows[0].Key, Args: []string{model.TreatmentReward, string(model.TypeExpense)}}
+	if len(p.Problems) != 1 || !reflect.DeepEqual(p.Problems[0], want) {
+		t.Fatalf("problems = %+v, want %+v: the reward that a 支出 cannot be", p.Problems, want)
 	}
 }
 

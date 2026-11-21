@@ -25,9 +25,9 @@ func TestGuessAccountFromItsName(t *testing.T) {
 		{"Something Odd", "bank", "Something"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got := service.GuessAccount(tt.name)
+			got := service.GuessAccountHolding(tt.name, nil)
 			if got.Kind != tt.kind || got.Institution != tt.institution || got.Name != tt.name {
-				t.Errorf("GuessAccount(%q) = %+v, want kind %s, institution %q, and its own name", tt.name, got, tt.kind, tt.institution)
+				t.Errorf("GuessAccountHolding(%q) = %+v, want kind %s, institution %q, and its own name", tt.name, got, tt.kind, tt.institution)
 			}
 		})
 	}
@@ -87,12 +87,11 @@ func TestGuessProjects(t *testing.T) {
 		"旅遊":            {"2026-02-02", "2026-08-07"},
 	})
 
-	if p := got["2025-04  甲地之旅"]; p.Kind != model.ProjectProject || p.Name != "甲地之旅" ||
-		!p.ActiveFrom.Equal(day("2026-04-15")) || !p.ActiveTo.Equal(day("2026-04-22")) {
-		t.Errorf("trip = %+v, want a project with the run of days as its active period", p)
+	if p := got["2025-04  甲地之旅"]; p.Kind != model.ProjectProject || p.Name != "甲地之旅" {
+		t.Errorf("trip = %+v, want a project: the import guesses no active period for it", p)
 	}
-	if p := got["家人手術專案"]; p.Kind != model.ProjectProject || !p.ActiveFrom.IsZero() {
-		t.Errorf("surgery = %+v, want a project with no active period: its rows are not a run of days", p)
+	if p := got["家人手術專案"]; p.Kind != model.ProjectProject {
+		t.Errorf("surgery = %+v, want a project", p)
 	}
 	if p := got["生活開銷"]; p.Kind != model.ProjectArea || p.Name != "生活開銷" {
 		t.Errorf("daily = %+v, want an area", p)
@@ -105,6 +104,35 @@ func TestGuessProjects(t *testing.T) {
 	}
 	if p := got["旅遊"]; p.Kind != model.ProjectArea {
 		t.Errorf("travel = %+v, want an area: it is no trip", p)
+	}
+}
+
+func TestPlanProjectsSayWhatTheRowsOfEveryValueComeToAndTheirEvidentPeriod(t *testing.T) {
+	var rows []model.Row
+	add := func(value string, days ...string) {
+		for _, dd := range days {
+			rows = append(rows, row(model.TypeExpense, "Cash", "TWD", "-10", main_("Food", "Lunch"), project(value), on(dd)))
+		}
+	}
+	// 9 of the 11 rows of the trip are in the run of days from the 15th to the 22nd:
+	// one is booked days before it, and one long before.
+	add("Trip", "2026-03-20", "2026-04-13", "2026-04-15", "2026-04-16", "2026-04-17", "2026-04-17", "2026-04-18", "2026-04-19", "2026-04-20", "2026-04-21", "2026-04-22")
+	add("Daily", "2026-01-01", "2026-05-01")
+	add("Crowd", "2026-02-02")
+	add("Corp paid", "2026-02-02")
+	// A value that only a row with no day has, and that the mapping does not know.
+	rows = append(rows, row(model.TypeInitial, "Cash", "TWD", "50", on("0001-01-01"), project("Ghost")))
+
+	p := plan(rows...)
+	want := []model.ProjectEvidence{
+		{Value: "Corp paid", Rows: 1, First: day("2026-02-02"), Last: day("2026-02-02")},
+		{Value: "Crowd", Rows: 1, First: day("2026-02-02"), Last: day("2026-02-02")},
+		{Value: "Daily", Rows: 2, First: day("2026-01-01"), Last: day("2026-05-01")},
+		{Value: "Ghost"},
+		{Value: "Trip", Rows: 11, First: day("2026-03-20"), Last: day("2026-04-22"), From: day("2026-04-15"), To: day("2026-04-22")},
+	}
+	if !reflect.DeepEqual(p.Projects, want) {
+		t.Errorf("projects = %+v, want %+v: every value of 專案, whatever the mapping says it is, and a period for the trip only", p.Projects, want)
 	}
 }
 

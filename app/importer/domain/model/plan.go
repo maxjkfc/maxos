@@ -70,6 +70,8 @@ type Fee struct {
 	Category string
 	Amount   decimal.Decimal
 	Base     *decimal.Decimal
+	// Memo is the text that came with the fee: what the row it is of says.
+	Memo string
 }
 
 // Period is one period of an instalment plan.
@@ -90,10 +92,20 @@ type RewardPart struct {
 // KindExpenseReward, or a whole instalment plan. It is made of one row of the
 // export, or of the rows that are halves of one transaction, and says it by the names
 // of the mapping, so that it can be recorded once the ledger has what it names.
+//
+// A unit is told from the others by its ID, which comes of the rows it is made of,
+// and from its own earlier versions by its Version, which comes of what the plan says
+// it is: a change of the mapping, of a row override or of the rates is a new version
+// of the same unit, and so another idempotency key (see Key).
 type Unit struct {
 	Kind UnitKind
-	// Key is the idempotency key of the transaction, or of the first of them.
-	Key string
+	// ID is made of the keys of the rows: the key of the row for a unit of one row,
+	// "<out>+<in>" for the two halves of a transfer, an exchange or a trade, and
+	// "plan-<first row>" for an instalment plan.
+	ID string
+	// Version is the fingerprint of everything else the unit says to the ledger
+	// (Fingerprint); the plan sets it when it is made.
+	Version string
 	// Rows are the keys of the rows of the export it is made of.
 	Rows []string
 	// Date is the day it happened on, at midnight UTC; Clock is the time of day, or
@@ -135,21 +147,13 @@ type Unit struct {
 	InterestCategory string
 }
 
-// Keys are the idempotency keys of the transactions the unit records.
-func (u Unit) Keys() []string {
-	if u.Kind == KindExpenseReward {
-		return []string{u.Key, u.Key + RewardKeySuffix}
-	}
-	return []string{u.Key}
-}
-
 // Month is the month the unit happened in.
 func (u Unit) Month() string { return MonthOf(u.Date) }
 
-// Adjustment is a 餘額調整: what MOZE added to or took from an account to make it
-// say what the account really held. The import does not record it with the rest: it
-// reconciles the account when the month of the adjustment is confirmed, once
-// everything of the account before it is.
+// Adjustment is a 餘額調整 of MOZE: what MOZE added to or took from an account to
+// make it say what the account really held. The import does not record it with the
+// rest: it reconciles the account (對帳) when the month of the adjustment is
+// confirmed, once everything of the account before it is.
 type Adjustment struct {
 	// Key is the idempotency key of the reconciliation, and Row the key of the row.
 	Key string
@@ -164,48 +168,61 @@ type Adjustment struct {
 	// Amount is what the row adds to the account: not zero.
 	Amount decimal.Decimal
 	// Base is the amount in the base currency, for a currency that is not it.
-	Base        *decimal.Decimal
+	Base *decimal.Decimal
+	// Description, Merchant, Area, Project and Tags are what the row says of itself,
+	// as a Unit has them.
 	Description string
+	Merchant    string
+	Area        string
+	Project     string
+	Tags        []string
 }
 
 // Month is the month the adjustment is in.
 func (a Adjustment) Month() string { return MonthOf(a.Date) }
 
-// Reason says why rows cannot be recorded.
+// Reason says why rows cannot be recorded. Skipped.Args are the values its text fills
+// in, which each reason says; none is given for a reason that does not.
 type Reason string
 
 // The reasons a row, or the rows of a transaction, are not recorded.
 const (
-	// ReasonUnknownType is a record type the import does not know.
+	// ReasonUnknownType is a record type the import does not know. Args: the type.
 	ReasonUnknownType Reason = "unknown_type"
 	// ReasonBadSign is an amount of the wrong sign for its record type.
 	ReasonBadSign Reason = "bad_sign"
 	// ReasonZeroAmount is an amount that is nothing where the ledger needs some.
 	ReasonZeroAmount Reason = "zero_amount"
 	// ReasonTooManyDecimals is a quantity with more decimal places than its
-	// instrument has.
+	// instrument has. Args: the codes of the instruments, one or two.
 	ReasonTooManyDecimals Reason = "too_many_decimals"
 	// ReasonZeroQuantity is the purchase or sale of an instrument that is not a
-	// currency whose quantity the export has as zero: it cannot be a trade.
+	// currency whose quantity the export has as zero: it cannot be a trade. Args: the
+	// code of the instrument.
 	ReasonZeroQuantity Reason = "zero_quantity"
 	// ReasonNotCurrencies is a pair whose two sides are not currencies and not one
-	// currency and one other instrument: nothing records it.
+	// currency and one other instrument: nothing records it. Args: the two codes.
 	ReasonNotCurrencies Reason = "not_currencies"
-	// ReasonUnpaired is a 轉出 or 轉入 that has no other half.
+	// ReasonUnpaired is a 轉出 or 轉入 that has no other half: a minute with more of
+	// one than of the other. Args: how many 轉出 and how many 轉入 the minute has.
 	ReasonUnpaired Reason = "unpaired"
+	// ReasonNoPairing is 轉出 and 轉入 of one minute, as many of each, whose amounts
+	// fit no way of pairing them.
+	ReasonNoPairing Reason = "no_pairing"
 	// ReasonAmbiguousPair is 轉出 and 轉入 of one minute that can be paired in more
-	// than one way.
+	// than one way. Args: how many 轉出 and how many 轉入 the minute has.
 	ReasonAmbiguousPair Reason = "ambiguous_pair"
 	// ReasonAmountMismatch is a 轉出 and a 轉入 of one instrument whose amounts
 	// differ.
 	ReasonAmountMismatch Reason = "amount_mismatch"
 	// ReasonSameAccount is a transfer whose two sides are one account of the ledger.
+	// Args: the account.
 	ReasonSameAccount Reason = "same_account"
 	// ReasonInstalmentUnmatched is a row of an instalment (帳單分期, 分期還款, 利息)
 	// that no plan accounts for.
 	ReasonInstalmentUnmatched Reason = "instalment_unmatched"
 	// ReasonInstalmentAccounts is an instalment whose rows reconcile but are in
-	// accounts the mapping does not make one.
+	// accounts the mapping does not make one. Args: the accounts of the ledger.
 	ReasonInstalmentAccounts Reason = "instalment_accounts"
 	// ReasonSkipped is a row the user told the import to leave out.
 	ReasonSkipped Reason = "skipped"
@@ -223,8 +240,8 @@ type Skipped struct {
 	Reason Reason
 	// Rows are the keys of the rows, in the order of the file.
 	Rows []string
-	// Detail says more of why, for the cases where the reason is not enough.
-	Detail string
+	// Args say more of why, for the reasons that have values to fill in.
+	Args []string
 }
 
 // NoOpReason says why a row has nothing to record.
@@ -268,15 +285,17 @@ const (
 	// CaveatRefund is a 退款, which the ledger has no kind for: recorded as an income.
 	CaveatRefund CaveatKind = "refund"
 	// CaveatOpeningDate is an opening balance of an account that has no row of its
-	// own to put it before.
+	// own to put it before. Args: where its day comes from, OpeningFromLedgerAccount
+	// or OpeningFromFile.
 	CaveatOpeningDate CaveatKind = "opening_date"
 )
 
 // Caveat is a remark about a row that is recorded.
 type Caveat struct {
-	Kind   CaveatKind
-	Row    string
-	Detail string
+	Kind CaveatKind
+	Row  string
+	// Args are the values the text of the remark fills in; see the kind.
+	Args []string
 }
 
 // Effect is what one row does to the balance of an account in an instrument, on its
@@ -314,7 +333,7 @@ type Plan struct {
 	// is not one to record from either.
 	Problems []Problem
 	// Warnings are what is odd and does not stop anything.
-	Warnings []string
+	Warnings []Warning
 
 	// Units are what is recorded, in order.
 	Units []Unit
@@ -332,22 +351,20 @@ type Plan struct {
 	// Unrecorded are the effects of the rows in Skipped: what the ledger will not
 	// have.
 	Unrecorded []Effect
+	// Differences are the units whose effect, as the ledger will have it, is not what
+	// their rows say: a fee or a discount the ledger has no place for. What they come
+	// to is in Unrecorded as well, so that a difference of the balance that they make
+	// is one that the plan explains.
+	Differences []Difference
+	// Projects say what the rows of every value of 專案 come to, with the period the
+	// import would suggest for a project; see ProjectEvidence.
+	Projects []ProjectEvidence
 }
 
 // Blocked tells whether the plan is not one to record from: it has something to
 // map, or something wrong.
 func (p Plan) Blocked() bool {
 	return !p.Guessed.Empty() || len(p.Problems) > 0
-}
-
-// Row returns the row with the key.
-func (p Plan) Row(key string) (Row, bool) {
-	for _, r := range p.Rows {
-		if r.Key == key {
-			return r, true
-		}
-	}
-	return Row{}, false
 }
 
 // RowIndex returns the rows by their keys.
@@ -371,19 +388,34 @@ func (p Plan) Decimals(code string) int {
 }
 
 // Months lists the months the plan has anything in, from the first to the last,
-// each once, as "2006-01".
+// each once, as "2006-01": a month has something in it when a row has an effect in
+// it, or a unit or an adjustment is dated in it. (A month whose rows all come to
+// nothing, as an expense that a discount paid in full does, still has drafts to
+// confirm.)
 func (p Plan) Months() []string {
-	if len(p.Effects) == 0 {
-		return nil
+	var first, last time.Time
+	note := func(day time.Time) {
+		if day.IsZero() {
+			return
+		}
+		if first.IsZero() || day.Before(first) {
+			first = day
+		}
+		if last.IsZero() || day.After(last) {
+			last = day
+		}
 	}
-	first, last := p.Effects[0].Date, p.Effects[0].Date
 	for _, e := range p.Effects {
-		if e.Date.Before(first) {
-			first = e.Date
-		}
-		if e.Date.After(last) {
-			last = e.Date
-		}
+		note(e.Date)
+	}
+	for _, u := range p.Units {
+		note(u.Date)
+	}
+	for _, a := range p.Adjustments {
+		note(a.Date)
+	}
+	if first.IsZero() {
+		return nil
 	}
 	var months []string
 	for m := firstOfMonth(first); !m.After(last); m = m.AddDate(0, 1, 0) {
@@ -399,11 +431,6 @@ func MonthEnd(month string) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return first.AddDate(0, 1, -1), nil
-}
-
-// MonthStart is the first day of the month "2006-01", at midnight UTC.
-func MonthStart(month string) (time.Time, error) {
-	return time.Parse("2006-01", month)
 }
 
 func firstOfMonth(t time.Time) time.Time {

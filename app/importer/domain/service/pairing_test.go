@@ -30,8 +30,8 @@ func TestTransferIsAPairOfTheSameMinuteAndInstrument(t *testing.T) {
 	if len(u.Fees) != 1 || u.Fees[0].Account != "Bank" || !u.Fees[0].Amount.Equal(d("15")) {
 		t.Errorf("fees = %+v, want the fee from the account that left", u.Fees)
 	}
-	if want := model.KeyPrefix + p.Rows[0].Key + "+" + p.Rows[1].Key; u.Key != want {
-		t.Errorf("key = %q, want one derived from both rows: %q", u.Key, want)
+	if want := p.Rows[0].Key + "+" + p.Rows[1].Key; u.ID != want {
+		t.Errorf("id = %q, want one made of both rows: %q", u.ID, want)
 	}
 	if want := "Pay the card\nauto\n〔轉帳〕"; u.Description != want {
 		t.Errorf("description = %q, want %q", u.Description, want)
@@ -127,6 +127,22 @@ func TestPurchaseOfACoinWhoseQuantityIsZeroIsLeftOutWithTheMoneyThatLeft(t *test
 	if len(p.Unrecorded) != 0 {
 		t.Errorf("unrecorded = %+v, want none once it is recorded", p.Unrecorded)
 	}
+	if len(p.Differences) != 0 {
+		t.Errorf("differences = %+v, want none: the quantity the user gave is what the row moved", p.Differences)
+	}
+	assertConfirmWillAgree(t, p)
+
+	// So it is for a sale, whose row that left the account moved the quantity.
+	sale := rowsOf(out("Exchange BTC", "BTC", "0"), in("Bank", "USD", "50"))
+	m.Rows = map[string]model.RowOverride{sale[0].Key: {Quantity: ptr("0.001")}}
+	p = serviceBuild(sale, m)
+	if u := unitOf(t, p); u.Kind != model.KindTrade || u.Direction != "sell" || !u.Main.Amount.Equal(d("0.001")) {
+		t.Errorf("unit = %+v, want a sell of 0.001", u)
+	}
+	if len(p.Differences) != 0 || len(p.Unrecorded) != 0 {
+		t.Errorf("differences = %+v, unrecorded = %+v, want none", p.Differences, p.Unrecorded)
+	}
+	assertConfirmWillAgree(t, p)
 }
 
 func TestPairsThatCannotBeRecordedAreLeftOutWithAReason(t *testing.T) {
@@ -204,8 +220,8 @@ func TestIdenticalTransfersOfOneMinuteArePairedInTheOrderOfTheFile(t *testing.T)
 		out("Bank", "TWD", "-100"), out("Bank", "TWD", "-100"),
 		in("Card", "TWD", "100"), in("Card", "TWD", "100"),
 	)
-	if len(p.Units) != 2 || p.Units[0].Key == p.Units[1].Key {
-		t.Fatalf("units = %d, want 2 with their own keys (%v)", len(p.Units), skippedReasons(p))
+	if len(p.Units) != 2 || p.Units[0].ID == p.Units[1].ID {
+		t.Fatalf("units = %d, want 2 with their own IDs (%v)", len(p.Units), skippedReasons(p))
 	}
 	if p.Units[0].Rows[0] != p.Rows[0].Key || p.Units[0].Rows[1] != p.Rows[2].Key ||
 		p.Units[1].Rows[0] != p.Rows[1].Key || p.Units[1].Rows[1] != p.Rows[3].Key {
@@ -236,8 +252,8 @@ func TestTransfersOfOneMinuteThatCanBePairedInMoreThanOneWayAreLeftOut(t *testin
 		out("Bank", "TWD", "-100"), out("Cash", "TWD", "-300"),
 		in("Card", "TWD", "100"), in("Exchange", "TWD", "999"),
 	)
-	if got := skippedReasons(p); len(got) != 4 || got[0] != model.ReasonUnpaired {
-		t.Errorf("skipped = %v, want 4 unpaired", got)
+	if got := skippedReasons(p); len(got) != 4 || got[0] != model.ReasonNoPairing {
+		t.Errorf("skipped = %v, want 4 with no pairing", got)
 	}
 }
 

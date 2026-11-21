@@ -1,8 +1,8 @@
 package model
 
 import (
-	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,6 +66,11 @@ type AccountMap struct {
 	// to 31, and zero when not given.
 	ClosingDay    int
 	PaymentDueDay int
+	// OpeningDate is the day the opening balances of the account are dated, at
+	// midnight UTC; the zero time leaves it to the rows: the day before the first row
+	// of the account. It is how an opening balance is kept where it was when the
+	// first row of the account has changed.
+	OpeningDate time.Time
 }
 
 // What a value of the 專案 column is in the ledger.
@@ -83,7 +88,9 @@ const (
 	ProjectNone = "none"
 )
 
-// ProjectMap is what a value of the 專案 column is.
+// ProjectMap is what a value of the 專案 column is. It has no active period: the
+// import never sets one, since the ledger puts every transaction that has no project
+// of its own into the project that is active on its day.
 type ProjectMap struct {
 	Kind string
 	// Name is the name of the area, the project or the tag in the ledger.
@@ -91,10 +98,6 @@ type ProjectMap struct {
 	// DefaultArea is the area the transactions of a project go to, by its name in
 	// the ledger.
 	DefaultArea string
-	// ActiveFrom and ActiveTo are the days a project is under way, both given or
-	// neither (the zero time).
-	ActiveFrom time.Time
-	ActiveTo   time.Time
 	// Party is the party of a ProjectDealings, by its name in the ledger.
 	Party string
 }
@@ -152,11 +155,72 @@ type RowOverride struct {
 	Quantity *decimal.Decimal
 }
 
-// Empty tells whether the mapping has nothing in it.
-func (m Mapping) Empty() bool {
-	return len(m.Instruments)+len(m.Accounts)+len(m.Projects)+len(m.Expense)+len(m.Income)+
-		len(m.Parties)+len(m.Tags)+len(m.Rows) == 0 && m.Defaults == (Defaults{})
+// The sections of a mapping, as the file names them, which EntryRef says an entry is
+// in.
+const (
+	SectionInstruments = "instruments"
+	SectionAccounts    = "accounts"
+	SectionProjects    = "projects"
+	SectionExpense     = "categories.expense"
+	SectionIncome      = "categories.income"
+	SectionParties     = "parties"
+	SectionTags        = "tags"
+	SectionDefaults    = "defaults"
+	SectionRows        = "rows"
+)
+
+// The keys of the defaults section.
+const (
+	DefaultFeeCategory      = "fee_category"
+	DefaultInterestCategory = "interest_category"
+	DefaultRefundCategory   = "refund_category"
+)
+
+// EntryRef names an entry of a mapping: the section it is in, and its key there (for
+// the defaults, which of them it is).
+type EntryRef struct {
+	Section string
+	Key     string
 }
+
+func (e EntryRef) String() string { return e.Section + "." + e.Key }
+
+// Items lists every entry of the mapping, section by section in the order of the
+// file, each section in the order of its keys. A default is an entry when it is set.
+// It is the one way entries are counted and listed: what Plan has to add to a
+// mapping, and what a refusal tells the user to look at, are made of it.
+func (m Mapping) Items() []EntryRef {
+	var out []EntryRef
+	add := func(section string, keys []string) {
+		for _, k := range keys {
+			out = append(out, EntryRef{Section: section, Key: k})
+		}
+	}
+	add(SectionInstruments, sortedKeys(m.Instruments))
+	add(SectionAccounts, sortedKeys(m.Accounts))
+	add(SectionProjects, sortedKeys(m.Projects))
+	add(SectionExpense, sortedKeys(m.Expense))
+	add(SectionIncome, sortedKeys(m.Income))
+	add(SectionParties, sortedKeys(m.Parties))
+	add(SectionTags, sortedKeys(m.Tags))
+	for _, d := range []struct{ key, value string }{
+		{DefaultFeeCategory, m.Defaults.FeeCategory},
+		{DefaultInterestCategory, m.Defaults.InterestCategory},
+		{DefaultRefundCategory, m.Defaults.RefundCategory},
+	} {
+		if d.value != "" {
+			out = append(out, EntryRef{Section: SectionDefaults, Key: d.key})
+		}
+	}
+	add(SectionRows, sortedKeys(m.Rows))
+	return out
+}
+
+// Entries is how many entries the mapping has: len(Items()).
+func (m Mapping) Entries() int { return len(m.Items()) }
+
+// Empty tells whether the mapping has nothing in it.
+func (m Mapping) Empty() bool { return m.Entries() == 0 }
 
 // Merge returns the mapping with the entries of other that it does not have.
 func (m Mapping) Merge(other Mapping) Mapping {
@@ -209,15 +273,60 @@ func CategoryKey(main, sub string) string {
 	return main + "/" + sub
 }
 
+// ProblemCode says what is wrong with the mapping or the rates. The text is the
+// business of whoever shows it, not of the model: a problem is a code, where it is,
+// and the values the text fills in, which each code says.
+type ProblemCode string
+
+// The problems of a mapping and of rates.
+const (
+	// ProblemNameEmpty is an entry that has no name.
+	ProblemNameEmpty ProblemCode = "name_empty"
+	// ProblemKindInvalid is a kind that is not one the ledger has. Args: the kind.
+	ProblemKindInvalid ProblemCode = "kind_invalid"
+	// ProblemDecimalsRange is a number of decimals that is not from 0 to 18. Args: it.
+	ProblemDecimalsRange ProblemCode = "decimals_range"
+	// ProblemDayRange is a day of a card's statement that is not from 1 to 31. Args:
+	// the key (closing_day or payment_due_day) and the day.
+	ProblemDayRange ProblemCode = "day_range"
+	// ProblemCardOnlyDays is a closing or payment due day on an account that is not
+	// a card.
+	ProblemCardOnlyDays ProblemCode = "card_only_days"
+	// ProblemDueNeedsClosing is a payment due day with no closing day.
+	ProblemDueNeedsClosing ProblemCode = "due_needs_closing"
+	// ProblemAccountConflict is an account of the ledger that two entries make in two
+	// ways. Args: its name, and the kind and the institution the other entry gave.
+	ProblemAccountConflict ProblemCode = "account_conflict"
+	// ProblemDealingsNeedsParty is a dealings project, or a dealing, with no party.
+	ProblemDealingsNeedsParty ProblemCode = "dealings_needs_party"
+	// ProblemDefaultAreaUnknown is a default area that no entry of the mapping makes.
+	// Args: the area.
+	ProblemDefaultAreaUnknown ProblemCode = "default_area_unknown"
+	// ProblemOnlyProjectHasArea is a default area on what is not a project.
+	ProblemOnlyProjectHasArea ProblemCode = "only_project_has_area"
+	// ProblemTreatmentInvalid is a treatment that is not one that entry can have.
+	// Args: the treatment.
+	ProblemTreatmentInvalid ProblemCode = "treatment_invalid"
+	// ProblemCategoryEmpty is a category entry that makes no category.
+	ProblemCategoryEmpty ProblemCode = "category_empty"
+	// ProblemOverrideNotFit is a row override that asks for what the type of its row
+	// cannot be. Args: the treatment and the type of the row.
+	ProblemOverrideNotFit ProblemCode = "override_not_fit"
+	// ProblemRateMissing is a currency with no rate on or before the first day it
+	// is needed. Args: the code of the rates and the day.
+	ProblemRateMissing ProblemCode = "rate_missing"
+)
+
 // Problem is something wrong with the mapping or the rates that has to be put right
 // before anything is recorded.
 type Problem struct {
-	// Subject is what is wrong: an entry of the mapping, or a currency.
+	Code ProblemCode
+	// Subject is where it is: the entry of the mapping, as the file names it
+	// ("accounts.Name"), or the rates ("rates.USD").
 	Subject string
-	Detail  string
+	// Args are the values the text of the problem fills in; see the code.
+	Args []string
 }
-
-func (p Problem) String() string { return p.Subject + ": " + p.Detail }
 
 // Validate checks that what the mapping says can be made of it, and returns every
 // problem it finds: kinds that are not kinds, names that are empty, a card day out
@@ -225,57 +334,73 @@ func (p Problem) String() string { return p.Subject + ": " + p.Detail }
 // ways.
 func (m Mapping) Validate() []Problem {
 	var problems []Problem
-	add := func(subject, format string, args ...any) {
-		problems = append(problems, Problem{Subject: subject, Detail: fmt.Sprintf(format, args...)})
+	add := func(subject string, code ProblemCode, args ...string) {
+		problems = append(problems, Problem{Code: code, Subject: subject, Args: args})
 	}
+	m.validateInstruments(add)
+	m.validateAccounts(add)
+	m.validateProjects(add)
+	validateCategories(SectionExpense, m.Expense, add)
+	validateCategories(SectionIncome, m.Income, add)
+	m.validateRows(add)
+	return problems
+}
 
+type addProblem func(subject string, code ProblemCode, args ...string)
+
+func (m Mapping) validateInstruments(add addProblem) {
 	for _, code := range sortedKeys(m.Instruments) {
 		in := m.Instruments[code]
-		subject := "instruments." + code
+		subject := SectionInstruments + "." + code
 		if strings.TrimSpace(in.Name) == "" {
-			add(subject, "name is empty")
+			add(subject, ProblemNameEmpty)
 		}
 		if !slices.Contains(InstrumentKinds, in.Kind) {
-			add(subject, "kind %q is not one of %s", in.Kind, strings.Join(InstrumentKinds, ", "))
+			add(subject, ProblemKindInvalid, in.Kind)
 		}
 		if in.Decimals < 0 || in.Decimals > 18 {
-			add(subject, "decimals %d is not from 0 to 18", in.Decimals)
+			add(subject, ProblemDecimalsRange, strconv.Itoa(in.Decimals))
 		}
 	}
+}
 
+func (m Mapping) validateAccounts(add addProblem) {
 	type shape struct{ kind, institution string }
 	byName := map[string]shape{}
 	for _, name := range sortedKeys(m.Accounts) {
 		a := m.Accounts[name]
-		subject := "accounts." + name
+		subject := SectionAccounts + "." + name
 		if strings.TrimSpace(a.Name) == "" {
-			add(subject, "name is empty")
+			add(subject, ProblemNameEmpty)
 			continue
 		}
 		if !slices.Contains(AccountKinds, a.Kind) {
-			add(subject, "kind %q is not one of %s", a.Kind, strings.Join(AccountKinds, ", "))
+			add(subject, ProblemKindInvalid, a.Kind)
 		}
-		if a.ClosingDay != 0 && (a.ClosingDay < 1 || a.ClosingDay > 31) {
-			add(subject, "closing_day %d is not from 1 to 31", a.ClosingDay)
-		}
-		if a.PaymentDueDay != 0 && (a.PaymentDueDay < 1 || a.PaymentDueDay > 31) {
-			add(subject, "payment_due_day %d is not from 1 to 31", a.PaymentDueDay)
+		for _, day := range []struct {
+			key string
+			n   int
+		}{{"closing_day", a.ClosingDay}, {"payment_due_day", a.PaymentDueDay}} {
+			if day.n != 0 && (day.n < 1 || day.n > 31) {
+				add(subject, ProblemDayRange, day.key, strconv.Itoa(day.n))
+			}
 		}
 		if (a.ClosingDay != 0 || a.PaymentDueDay != 0) && a.Kind != "card" {
-			add(subject, "only a card has closing_day and payment_due_day")
+			add(subject, ProblemCardOnlyDays)
 		}
 		if a.PaymentDueDay != 0 && a.ClosingDay == 0 {
-			add(subject, "payment_due_day needs closing_day")
+			add(subject, ProblemDueNeedsClosing)
 		}
 		// MOZE accounts that are one account of the ledger must agree on what it is.
 		s := shape{a.Kind, a.Institution}
 		if prev, ok := byName[a.Name]; ok && prev != s {
-			add(subject, "is the account %q of the ledger, which another entry makes a %s of %q: kind and institution must agree",
-				a.Name, prev.kind, prev.institution)
+			add(subject, ProblemAccountConflict, a.Name, prev.kind, prev.institution)
 		}
 		byName[a.Name] = s
 	}
+}
 
+func (m Mapping) validateProjects(add addProblem) {
 	areas := map[string]bool{}
 	for _, value := range sortedKeys(m.Projects) {
 		if p := m.Projects[value]; p.Kind == ProjectArea {
@@ -284,69 +409,62 @@ func (m Mapping) Validate() []Problem {
 	}
 	for _, value := range sortedKeys(m.Projects) {
 		p := m.Projects[value]
-		subject := "projects." + value
+		subject := SectionProjects + "." + value
 		switch p.Kind {
 		case ProjectArea, ProjectProject, ProjectTag:
 			if strings.TrimSpace(p.Name) == "" {
-				add(subject, "name is empty")
+				add(subject, ProblemNameEmpty)
 			}
 		case ProjectDealings:
 			if strings.TrimSpace(p.Party) == "" {
-				add(subject, "a dealings project needs the party it is paid for")
+				add(subject, ProblemDealingsNeedsParty)
 			}
 		case ProjectNone:
 		default:
-			add(subject, "kind %q is not one of area, project, tag, dealings, none", p.Kind)
+			add(subject, ProblemKindInvalid, p.Kind)
 		}
 		if p.Kind == ProjectProject && p.DefaultArea != "" && !areas[p.DefaultArea] {
-			add(subject, "default_area %q is not an area of the mapping", p.DefaultArea)
+			add(subject, ProblemDefaultAreaUnknown, p.DefaultArea)
 		}
-		if p.ActiveFrom.IsZero() != p.ActiveTo.IsZero() {
-			add(subject, "active_period needs both from and to")
-		}
-		if !p.ActiveTo.IsZero() && p.ActiveTo.Before(p.ActiveFrom) {
-			add(subject, "active_period ends before it starts")
-		}
-		if p.Kind != ProjectProject && (p.DefaultArea != "" || !p.ActiveFrom.IsZero()) {
-			add(subject, "only a project has a default_area and an active_period")
+		if p.Kind != ProjectProject && p.DefaultArea != "" {
+			add(subject, ProblemOnlyProjectHasArea)
 		}
 	}
+}
 
-	checkCategories := func(section string, entries map[string]CategoryMap) {
-		for _, key := range sortedKeys(entries) {
-			c := entries[key]
-			subject := "categories." + section + "." + key
-			switch c.Treatment {
-			case "", TreatmentReward, TreatmentDealing:
-			default:
-				add(subject, "treatment %q is not one of reward, dealing", c.Treatment)
-			}
-			if c.Treatment == TreatmentDealing && strings.TrimSpace(c.Party) == "" {
-				add(subject, "a dealing needs its party")
-			}
-			if c.Treatment == "" {
-				if parent, _ := SplitCategory(c.Category); parent == "" {
-					add(subject, "category is empty")
-				}
+func validateCategories(section string, entries map[string]CategoryMap, add addProblem) {
+	for _, key := range sortedKeys(entries) {
+		c := entries[key]
+		subject := section + "." + key
+		switch c.Treatment {
+		case "", TreatmentReward, TreatmentDealing:
+		default:
+			add(subject, ProblemTreatmentInvalid, c.Treatment)
+		}
+		if c.Treatment == TreatmentDealing && strings.TrimSpace(c.Party) == "" {
+			add(subject, ProblemDealingsNeedsParty)
+		}
+		if c.Treatment == "" {
+			if parent, _ := SplitCategory(c.Category); parent == "" {
+				add(subject, ProblemCategoryEmpty)
 			}
 		}
 	}
-	checkCategories("expense", m.Expense)
-	checkCategories("income", m.Income)
+}
 
+func (m Mapping) validateRows(add addProblem) {
 	for _, key := range sortedKeys(m.Rows) {
 		o := m.Rows[key]
-		subject := "rows." + key
+		subject := SectionRows + "." + key
 		switch o.Treatment {
 		case "", TreatmentIncome, TreatmentExpense, TreatmentReward, TreatmentDealing, TreatmentSkip:
 		default:
-			add(subject, "treatment %q is not one of income, expense, reward, dealing, skip", o.Treatment)
+			add(subject, ProblemTreatmentInvalid, o.Treatment)
 		}
 		if o.Treatment == TreatmentDealing && strings.TrimSpace(o.Party) == "" {
-			add(subject, "a dealing needs its party")
+			add(subject, ProblemDealingsNeedsParty)
 		}
 	}
-	return problems
 }
 
 // sortedKeys returns the keys of m in order.

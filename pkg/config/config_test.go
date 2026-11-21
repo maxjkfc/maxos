@@ -79,3 +79,25 @@ func TestLoadRefusesATimezoneThatIsNotOne(t *testing.T) {
 		})
 	}
 }
+
+func TestMozeDirIsWhatTheVariableSaysOrUnderTheHome(t *testing.T) {
+	t.Run("the variable", func(t *testing.T) {
+		t.Setenv("MAXOS_MOZE_DIR", "  /data/moze ")
+
+		got, err := config.MozeDir()
+
+		if err != nil || got != "/data/moze" {
+			t.Fatalf("MozeDir = %q, %v, want the directory the variable names", got, err)
+		}
+	})
+	t.Run("not set", func(t *testing.T) {
+		t.Setenv("MAXOS_MOZE_DIR", "  ")
+		t.Setenv("HOME", "/home/someone")
+
+		got, err := config.MozeDir()
+
+		if err != nil || got != "/home/someone/.config/maxos/moze" {
+			t.Fatalf("MozeDir = %q, %v, want the directory under the home", got, err)
+		}
+	})
+}

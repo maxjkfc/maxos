@@ -53,6 +53,7 @@ type Ledger struct {
 	SetOpeningBalance    finance.SetOpeningBalance
 	Reconcile            finance.Reconcile
 	ConfirmTransactions  finance.ConfirmTransactions
+	DiscardDraft         finance.DiscardDraft
 	ListTransactions     finance.ListTransactions
 	GetBalances          finance.GetBalances
 

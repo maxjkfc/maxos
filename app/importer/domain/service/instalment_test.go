@@ -65,8 +65,8 @@ func TestBillInstalmentWhoseRowsAreInTwoAccountsIsLeftOutAndSaysSo(t *testing.T)
 	if len(p.Skipped) != 1 || p.Skipped[0].Reason != model.ReasonInstalmentAccounts || len(p.Skipped[0].Rows) != 9 {
 		t.Fatalf("skipped = %+v, want the 9 rows for their accounts", p.Skipped)
 	}
-	if p.Skipped[0].Detail != "Bank、Card" {
-		t.Errorf("detail = %q, want the accounts to be named", p.Skipped[0].Detail)
+	if got := p.Skipped[0].Args; !reflect.DeepEqual(got, []string{"Bank", "Card"}) {
+		t.Errorf("args = %q, want the accounts to be named, one each", got)
 	}
 }
 

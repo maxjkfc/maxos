@@ -3,34 +3,68 @@ package moze
 import (
 	"context"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
 
+	catalog "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
 	finance "github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
+	"github.com/maxjkfc/maxos/app/importer/usecase/port/in/usecase"
 )
 
 // state is what the ledger has of the import, read at one time: the ids of the
 // accounts and instruments by the names the plan uses, and the transactions the
 // import recorded, found by their idempotency keys. The import tells its own
 // transactions from the others by the key: it starts with model.KeyPrefix.
+//
+// A unit's transactions are told by the ID and the version in their key: the
+// transactions of a unit in the version the plan says now are its own (current), and
+// those of other versions of it, or of units made of rows it has, are what it
+// replaces (see look).
 type state struct {
 	accountIDs      map[string]uuid.UUID
 	accountNames    map[uuid.UUID]string
 	instrumentIDs   map[string]uuid.UUID
 	instrumentCodes map[uuid.UUID]string
-	byKey           map[string]finance.Transaction
+	// byKey are the transactions of the import, by idempotency key.
+	byKey map[string]finance.Transaction
+	// refs has the ids of the areas, projects and tags by name, which a reconciliation
+	// is recorded with.
+	refs refs
+
+	// planIDs are the IDs of the units of the plan; units are the transactions of the
+	// units, by the ID in their key, and rowUnits the IDs of the units that are made of
+	// a row, by the key of the row. The keys of the adjustments are not among them.
+	planIDs  map[string]bool
+	units    map[string][]versioned
+	rowUnits map[string]map[string]bool
+	// discarded are the drafts that have been discarded since the state was read.
+	discarded map[uuid.UUID]bool
 }
 
-// readState reads the ledger.
-func (a *Importer) readState(ctx context.Context) (*state, error) {
+// versioned is a transaction of a unit, with the version its key says.
+type versioned struct {
+	tx      finance.Transaction
+	version string
+	// gone is true for a draft that has been discarded since the state was read: by
+	// the unit that replaced it first, when two units are made of the rows of one.
+	gone bool
+}
+
+// readState reads the ledger, and sorts what the import recorded by the units of the
+// plan.
+func (a *Importer) readState(ctx context.Context, plan model.Plan) (*state, error) {
 	st := &state{
 		accountIDs:      map[string]uuid.UUID{},
 		accountNames:    map[uuid.UUID]string{},
 		instrumentIDs:   map[string]uuid.UUID{},
 		instrumentCodes: map[uuid.UUID]string{},
 		byKey:           map[string]finance.Transaction{},
+		refs:            newRefs(),
+		discarded:       map[uuid.UUID]bool{},
 	}
 	accounts, err := a.ledger.ListAccounts.ListAccounts(ctx, finance.ListAccountsInput{IncludeArchived: true})
 	if err != nil {
@@ -48,7 +82,14 @@ func (a *Importer) readState(ctx context.Context) (*state, error) {
 		st.instrumentIDs[in.Code] = in.ID
 		st.instrumentCodes[in.ID] = in.Code
 	}
-	return st, st.readTransactions(ctx, a)
+	if err := st.readCatalog(ctx, a); err != nil {
+		return nil, err
+	}
+	if err := st.readTransactions(ctx, a); err != nil {
+		return nil, err
+	}
+	st.index(plan)
+	return st, nil
 }
 
 // readTransactions lists every transaction of the ledger, a page at a time, and keeps
@@ -71,23 +112,143 @@ func (st *state) readTransactions(ctx context.Context, a *Importer) error {
 	}
 }
 
+// readCatalog reads the ids of the areas, projects and tags, by name.
+func (st *state) readCatalog(ctx context.Context, a *Importer) error {
+	areas, err := a.ledger.ListAreas.ListAreas(ctx, catalog.ListAreasInput{IncludeArchived: true})
+	if err != nil {
+		return fmt.Errorf("list areas: %w", err)
+	}
+	for _, ar := range areas.Areas {
+		st.refs.areas[ar.Name] = ar.ID
+	}
+	projects, err := a.ledger.ListProjects.ListProjects(ctx, catalog.ListProjectsInput{IncludeArchived: true})
+	if err != nil {
+		return fmt.Errorf("list projects: %w", err)
+	}
+	for _, p := range projects.Projects {
+		st.refs.projects[p.Name] = p.ID
+	}
+	tags, err := a.ledger.ListTags.ListTags(ctx, catalog.ListTagsInput{IncludeArchived: true})
+	if err != nil {
+		return fmt.Errorf("list tags: %w", err)
+	}
+	for _, t := range tags.Tags {
+		st.refs.tags[t.Name] = t.ID
+	}
+	return nil
+}
+
+// index sorts the transactions of the import by the unit their key names, and the
+// units by the rows they are made of.
+func (st *state) index(plan model.Plan) {
+	st.planIDs = map[string]bool{}
+	for _, u := range plan.Units {
+		st.planIDs[u.ID] = true
+	}
+	adjustments := map[string]bool{}
+	for _, adj := range plan.Adjustments {
+		adjustments[adj.Key] = true
+	}
+	st.units = map[string][]versioned{}
+	st.rowUnits = map[string]map[string]bool{}
+
+	keys := make([]string, 0, len(st.byKey))
+	for key := range st.byKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		parsed, ok := model.ParseKey(key)
+		if !ok || adjustments[key] {
+			continue
+		}
+		st.units[parsed.ID] = append(st.units[parsed.ID], versioned{tx: st.byKey[key], version: parsed.Version})
+		for _, row := range parsed.Rows() {
+			if st.rowUnits[row] == nil {
+				st.rowUnits[row] = map[string]bool{}
+			}
+			st.rowUnits[row][parsed.ID] = true
+		}
+	}
+}
+
+// lookup is what the ledger has of a unit: its transactions in the version the plan
+// says now, and the transactions it replaces.
+type lookup struct {
+	// current are the transactions of the unit in its present version, by key.
+	current map[string]finance.Transaction
+	// others are the transactions of earlier versions of the unit, and of units that are
+	// made of rows the unit has: the pairing of two rows has changed, or a row that was
+	// half of a pair stands alone. None of them is a unit of the plan, whose
+	// transactions are its own to replace.
+	others []versioned
+}
+
+// look finds what the ledger has of the unit.
+func (st *state) look(u model.Unit) lookup {
+	want := map[string]bool{}
+	for _, key := range u.Keys() {
+		want[key] = true
+	}
+	related := map[string]bool{u.ID: true}
+	for _, row := range u.Rows {
+		for id := range st.rowUnits[row] {
+			related[id] = true
+		}
+	}
+	ids := make([]string, 0, len(related))
+	for id := range related {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	l := lookup{current: map[string]finance.Transaction{}}
+	for _, id := range ids {
+		if id != u.ID && st.planIDs[id] {
+			continue
+		}
+		for _, v := range st.units[id] {
+			v.gone = st.discarded[v.tx.ID]
+			if key := v.tx.IdempotencyKey; want[key] {
+				l.current[key] = v.tx
+				continue
+			}
+			l.others = append(l.others, v)
+		}
+	}
+	return l
+}
+
+// stale tells whether a transaction that the unit replaces is confirmed: it is never
+// changed, so the unit cannot be recorded as the plan says until it is voided.
+func (l lookup) stale() bool {
+	return slices.ContainsFunc(l.others, func(v versioned) bool { return v.tx.Status == "confirmed" })
+}
+
 // unitState is where a unit stands in the ledger.
 type unitState int
 
 const (
-	// unitMissing is a unit the ledger does not have, or has only some of.
+	// unitMissing is a unit the ledger does not have in its present version, or has
+	// only some of.
 	unitMissing unitState = iota
 	unitDraft
 	unitConfirmed
 	unitVoid
+	// unitStale is a unit that the ledger has in another version that is confirmed.
+	unitStale
 )
 
 // of returns where the unit stands, and the transactions of it that are drafts.
 func (st *state) of(u model.Unit) (unitState, []uuid.UUID) {
+	l := st.look(u)
+	if l.stale() {
+		return unitStale, nil
+	}
 	var drafts []uuid.UUID
 	voided := false
 	for _, key := range u.Keys() {
-		t, ok := st.byKey[key]
+		t, ok := l.current[key]
 		if !ok {
 			return unitMissing, nil
 		}
@@ -108,6 +269,18 @@ func (st *state) of(u model.Unit) (unitState, []uuid.UUID) {
 	}
 }
 
+// staleUnits are the units of the month that the ledger has in a version that is
+// confirmed and is not the present one.
+func (st *state) staleUnits(plan model.Plan, month string) []usecase.StaleUnit {
+	var out []usecase.StaleUnit
+	for _, u := range unitsOf(plan, month) {
+		if s, _ := st.of(u); s == unitStale {
+			out = append(out, usecase.StaleUnit{Unit: u, Lines: linesOf(plan, u)})
+		}
+	}
+	return out
+}
+
 // adjustment returns the transaction that reconciles the adjustment, if the import
 // recorded one.
 func (st *state) adjustment(adj model.Adjustment) (finance.Transaction, bool) {
@@ -116,22 +289,29 @@ func (st *state) adjustment(adj model.Adjustment) (finance.Transaction, bool) {
 }
 
 // orphans are the drafts of the import that the plan does not have any more: the
-// export was changed, or is another.
+// export was changed, or is another. A draft of an earlier version of a unit, or of a
+// pairing of rows that the plan now has otherwise, is not one: apply replaces it.
 func (st *state) orphans(plan model.Plan) []finance.Transaction {
-	known := map[string]bool{}
+	planRows := map[string]bool{}
 	for _, u := range plan.Units {
-		for _, k := range u.Keys() {
-			known[k] = true
+		for _, row := range u.Rows {
+			planRows[row] = true
 		}
 	}
+	adjustments := map[string]bool{}
 	for _, adj := range plan.Adjustments {
-		known[adj.Key] = true
+		adjustments[adj.Key] = true
 	}
 	var out []finance.Transaction
 	for key, t := range st.byKey {
-		if !known[key] && t.Status == "draft" {
-			out = append(out, t)
+		if t.Status != "draft" || adjustments[key] {
+			continue
 		}
+		parsed, ok := model.ParseKey(key)
+		if !ok || st.planIDs[parsed.ID] || slices.ContainsFunc(parsed.Rows(), func(row string) bool { return planRows[row] }) {
+			continue
+		}
+		out = append(out, t)
 	}
 	return out
 }

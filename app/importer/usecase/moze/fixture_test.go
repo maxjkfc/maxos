@@ -188,6 +188,8 @@ func (w *world) reviewed() *world {
 	if _, err := w.planner.Plan(context.Background(), usecase.PlanInput{Files: w.files}); err != nil {
 		w.t.Fatalf("Plan: %v", err)
 	}
+	// The user takes the marks away as they look at each guess.
+	w.mapping.loaded.Guessed = 0
 	return w
 }
 

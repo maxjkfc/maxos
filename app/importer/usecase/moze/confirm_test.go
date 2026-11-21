@@ -195,7 +195,7 @@ func TestBalancesAtEveryMonthEndAreTheExportsOnceItsMonthIsConfirmed(t *testing.
 }
 
 // mustConfirmCheck confirms again (which changes nothing) to read the check of a month.
-func (w *world) mustConfirmCheck(month string) (usecase.MonthCheck, usecase.ConfirmOutput) {
+func (w *world) mustConfirmCheck(month string) (model.MonthCheck, usecase.ConfirmOutput) {
 	w.t.Helper()
 	out := w.mustConfirm(month)
 	return out.Check, out

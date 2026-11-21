@@ -53,6 +53,91 @@ func (b *builder) context(r model.Row) rowContext {
 	return c
 }
 
+// The words of the descriptions that the import writes itself, and the labels of the
+// lines that keep what a unit has no place for: the merchant or the 專案 of a row,
+// where another row's was taken.
+const (
+	openingDescription    = "期初金額"
+	adjustmentDescription = "對帳（MOZE 的餘額調整）"
+	merchantLabel         = "商家："
+	projectLabel          = "專案："
+)
+
+// joined is what the rows that make one unit say of themselves, where the unit has
+// only one place for each thing: the first merchant, area and project that any of them
+// has, in the order of the rows, and the tags of all of them. What another row says
+// differently has no place, and is kept as a line of the description.
+type joined struct {
+	rowContext
+	merchant string
+	notes    []string
+}
+
+func (j *joined) note(line string) {
+	if !slices.Contains(j.notes, line) {
+		j.notes = append(j.notes, line)
+	}
+}
+
+// take puts the value in a place that has none yet, and says whether the place has
+// another.
+func take(place *string, value string) (clash bool) {
+	switch {
+	case value == "":
+		return false
+	case *place == "":
+		*place = value
+		return false
+	}
+	return *place != value
+}
+
+// join says what the rows say of themselves as one: what they come to in the ledger,
+// by their 專案 and tags, and their merchants.
+func (b *builder) join(rows ...model.Row) joined {
+	var j joined
+	for _, r := range rows {
+		ctx := b.context(r)
+		for _, t := range ctx.tags {
+			j.addTag(t)
+		}
+		if take(&j.merchant, r.Merchant) {
+			j.note(merchantLabel + r.Merchant)
+		}
+		// The area and the project both come of the 專案 of the row, which is what the
+		// line says when either is another's.
+		areaClash, projectClash := take(&j.area, ctx.area), take(&j.project, ctx.project)
+		if areaClash || projectClash {
+			j.note(projectLabel + r.Project)
+		}
+	}
+	return j
+}
+
+// addLine adds a line to a text of lines, unless it has it already.
+func addLine(text, line string) string {
+	if slices.Contains(strings.Split(text, "\n"), line) {
+		return text
+	}
+	return joinNonEmpty("\n", text, line)
+}
+
+// keepProjectsOfParties says, in the description of a unit, the 專案 of its rows that
+// is paid for a party, where the unit is not a dealing with that party: it has no place
+// for it, as the party is all the mapping makes of it.
+func (b *builder) keepProjectsOfParties() {
+	rows := b.plan.RowIndex()
+	for i := range b.plan.Units {
+		u := &b.plan.Units[i]
+		for _, k := range u.Rows {
+			r := rows[k]
+			if p := b.m.Projects[r.Project]; r.Project != "" && p.Kind == model.ProjectDealings && p.Party != u.Party {
+				u.Description = addLine(u.Description, projectLabel+r.Project)
+			}
+		}
+	}
+}
+
 // categoryNote says which category a row had in MOZE, for the transactions that have
 // no category to put it in.
 func categoryNote(r model.Row) string {
@@ -80,7 +165,7 @@ func describe(r model.Row, extra ...string) string {
 func (b *builder) newUnit(kind model.UnitKind, r model.Row) model.Unit {
 	return model.Unit{
 		Kind:  kind,
-		Key:   model.KeyPrefix + r.Key,
+		ID:    r.Key,
 		Rows:  []string{r.Key},
 		Date:  r.Date,
 		Clock: r.Clock,
@@ -121,19 +206,51 @@ func (b *builder) feeLine(r model.Row) []model.Line {
 	}}
 }
 
-// expense is a 支出: an expense, or the dealing of what was paid for a party.
-func (b *builder) expense(r model.Row, ov model.RowOverride) {
+// skipWrongSign leaves out a row whose amount is not of the sign that its type needs,
+// or is nothing.
+func (b *builder) skipWrongSign(r model.Row) {
+	reason := model.ReasonBadSign
+	if r.Amount.IsZero() {
+		reason = model.ReasonZeroAmount
+	}
+	b.skip(reason, r)
+}
+
+// priceOf is what an expense row says was spent, as a size. It is not given for a row
+// that cannot be recorded as an expense, which is left out: its amount is not money
+// that went out, or it, the discount or the fee has more decimal places than the
+// instrument.
+func (b *builder) priceOf(r model.Row) (decimal.Decimal, bool) {
 	if !r.Amount.IsNegative() {
-		reason := model.ReasonBadSign
-		if r.Amount.IsZero() {
-			reason = model.ReasonZeroAmount
-		}
-		b.skip(reason, "", r)
-		return
+		b.skipWrongSign(r)
+		return decimal.Zero, false
 	}
 	price := r.Amount.Neg()
 	if !b.fits(r.Currency, price, r.Discount, r.Fee) {
-		b.skip(model.ReasonTooManyDecimals, r.Currency, r)
+		b.skipWith(model.ReasonTooManyDecimals, []string{r.Currency}, r)
+		return decimal.Zero, false
+	}
+	return price, true
+}
+
+// takesIn tells whether a row is money that came into an account, in a quantity and
+// with a fee that the ledger can record. A row that is not is left out.
+func (b *builder) takesIn(r model.Row) bool {
+	if !r.Amount.IsPositive() {
+		b.skipWrongSign(r)
+		return false
+	}
+	if !b.fits(r.Currency, r.Amount, r.Fee) {
+		b.skipWith(model.ReasonTooManyDecimals, []string{r.Currency}, r)
+		return false
+	}
+	return true
+}
+
+// expense is a 支出: an expense, or the dealing of what was paid for a party.
+func (b *builder) expense(r model.Row, ov model.RowOverride) {
+	price, ok := b.priceOf(r)
+	if !ok {
 		return
 	}
 	ctx := b.context(r)
@@ -152,7 +269,7 @@ func (b *builder) expense(r model.Row, ov model.RowOverride) {
 	}
 	if dealing {
 		if strings.TrimSpace(party) == "" {
-			b.skip(model.ReasonNoParty, "", r)
+			b.skip(model.ReasonNoParty, r)
 			return
 		}
 		b.paidFor(r, party, price, ctx)
@@ -164,9 +281,17 @@ func (b *builder) expense(r model.Row, ov model.RowOverride) {
 		path = ov.Category
 	}
 	if parent, _ := model.SplitCategory(path); parent == "" {
-		b.skip(model.ReasonNoCategory, "", r)
+		b.skip(model.ReasonNoCategory, r)
 		return
 	}
+	b.add(b.expenseUnit(r, path, price, ctx))
+}
+
+// expenseUnit is the unit of an expense row at the price it says, in the category of
+// the path, with the fee of the row as another line. A discount is paid less and is
+// kept on the line; one that pays the whole price or more makes it an expense at the
+// full price and a reward of the discount, which is told when it is more.
+func (b *builder) expenseUnit(r model.Row, path string, price decimal.Decimal, ctx rowContext) model.Unit {
 	paid := price.Sub(r.Discount)
 	u := b.newUnit(model.KindExpense, r)
 	u.Description, u.Merchant = r.Name, r.Merchant
@@ -188,7 +313,7 @@ func (b *builder) expense(r model.Row, ov model.RowOverride) {
 		}
 		u.Reward = &reward
 		if r.Discount.GreaterThan(price) {
-			b.caveat(model.CaveatDiscountOverPrice, r, "")
+			b.caveat(model.CaveatDiscountOverPrice, r)
 		}
 	case r.Discount.IsPositive():
 		d := r.Discount
@@ -204,7 +329,7 @@ func (b *builder) expense(r model.Row, ov model.RowOverride) {
 		total = total.Add(l.Amount)
 	}
 	u.Main = model.Leg{Account: b.ledger(r.Account), Instrument: r.Currency, Amount: total}
-	b.add(u)
+	return u
 }
 
 // paidFor is what was paid for a party: money out of an account, and what the party
@@ -213,7 +338,7 @@ func (b *builder) expense(r model.Row, ov model.RowOverride) {
 func (b *builder) paidFor(r model.Row, party string, price decimal.Decimal, ctx rowContext) {
 	paid := price.Sub(r.Discount)
 	if !paid.IsPositive() {
-		b.skip(model.ReasonZeroAmount, "", r)
+		b.skip(model.ReasonZeroAmount, r)
 		return
 	}
 	u := b.newUnit(model.KindDealing, r)
@@ -236,16 +361,7 @@ func discountNote(r model.Row) string {
 // income is a 收入: an income, or a reward, or what a party gives back, by what the
 // category of it says.
 func (b *builder) income(r model.Row, ov model.RowOverride) {
-	if !r.Amount.IsPositive() {
-		reason := model.ReasonBadSign
-		if r.Amount.IsZero() {
-			reason = model.ReasonZeroAmount
-		}
-		b.skip(reason, "", r)
-		return
-	}
-	if !b.fits(r.Currency, r.Amount) {
-		b.skip(model.ReasonTooManyDecimals, r.Currency, r)
+	if !b.takesIn(r) {
 		return
 	}
 	ctx := b.context(r)
@@ -253,7 +369,7 @@ func (b *builder) income(r model.Row, ov model.RowOverride) {
 	ctx.addTag(cm.Tag)
 	ctx.addTag(ov.Tag)
 	if r.Sub == pendingIncomeSub {
-		b.caveat(model.CaveatPendingIncome, r, "")
+		b.caveat(model.CaveatPendingIncome, r)
 	}
 
 	treatment, party := cm.Treatment, cm.Party
@@ -270,11 +386,12 @@ func (b *builder) income(r model.Row, ov model.RowOverride) {
 		b.rewardOf(r, ctx)
 	case model.TreatmentDealing:
 		if strings.TrimSpace(party) == "" {
-			b.skip(model.ReasonNoParty, "", r)
+			b.skip(model.ReasonNoParty, r)
 			return
 		}
 		u := b.newUnit(model.KindDealing, r)
 		u.Description = describe(r)
+		u.Merchant = r.Merchant
 		u.Area, u.Project, u.Tags = ctx.area, ctx.project, ctx.tags
 		u.Party, u.Direction = party, "received"
 		u.Main = model.Leg{Account: b.ledger(r.Account), Instrument: r.Currency, Amount: r.Amount}
@@ -286,7 +403,7 @@ func (b *builder) income(r model.Row, ov model.RowOverride) {
 			path = ov.Category
 		}
 		if parent, _ := model.SplitCategory(path); parent == "" {
-			b.skip(model.ReasonNoCategory, "", r)
+			b.skip(model.ReasonNoCategory, r)
 			return
 		}
 		b.incomeOf(r, path, ctx)
@@ -323,16 +440,7 @@ func (b *builder) rewardOf(r model.Row, ctx rowContext) {
 
 // bonus is a 紅利回饋: a reward.
 func (b *builder) bonus(r model.Row, ov model.RowOverride) {
-	if !r.Amount.IsPositive() {
-		reason := model.ReasonBadSign
-		if r.Amount.IsZero() {
-			reason = model.ReasonZeroAmount
-		}
-		b.skip(reason, "", r)
-		return
-	}
-	if !b.fits(r.Currency, r.Amount) {
-		b.skip(model.ReasonTooManyDecimals, r.Currency, r)
+	if !b.takesIn(r) {
 		return
 	}
 	ctx := b.context(r)
@@ -349,11 +457,11 @@ func (b *builder) bonus(r model.Row, ov model.RowOverride) {
 // of an account or came into it.
 func (b *builder) receivable(r model.Row, ov model.RowOverride) {
 	if r.Amount.IsZero() {
-		b.skip(model.ReasonZeroAmount, "", r)
+		b.skip(model.ReasonZeroAmount, r)
 		return
 	}
 	if !b.fits(r.Currency, r.Amount, r.Fee) {
-		b.skip(model.ReasonTooManyDecimals, r.Currency, r)
+		b.skipWith(model.ReasonTooManyDecimals, []string{r.Currency}, r)
 		return
 	}
 	party := b.m.Parties[r.Party]
@@ -367,9 +475,10 @@ func (b *builder) receivable(r model.Row, ov model.RowOverride) {
 	ctx.addTag(ov.Tag)
 	u := b.newUnit(model.KindDealing, r)
 	u.Description = describe(r)
+	u.Merchant = r.Merchant
 	u.Area, u.Project, u.Tags = ctx.area, ctx.project, ctx.tags
 	if strings.TrimSpace(party) == "" {
-		b.skip(model.ReasonNoParty, "", r)
+		b.skip(model.ReasonNoParty, r)
 		return
 	}
 	u.Party = party
@@ -385,21 +494,12 @@ func (b *builder) receivable(r model.Row, ov model.RowOverride) {
 // refund is a 退款: the ledger has no kind of its own for it, so it is an income of
 // the category of refunds, with the category it had in MOZE kept in the memo.
 func (b *builder) refund(r model.Row, ov model.RowOverride) {
-	if !r.Amount.IsPositive() {
-		reason := model.ReasonBadSign
-		if r.Amount.IsZero() {
-			reason = model.ReasonZeroAmount
-		}
-		b.skip(reason, "", r)
-		return
-	}
-	if !b.fits(r.Currency, r.Amount) {
-		b.skip(model.ReasonTooManyDecimals, r.Currency, r)
+	if !b.takesIn(r) {
 		return
 	}
 	ctx := b.context(r)
 	ctx.addTag(ov.Tag)
-	b.caveat(model.CaveatRefund, r, "")
+	b.caveat(model.CaveatRefund, r)
 	u := b.newUnit(model.KindIncome, r)
 	u.Description, u.Merchant = r.Name, r.Merchant
 	u.Area, u.Project, u.Tags = ctx.area, ctx.project, ctx.tags
@@ -410,6 +510,7 @@ func (b *builder) refund(r model.Row, ov model.RowOverride) {
 		Memo:     joinNonEmpty("\n", r.Description, categoryNote(r)),
 	}}
 	u.Main = model.Leg{Account: b.ledger(r.Account), Instrument: r.Currency, Amount: r.Amount}
+	u.Fees = b.feeOf(r)
 	b.add(u)
 }
 
@@ -426,32 +527,13 @@ func (b *builder) interest(r model.Row, ov model.RowOverride) {
 
 // expenseOf is an expense of one category, of the row.
 func (b *builder) expenseOf(r model.Row, ov model.RowOverride, path string) {
-	if !r.Amount.IsNegative() {
-		reason := model.ReasonBadSign
-		if r.Amount.IsZero() {
-			reason = model.ReasonZeroAmount
-		}
-		b.skip(reason, "", r)
-		return
-	}
-	amount := r.Amount.Neg()
-	if !b.fits(r.Currency, amount) {
-		b.skip(model.ReasonTooManyDecimals, r.Currency, r)
+	price, ok := b.priceOf(r)
+	if !ok {
 		return
 	}
 	ctx := b.context(r)
 	ctx.addTag(ov.Tag)
-	u := b.newUnit(model.KindExpense, r)
-	u.Description, u.Merchant = r.Name, r.Merchant
-	u.Area, u.Project, u.Tags = ctx.area, ctx.project, ctx.tags
-	u.Lines = []model.Line{{
-		Category: path,
-		Amount:   amount,
-		Base:     b.base(r.Currency, r.Date, amount),
-		Memo:     r.Description,
-	}}
-	u.Main = model.Leg{Account: b.ledger(r.Account), Instrument: r.Currency, Amount: amount}
-	b.add(u)
+	b.add(b.expenseUnit(r, path, price, ctx))
 }
 
 // opening is a 初始金額: what an account held before its first row.
@@ -462,19 +544,22 @@ func (b *builder) opening(r model.Row) {
 	}
 	day, ok := b.openings[acctCurrency{r.Account, r.Currency}]
 	if !ok {
-		b.skip(model.ReasonNoDate, "there is no row to put the opening balance before", r)
+		b.skip(model.ReasonNoDate, r)
 		return
 	}
 	if !b.fits(r.Currency, r.Amount) {
-		b.skip(model.ReasonTooManyDecimals, r.Currency, r)
+		b.skipWith(model.ReasonTooManyDecimals, []string{r.Currency}, r)
 		return
 	}
 	if day.fallback != "" {
 		b.caveat(model.CaveatOpeningDate, r, day.fallback)
 	}
+	ctx := b.context(r)
 	u := b.newUnit(model.KindOpening, r)
 	u.Date, u.Clock = day.day, ""
-	u.Description = joinNonEmpty("\n", "期初金額", r.Name)
+	u.Description = joinNonEmpty("\n", openingDescription, r.Name, r.Description)
+	u.Merchant = r.Merchant
+	u.Area, u.Project, u.Tags = ctx.area, ctx.project, ctx.tags
 	u.Main = model.Leg{Account: b.ledger(r.Account), Instrument: r.Currency, Amount: r.Amount}
 	b.add(u)
 }
@@ -482,14 +567,16 @@ func (b *builder) opening(r model.Row) {
 // adjustment is a 餘額調整, which is not recorded with the rest but when its month is
 // confirmed.
 func (b *builder) adjustment(r model.Row) {
-	if r.Amount.IsZero() {
+	adds := r.Effect()
+	if adds.IsZero() {
 		b.plan.NoOps = append(b.plan.NoOps, model.NoOp{Reason: model.NoOpZeroAdjustment, Row: r.Key})
 		return
 	}
-	if !b.fits(r.Currency, r.Amount) {
-		b.skip(model.ReasonTooManyDecimals, r.Currency, r)
+	if !b.fits(r.Currency, r.Amount, r.Discount, r.Fee) {
+		b.skipWith(model.ReasonTooManyDecimals, []string{r.Currency}, r)
 		return
 	}
+	ctx := b.context(r)
 	a := model.Adjustment{
 		Key:         model.KeyPrefix + r.Key,
 		Row:         r.Key,
@@ -497,13 +584,17 @@ func (b *builder) adjustment(r model.Row) {
 		Clock:       r.Clock,
 		Account:     b.ledger(r.Account),
 		Instrument:  r.Currency,
-		Amount:      r.Amount,
-		Description: joinNonEmpty("\n", "餘額調整", r.Name),
+		Amount:      adds,
+		Description: joinNonEmpty("\n", adjustmentDescription, r.Name, r.Description),
+		Merchant:    r.Merchant,
+		Area:        ctx.area,
+		Project:     ctx.project,
+		Tags:        ctx.tags,
 	}
 	// Only a currency has an amount in the base currency to give; the quantity of any
 	// other instrument is all a reconciliation takes.
 	if b.isCurrency(r.Currency) {
-		a.Base = b.base(r.Currency, r.Date, r.Amount)
+		a.Base = b.base(r.Currency, r.Date, adds)
 	}
 	b.plan.Adjustments = append(b.plan.Adjustments, a)
 }
@@ -518,10 +609,10 @@ func (b *builder) investmentCaveats(skipped map[string]bool) {
 		}
 		isInvestment := r.Type == model.TypeExpense || r.Type == model.TypeIncome
 		if isInvestment && (r.Sub == investmentSub || r.Main == investmentSub) {
-			b.caveat(model.CaveatInvestment, r, "")
+			b.caveat(model.CaveatInvestment, r)
 		}
 		if b.m.Accounts[r.Account].Kind == "brokerage" {
-			b.caveat(model.CaveatBrokerage, r, "")
+			b.caveat(model.CaveatBrokerage, r)
 		}
 	}
 }

@@ -145,3 +145,143 @@ func TestSplitCategory(t *testing.T) {
 		}
 	}
 }
+
+func TestUnitKeyIsMadeOfTheRowsAndTheVersion(t *testing.T) {
+	u := model.Unit{Kind: model.KindExpenseReward, ID: "abc-1", Version: "0123456789ab"}
+	if got, want := u.Key(), "moze:abc-1@0123456789ab"; got != want {
+		t.Errorf("Key = %q, want %q", got, want)
+	}
+	if got := u.Keys(); len(got) != 2 || got[1] != "moze:abc-1@0123456789ab#reward" {
+		t.Errorf("Keys = %v, want the key and the key of the reward", got)
+	}
+
+	for _, tt := range []struct {
+		key  string
+		want model.ParsedKey
+		ok   bool
+	}{
+		{"moze:abc-1@0123456789ab", model.ParsedKey{ID: "abc-1", Version: "0123456789ab"}, true},
+		{"moze:abc-1@0123456789ab#reward", model.ParsedKey{ID: "abc-1", Version: "0123456789ab", Reward: true}, true},
+		{"moze:abc-1+def-2@ffffffffffff", model.ParsedKey{ID: "abc-1+def-2", Version: "ffffffffffff"}, true},
+		{"moze:plan-abc-1@ffffffffffff", model.ParsedKey{ID: "plan-abc-1", Version: "ffffffffffff"}, true},
+		{"moze:abc-1", model.ParsedKey{ID: "abc-1"}, true},
+		{"moze:abc-1#reward", model.ParsedKey{ID: "abc-1", Reward: true}, true},
+		{"instalment:abc", model.ParsedKey{}, false},
+		{"moze:", model.ParsedKey{}, false},
+		{"", model.ParsedKey{}, false},
+	} {
+		got, ok := model.ParseKey(tt.key)
+		if ok != tt.ok || got != tt.want {
+			t.Errorf("ParseKey(%q) = %+v, %v, want %+v, %v", tt.key, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func TestFingerprintChangesWithWhatIsRecordedAndNotWithTheOrderOfTags(t *testing.T) {
+	base := func() model.Unit {
+		cents := d("5")
+		return model.Unit{
+			Kind: model.KindExpense, ID: "abc-1", Date: day("2026-03-10"), Clock: "12:00",
+			Description: "Noodles", Merchant: "Stall", Area: "Life", Project: "Trip", Tags: []string{"a", "b"},
+			Main:  model.Leg{Account: "Cash", Instrument: "TWD", Amount: d("100")},
+			Lines: []model.Line{{Category: "Food/Lunch", Amount: d("100"), Discount: &cents, Memo: "m"}},
+			Fees:  []model.Fee{{Account: "Cash", Instrument: "TWD", Category: "Fees", Amount: d("1")}},
+		}
+	}
+	want := base().Fingerprint()
+	if len(want) != 12 {
+		t.Fatalf("Fingerprint = %q, want 12 hex characters", want)
+	}
+	if got := base().Fingerprint(); got != want {
+		t.Errorf("the same unit has the fingerprints %q and %q", want, got)
+	}
+	reordered := base()
+	reordered.Tags = []string{"b", "a"}
+	if got := reordered.Fingerprint(); got != want {
+		t.Errorf("the order of the tags changes the fingerprint")
+	}
+	sameNumber := base()
+	sameNumber.Main.Amount = d("100.00")
+	if got := sameNumber.Fingerprint(); got != want {
+		t.Errorf("the form of an amount changes the fingerprint")
+	}
+
+	for name, change := range map[string]func(u *model.Unit){
+		"kind":        func(u *model.Unit) { u.Kind = model.KindIncome },
+		"day":         func(u *model.Unit) { u.Date = day("2026-03-11") },
+		"time":        func(u *model.Unit) { u.Clock = "12:01" },
+		"description": func(u *model.Unit) { u.Description = "Rice" },
+		"merchant":    func(u *model.Unit) { u.Merchant = "Shop" },
+		"area":        func(u *model.Unit) { u.Area = "Work" },
+		"project":     func(u *model.Unit) { u.Project = "" },
+		"tags":        func(u *model.Unit) { u.Tags = []string{"a"} },
+		"account":     func(u *model.Unit) { u.Main.Account = "Bank" },
+		"amount":      func(u *model.Unit) { u.Main.Amount = d("101") },
+		"category":    func(u *model.Unit) { u.Lines[0].Category = "Food/Dinner" },
+		"memo":        func(u *model.Unit) { u.Lines[0].Memo = "n" },
+		"discount":    func(u *model.Unit) { u.Lines[0].Discount = nil },
+		"fee":         func(u *model.Unit) { u.Fees[0].Amount = d("2") },
+		"party":       func(u *model.Unit) { u.Party = "Amy" },
+		"other leg":   func(u *model.Unit) { u.Other = &model.Leg{Account: "Bank", Instrument: "TWD", Amount: d("1")} },
+		"period":      func(u *model.Unit) { u.Periods = []model.Period{{DueOn: day("2026-04-01"), Principal: d("1")}} },
+	} {
+		u := base()
+		change(&u)
+		if got := u.Fingerprint(); got == want {
+			t.Errorf("a change of the %s does not change the fingerprint", name)
+		}
+	}
+}
+
+func TestMappingEntriesAreCountedOnceIncludingTheDefaults(t *testing.T) {
+	m := model.Mapping{
+		Accounts: map[string]model.AccountMap{"b": {Name: "B"}, "a": {Name: "A"}},
+		Tags:     map[string]string{"t": "t"},
+		Defaults: model.Defaults{FeeCategory: "Fees", RefundCategory: "Refunds"},
+		Rows:     map[string]model.RowOverride{"k-1": {}},
+	}
+	want := []model.EntryRef{
+		{Section: model.SectionAccounts, Key: "a"}, {Section: model.SectionAccounts, Key: "b"},
+		{Section: model.SectionTags, Key: "t"},
+		{Section: model.SectionDefaults, Key: model.DefaultFeeCategory}, {Section: model.SectionDefaults, Key: model.DefaultRefundCategory},
+		{Section: model.SectionRows, Key: "k-1"},
+	}
+	got := m.Items()
+	if len(got) != len(want) || m.Entries() != len(want) {
+		t.Fatalf("Items = %v (%d entries), want %v", got, m.Entries(), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Items[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
+	if (model.Mapping{Defaults: model.Defaults{InterestCategory: "x"}}).Empty() {
+		t.Error("a mapping with a default is empty")
+	}
+	if !(model.Mapping{}).Empty() {
+		t.Error("a mapping with nothing is not empty")
+	}
+}
+
+func TestMonthsCountAMonthWhoseRowsAllComeToNothing(t *testing.T) {
+	p := model.Plan{
+		Effects: []model.Effect{{Date: day("2026-01-05"), Quantity: d("10")}},
+		Units: []model.Unit{
+			{Date: day("2026-03-02")}, // an expense that a discount paid in full: no effect
+		},
+		Adjustments: []model.Adjustment{{Date: day("2026-04-01")}},
+	}
+	got := p.Months()
+	want := []string{"2026-01", "2026-02", "2026-03", "2026-04"}
+	if len(got) != len(want) {
+		t.Fatalf("Months = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Months = %v, want %v", got, want)
+		}
+	}
+	if m := (model.Plan{}).Months(); m != nil {
+		t.Errorf("Months of nothing = %v", m)
+	}
+}

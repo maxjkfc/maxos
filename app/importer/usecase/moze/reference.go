@@ -24,6 +24,9 @@ type refs struct {
 	projects    map[string]uuid.UUID
 	tags        map[string]uuid.UUID
 	parties     map[string]uuid.UUID
+	// areaNames are the names of the areas the ledger has, by id: the default area of a
+	// project that exists is told by it.
+	areaNames map[uuid.UUID]string
 }
 
 func newRefs() refs {
@@ -36,6 +39,7 @@ func newRefs() refs {
 		projects:    map[string]uuid.UUID{},
 		tags:        map[string]uuid.UUID{},
 		parties:     map[string]uuid.UUID{},
+		areaNames:   map[uuid.UUID]string{},
 	}
 }
 
@@ -89,6 +93,13 @@ func needsOf(plan model.Plan) needs {
 		}
 		add("expense", u.InterestCategory)
 	}
+	for _, adj := range plan.Adjustments {
+		add("areas", adj.Area)
+		add("projects", adj.Project)
+		for _, t := range adj.Tags {
+			add("tags", t)
+		}
+	}
 	for _, p := range plan.Mapping.Projects {
 		if p.Kind == model.ProjectProject && set["projects"][p.Name] {
 			add("areas", p.DefaultArea)
@@ -108,30 +119,43 @@ func needsOf(plan model.Plan) needs {
 	}
 }
 
+// ensured is what ensure made of the reference data, and what it found that the user is
+// to know.
+type ensured struct {
+	// created is how much was made, by what it is.
+	created map[string]int
+	// projectDifferences are the projects the ledger had, whose default area is not what
+	// the mapping says.
+	projectDifferences []usecase.ProjectDifference
+}
+
 // ensure makes what the plan uses of the reference data, and returns the ids of all
 // of it, and how much was made. What the ledger has, by name, is used as it is; an
 // instrument or an account that has the name but is another thing than the mapping
-// says is a conflict to put right by hand, and is an error, as is an archived one.
-func (a *Importer) ensure(ctx context.Context, plan model.Plan) (refs, map[string]int, error) {
+// says is a conflict to put right by hand, and is an error, as is an archived one. A
+// project that the ledger has is used as it is too, and a default area of it that is not
+// the mapping's is reported.
+func (a *Importer) ensure(ctx context.Context, plan model.Plan) (refs, ensured, error) {
 	need := needsOf(plan)
 	r := newRefs()
-	created := map[string]int{}
+	made := ensured{created: map[string]int{}}
+	created := made.created
 
 	steps := []func() error{
 		func() error { return a.ensureInstruments(ctx, plan, need, &r, created) },
 		func() error { return a.ensureAccounts(ctx, plan, need, &r, created) },
 		func() error { return a.ensureCategories(ctx, need, &r, created) },
 		func() error { return a.ensureAreas(ctx, need, &r, created) },
-		func() error { return a.ensureProjects(ctx, plan, need, &r, created) },
+		func() error { return a.ensureProjects(ctx, plan, need, &r, &made) },
 		func() error { return a.ensureTags(ctx, need, &r, created) },
 		func() error { return a.ensureParties(ctx, need, &r, created) },
 	}
 	for _, step := range steps {
 		if err := step(); err != nil {
-			return refs{}, nil, err
+			return refs{}, ensured{}, err
 		}
 	}
-	return r, created, nil
+	return r, made, nil
 }
 
 func (a *Importer) ensureInstruments(ctx context.Context, plan model.Plan, need needs, r *refs, created map[string]int) error {
@@ -342,6 +366,7 @@ func (a *Importer) ensureAreas(ctx context.Context, need needs, r *refs, created
 	have := map[string]catalog.Area{}
 	for _, ar := range listed.Areas {
 		have[ar.Name] = ar
+		r.areaNames[ar.ID] = ar.Name
 	}
 	for _, name := range need.areas {
 		if ar, ok := have[name]; ok {
@@ -356,6 +381,7 @@ func (a *Importer) ensureAreas(ctx context.Context, need needs, r *refs, created
 			return fmt.Errorf("create area %q: %w", name, err)
 		}
 		r.areas[name] = made.ID
+		r.areaNames[made.ID] = name
 		created[usecase.CreatedAreas]++
 	}
 	return nil
@@ -377,7 +403,7 @@ func projectSpec(m model.Mapping, name string) model.ProjectMap {
 	return model.ProjectMap{Kind: model.ProjectProject, Name: name}
 }
 
-func (a *Importer) ensureProjects(ctx context.Context, plan model.Plan, need needs, r *refs, created map[string]int) error {
+func (a *Importer) ensureProjects(ctx context.Context, plan model.Plan, need needs, r *refs, made *ensured) error {
 	listed, err := a.ledger.ListProjects.ListProjects(ctx, catalog.ListProjectsInput{IncludeArchived: true})
 	if err != nil {
 		return fmt.Errorf("list projects: %w", err)
@@ -387,28 +413,36 @@ func (a *Importer) ensureProjects(ctx context.Context, plan model.Plan, need nee
 		have[p.Name] = p
 	}
 	for _, name := range need.projects {
+		spec := projectSpec(plan.Mapping, name)
 		if p, ok := have[name]; ok {
 			if p.ArchivedAt != nil {
 				return fmt.Errorf("project %q is archived", name)
 			}
 			r.projects[name] = p.ID
+			ledgerArea := ""
+			if p.DefaultAreaID != nil {
+				ledgerArea = r.areaNames[*p.DefaultAreaID]
+			}
+			if ledgerArea != spec.DefaultArea {
+				made.projectDifferences = append(made.projectDifferences, usecase.ProjectDifference{Project: name, Mapping: spec.DefaultArea, Ledger: ledgerArea})
+			}
 			continue
 		}
-		spec := projectSpec(plan.Mapping, name)
+		// The import never sets the active period of a project: the ledger puts every
+		// transaction that has no project of its own into the project that is active on
+		// its day, and a period guessed from the rows would take in transactions that are
+		// not part of it.
 		in := catalog.CreateProjectInput{Name: name}
 		if spec.DefaultArea != "" {
 			id := r.areas[spec.DefaultArea]
 			in.DefaultAreaID = &id
 		}
-		if !spec.ActiveFrom.IsZero() {
-			in.ActivePeriod = &catalog.Period{From: spec.ActiveFrom, To: spec.ActiveTo}
-		}
-		made, err := a.ledger.CreateProject.CreateProject(ctx, in)
+		created, err := a.ledger.CreateProject.CreateProject(ctx, in)
 		if err != nil {
 			return fmt.Errorf("create project %q: %w", name, err)
 		}
-		r.projects[name] = made.ID
-		created[usecase.CreatedProjects]++
+		r.projects[name] = created.ID
+		made.created[usecase.CreatedProjects]++
 	}
 	return nil
 }

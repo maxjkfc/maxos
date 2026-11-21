@@ -49,18 +49,6 @@ func (r Rates) Lookup(code string, day time.Time) (Rate, bool) {
 	return list[i-1], true
 }
 
-// Codes lists the codes that have rates, in order.
-func (r Rates) Codes() []string { return sortedKeys(r.byCode) }
-
-// Range returns the first and the last day the code has a rate, or false.
-func (r Rates) Range(code string) (first, last time.Time, ok bool) {
-	list := r.byCode[code]
-	if len(list) == 0 {
-		return time.Time{}, time.Time{}, false
-	}
-	return list[0].Date, list[len(list)-1].Date, true
-}
-
 // BaseAmountOf is the amount of a quantity in the base currency: its product with
 // the rate, to the decimals of the base currency, which is never negative.
 func BaseAmountOf(rate Rate, quantity decimal.Decimal) decimal.Decimal {

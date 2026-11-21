@@ -6,7 +6,6 @@
 package service
 
 import (
-	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -33,18 +32,19 @@ type PlanInput struct {
 func BuildPlan(in PlanInput) model.Plan {
 	effective, guessed := complete(in.Rows, in.Mapping)
 	b := &builder{
-		rows:      in.Rows,
-		m:         effective,
-		rates:     in.Rates,
-		handled:   make([]bool, len(in.Rows)),
-		missing:   map[string]time.Time{},
-		overrides: map[string]bool{},
-		posOf:     make(map[string]int, len(in.Rows)),
+		rows:       in.Rows,
+		m:          effective,
+		rates:      in.Rates,
+		handled:    make([]bool, len(in.Rows)),
+		missing:    map[string]time.Time{},
+		overrides:  map[string]bool{},
+		posOf:      make(map[string]int, len(in.Rows)),
+		quantities: map[string]decimal.Decimal{},
 	}
 	for _, r := range in.Rows {
 		b.posOf[r.Key] = r.Pos
 	}
-	b.plan = model.Plan{Rows: in.Rows, Mapping: effective, Guessed: guessed}
+	b.plan = model.Plan{Rows: in.Rows, Mapping: effective, Guessed: guessed, Projects: projectEvidence(in.Rows)}
 	b.openingDates()
 	b.run()
 	b.finish()
@@ -69,13 +69,17 @@ type builder struct {
 	// overrides are the keys of the overrides that were used.
 	overrides map[string]bool
 	problems  []model.Problem
+	// quantities are the quantities that stand for the amount of the row of a trade
+	// that the export has as nothing, by the key of the row, signed as its side is.
+	quantities map[string]decimal.Decimal
 }
 
 type acctCurrency struct{ account, currency string }
 
 type openingDay struct {
 	day time.Time
-	// fallback says the day is not from a row of the account of the opening.
+	// fallback says where the day is from when it is not a row of the account of the
+	// opening: model.OpeningFromLedgerAccount or model.OpeningFromFile.
 	fallback string
 }
 
@@ -94,12 +98,12 @@ func (b *builder) run() {
 func (b *builder) row(r model.Row) {
 	b.handled[r.Pos] = true
 	if !r.HasDate() && r.Type != model.TypeInitial {
-		b.skip(model.ReasonNoDate, "", r)
+		b.skip(model.ReasonNoDate, r)
 		return
 	}
 	ov := b.override(r)
 	if ov.Treatment == model.TreatmentSkip {
-		b.skip(model.ReasonSkipped, "", r)
+		b.skip(model.ReasonSkipped, r)
 		return
 	}
 	switch r.Type {
@@ -122,16 +126,40 @@ func (b *builder) row(r model.Row) {
 	case model.TypeAdjustment:
 		b.adjustment(r)
 	default:
-		b.skip(model.ReasonUnknownType, string(r.Type), r)
+		b.skipWith(model.ReasonUnknownType, []string{string(r.Type)}, r)
 	}
 	b.checkOverrideFits(r, ov)
 }
 
 // finish puts the units and the rest in order, works out what every row does to a
-// balance, and adds what is wrong.
+// balance and which units do something else, and adds what is wrong.
 func (b *builder) finish() {
 	p := &b.plan
+	b.order()
 
+	skipped := map[string]bool{}
+	for _, s := range p.Skipped {
+		for _, k := range s.Rows {
+			skipped[k] = true
+		}
+	}
+	b.effects(skipped)
+	b.differences()
+	b.investmentCaveats(skipped)
+	b.notes()
+	b.keepProjectsOfParties()
+
+	// The version is what the unit says to the ledger, so it is made when nothing
+	// about any unit can change any more.
+	for i := range p.Units {
+		p.Units[i].Version = p.Units[i].Fingerprint()
+	}
+}
+
+// order puts the units, the adjustments and the rows that are left out in the order
+// of their days and times, and then of the file.
+func (b *builder) order() {
+	p := &b.plan
 	sort.SliceStable(p.Units, func(i, j int) bool { return b.unitBefore(p.Units[i], p.Units[j]) })
 	for i := range p.Units {
 		p.Units[i].Order = i
@@ -150,51 +178,29 @@ func (b *builder) finish() {
 		p.Adjustments[i].Order = i
 	}
 	sort.SliceStable(p.Skipped, func(i, j int) bool { return b.posOf[p.Skipped[i].Rows[0]] < b.posOf[p.Skipped[j].Rows[0]] })
+}
 
-	skipped := map[string]bool{}
-	for _, s := range p.Skipped {
-		for _, k := range s.Rows {
-			skipped[k] = true
-		}
-	}
-	for _, r := range b.rows {
-		day := r.Date
-		if r.Type == model.TypeInitial {
-			day = b.openings[acctCurrency{r.Account, r.Currency}].day
-		}
-		e := model.Effect{
-			Account:    b.ledger(r.Account),
-			Instrument: r.Currency,
-			Date:       day,
-			Quantity:   r.Effect(),
-			Row:        r.Key,
-		}
-		if e.Quantity.IsZero() || day.IsZero() {
-			continue
-		}
-		p.Effects = append(p.Effects, e)
-		if skipped[r.Key] {
-			p.Unrecorded = append(p.Unrecorded, e)
-		}
-	}
-	b.investmentCaveats(skipped)
-
+// notes adds what is odd, which stops nothing, and what is wrong with the mapping and
+// the rates, which stops the plan from being recorded.
+func (b *builder) notes() {
+	p := &b.plan
 	for _, key := range sortedStringKeys(b.m.Rows) {
 		if b.overrides[key] {
 			continue
 		}
+		code := model.WarningRowUnknown
 		if _, known := b.posOf[key]; known {
-			p.Warnings = append(p.Warnings, fmt.Sprintf("rows.%s: nothing changes what the import does with this row, which is part of a plan or of a pair it does not take an override for", key))
-			continue
+			code = model.WarningOverrideUnused
 		}
-		p.Warnings = append(p.Warnings, fmt.Sprintf("rows.%s: the file has no row with this key", key))
+		p.Warnings = append(p.Warnings, model.Warning{Code: code, Subject: "rows." + key})
 	}
 	p.Problems = append(p.Problems, b.m.Validate()...)
 	p.Problems = append(p.Problems, b.problems...)
 	for _, code := range sortedStringKeys(b.missing) {
 		p.Problems = append(p.Problems, model.Problem{
+			Code:    model.ProblemRateMissing,
 			Subject: "rates." + code,
-			Detail:  fmt.Sprintf("there is no rate of %s on or before %s", code, b.missing[code].Format(time.DateOnly)),
+			Args:    []string{code, b.missing[code].Format(time.DateOnly)},
 		})
 	}
 }
@@ -256,24 +262,33 @@ func (b *builder) checkOverrideFits(r model.Row, ov model.RowOverride) {
 	}
 	if !ok {
 		b.problems = append(b.problems, model.Problem{
+			Code:    model.ProblemOverrideNotFit,
 			Subject: "rows." + r.Key,
-			Detail:  fmt.Sprintf("treatment %q does not fit a row of the type %s", ov.Treatment, r.Type),
+			Args:    []string{ov.Treatment, string(r.Type)},
 		})
 	}
 }
 
 // skip leaves rows out, and says why.
-func (b *builder) skip(reason model.Reason, detail string, rows ...model.Row) {
+func (b *builder) skip(reason model.Reason, rows ...model.Row) {
+	b.skipWith(reason, nil, rows...)
+}
+
+// skipWith leaves rows out for a reason that has values to say, which model.Reason
+// lists for each.
+func (b *builder) skipWith(reason model.Reason, args []string, rows ...model.Row) {
 	keys := make([]string, len(rows))
 	for i, r := range rows {
 		keys[i] = r.Key
 		b.handled[r.Pos] = true
 	}
-	b.plan.Skipped = append(b.plan.Skipped, model.Skipped{Reason: reason, Rows: keys, Detail: detail})
+	b.plan.Skipped = append(b.plan.Skipped, model.Skipped{Reason: reason, Rows: keys, Args: args})
 }
 
-func (b *builder) caveat(kind model.CaveatKind, r model.Row, detail string) {
-	b.plan.Caveats = append(b.plan.Caveats, model.Caveat{Kind: kind, Row: r.Key, Detail: detail})
+// caveat notes something to know of a row that is recorded; the args are the values
+// that model.CaveatKind lists for the kind.
+func (b *builder) caveat(kind model.CaveatKind, r model.Row, args ...string) {
+	b.plan.Caveats = append(b.plan.Caveats, model.Caveat{Kind: kind, Row: r.Key, Args: args})
 }
 
 // base returns the amount in the base currency of an amount of a currency on a
@@ -316,10 +331,11 @@ func (b *builder) fits(code string, quantities ...decimal.Decimal) bool {
 }
 
 // openingDates works out the day of the opening balance of each account and
-// currency: the day before the first row with a day of that MOZE account in that
-// currency. Where the account has no such row it is the day before the first row of
-// the account of the ledger it is, and at last the day before the first row of the
-// file.
+// currency. It is the day that the mapping gives the account, for every currency the
+// account has, whatever the rows say; otherwise the day before the first row with a day
+// of that MOZE account in that currency. Where the account has no such row it is the
+// day before the first row of the account of the ledger it is, and at last the day
+// before the first row of the file.
 func (b *builder) openingDates() {
 	b.openings = map[acctCurrency]openingDay{}
 	own := map[acctCurrency]time.Time{}
@@ -346,13 +362,15 @@ func (b *builder) openingDates() {
 			continue
 		}
 		k := acctCurrency{r.Account, r.Currency}
-		switch {
+		switch fixed := b.m.Accounts[r.Account].OpeningDate; {
+		case !fixed.IsZero():
+			b.openings[k] = openingDay{day: fixed}
 		case !own[k].IsZero():
 			b.openings[k] = openingDay{day: own[k].AddDate(0, 0, -1)}
 		case !ledgerFirst[b.ledger(r.Account)].IsZero():
-			b.openings[k] = openingDay{day: ledgerFirst[b.ledger(r.Account)].AddDate(0, 0, -1), fallback: "the first row of its account of the ledger"}
+			b.openings[k] = openingDay{day: ledgerFirst[b.ledger(r.Account)].AddDate(0, 0, -1), fallback: model.OpeningFromLedgerAccount}
 		case !fileFirst.IsZero():
-			b.openings[k] = openingDay{day: fileFirst.AddDate(0, 0, -1), fallback: "the first row of the file"}
+			b.openings[k] = openingDay{day: fileFirst.AddDate(0, 0, -1), fallback: model.OpeningFromFile}
 		}
 	}
 }

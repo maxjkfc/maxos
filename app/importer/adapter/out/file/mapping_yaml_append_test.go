@@ -21,11 +21,11 @@ func guessedAll() model.Mapping {
 			"USDT": {Name: "Tether USDT", Kind: "crypto", IsCurrency: true, Decimals: 2, RateAs: "USD"},
 		},
 		Accounts: map[string]model.AccountMap{
-			"Fake Card A": {Name: "Fake Card A", Kind: "card", Institution: "FakeBank", ClosingDay: 5, PaymentDueDay: 20},
+			"Fake Card A": {Name: "Fake Card A", Kind: "card", Institution: "FakeBank", ClosingDay: 5, PaymentDueDay: 20, OpeningDate: day("2025-01-07")},
 			"Fake Cash":   {Name: "Fake Cash", Kind: "cash"},
 		},
 		Projects: map[string]model.ProjectMap{
-			"2025-04 Trip": {Kind: "project", Name: "Trip", DefaultArea: "Daily", ActiveFrom: day("2026-04-15"), ActiveTo: day("2026-04-22")},
+			"2025-04 Trip": {Kind: "project", Name: "Trip", DefaultArea: "Daily"},
 			"Corp paid":    {Kind: "dealings", Party: "Corp"},
 			"Daily":        {Kind: "area", Name: "Daily"},
 		},
@@ -56,11 +56,11 @@ const newFileBody = `instruments:
   USDT: {name: Tether USDT, kind: crypto, is_currency: true, decimals: 2, rate_as: USD}  # guessed
 
 accounts:
-  Fake Card A: {name: Fake Card A, kind: card, institution: FakeBank, closing_day: 5, payment_due_day: 20}  # guessed
+  Fake Card A: {name: Fake Card A, kind: card, institution: FakeBank, closing_day: 5, payment_due_day: 20, opening_date: 2025-01-07}  # guessed
   Fake Cash: {name: Fake Cash, kind: cash}  # guessed
 
 projects:
-  2025-04 Trip: {kind: project, name: Trip, default_area: Daily, active_period: {from: 2026-04-15, to: 2026-04-22}}  # guessed
+  2025-04 Trip: {kind: project, name: Trip, default_area: Daily}  # guessed
   Corp paid: {kind: dealings, party: Corp}  # guessed
   Daily: {kind: area, name: Daily}  # guessed
 
@@ -266,11 +266,11 @@ instruments:
 accounts:
     Fake Card A: {name: Fake Card A, kind: card, institution: FakeBank, closing_day: 5, payment_due_day: 20}
     Fake Cash: {name: Fake Cash, kind: cash}   # my wallet
-    Fake Card B: {name: Fake Card B, kind: bank, institution: FakeBank}  # guessed
+    Fake Card B: {name: Fake Card B, kind: bank, institution: FakeBank, opening_date: 2025-03-01}  # guessed
     # (more accounts later)
 
 projects:  # none yet
-  2025-04 Trip: {kind: project, name: Trip, default_area: Daily, active_period: {from: 2026-04-15, to: 2026-04-22}}  # guessed
+  2025-04 Trip: {kind: project, name: Trip, default_area: Daily}  # guessed
   Daily: {kind: area, name: Daily}  # guessed
 
 categories:
@@ -308,11 +308,11 @@ func existingGuessed() model.Mapping {
 		},
 		Accounts: map[string]model.AccountMap{
 			"Fake Card A": {Name: "Another", Kind: "bank"},
-			"Fake Card B": {Name: "Fake Card B", Kind: "bank", Institution: "FakeBank"},
+			"Fake Card B": {Name: "Fake Card B", Kind: "bank", Institution: "FakeBank", OpeningDate: day("2025-03-01")},
 		},
 		Projects: map[string]model.ProjectMap{
 			"Daily":        {Kind: "area", Name: "Daily"},
-			"2025-04 Trip": {Kind: "project", Name: "Trip", DefaultArea: "Daily", ActiveFrom: day("2026-04-15"), ActiveTo: day("2026-04-22")},
+			"2025-04 Trip": {Kind: "project", Name: "Trip", DefaultArea: "Daily"},
 		},
 		Expense: map[string]model.CategoryMap{
 			"Food/Lunch":  {Category: "Elsewhere"},
@@ -560,9 +560,7 @@ func TestAppendAfterAnEntryOfSeveralLines(t *testing.T) {
   Trip:
     kind: project
     name: Trip
-    active_period:
-      from: 2026-04-15
-      to: 2026-04-22
+    default_area: Daily
 
 parties:
   Zed: Zed
@@ -571,9 +569,7 @@ parties:
   Trip:
     kind: project
     name: Trip
-    active_period:
-      from: 2026-04-15
-      to: 2026-04-22
+    default_area: Daily
   Daily: {kind: area, name: Daily}  # guessed
 
 parties:
@@ -724,6 +720,109 @@ func TestAppendRefusesAFileItCannotRead(t *testing.T) {
 	wantUntouched(t, path, text, old)
 }
 
+// A file from before the active period left the mapping is refused as it is read, and
+// left as it is: the user takes the key out.
+func TestAppendRefusesAFileThatHasAnActivePeriod(t *testing.T) {
+	text := "projects:\n  Trip: {kind: project, name: Trip, active_period: {from: 2026-04-15, to: 2026-04-22}}\n"
+	path := writeFile(t, t.TempDir(), "mapping.yaml", text)
+	old := setOld(t, path)
+	message := appendFails(t, path, model.Mapping{Parties: map[string]string{"Zed": "Zed"}})
+	mustSay(t, message, path, "line 2", `unknown key "active_period"`)
+	wantUntouched(t, path, text, old)
+}
+
+// What is written has to read back as the file with the entries put in, value for
+// value, and not only with the same keys. A line that looks like a comment inside a
+// block scalar is a line of its value: an entry put in after the lines above it cuts
+// the scalar short, and what the file says of that entry is changed without a word.
+// Append refuses, names the entry that would change, and leaves the file as it is.
+func TestAppendRefusesToChangeWhatAnEntrySays(t *testing.T) {
+	tests := []struct {
+		name, text string
+		guessed    model.Mapping
+		wantEntry  string // the entry the error names: the first one that would read differently
+	}{
+		{
+			"a block scalar that ends with a line like a comment",
+			"parties:\n  Zed: |\n    first line\n    # looks like a comment\n",
+			model.Mapping{Parties: map[string]string{"Amy": "Amy"}},
+			"parties.Zed",
+		},
+		{
+			"the same with a section after it",
+			"parties:\n  Zed: |\n    first line\n    # looks like a comment\ntags:\n  t: T\n",
+			model.Mapping{Parties: map[string]string{"Amy": "Amy"}},
+			"parties.Zed",
+		},
+		{
+			"a block scalar of the expense categories, and an expense category to add",
+			"categories:\n  expense:\n    Food/Lunch: |\n      lunch\n      # looks like a comment\n",
+			model.Mapping{Expense: map[string]model.CategoryMap{"A/B": {Category: "A/B"}}},
+			"categories.expense.Food/Lunch",
+		},
+		{
+			"a block scalar of the expense categories, and an income section to add",
+			"categories:\n  expense:\n    Food/Lunch: |\n      lunch\n      # looks like a comment\nparties:\n  Zed: Zed\n",
+			model.Mapping{Income: map[string]model.CategoryMap{"X/Y": {Category: "X/Y"}}},
+			"categories.expense.Food/Lunch",
+		},
+		{
+			"a block scalar that keeps the blank lines after it",
+			"parties:\n  Zed: |+\n    first line\n\ntags:\n  t: T\n",
+			model.Mapping{Parties: map[string]string{"Amy": "Amy"}},
+			"parties.Zed",
+		},
+		{
+			"a double-quoted scalar of several lines",
+			"parties:\n  Zed: \"first line\n    # not a comment\"\n",
+			model.Mapping{Parties: map[string]string{"Amy": "Amy"}},
+			"parties.Amy",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeFile(t, t.TempDir(), "mapping.yaml", tt.text)
+			old := setOld(t, path)
+			message := appendFails(t, path, tt.guessed)
+			mustSay(t, message, path, tt.wantEntry, "nothing is written")
+			wantUntouched(t, path, tt.text, old)
+		})
+	}
+}
+
+// A value the file cannot hold is refused, not written as another one: an opening
+// date is a day, and the time of day or the zone of a time would be lost.
+func TestAppendRefusesAnOpeningDateItCannotKeep(t *testing.T) {
+	tests := map[string]time.Time{
+		"a time of day": time.Date(2025, 1, 7, 15, 30, 0, 0, time.UTC),
+		"another zone":  time.Date(2025, 1, 7, 0, 0, 0, 0, time.FixedZone("UTC+8", 8*3600)),
+	}
+	for name, opening := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "mapping.yaml")
+			guessed := model.Mapping{Accounts: map[string]model.AccountMap{"A": {Name: "A", Kind: "bank", OpeningDate: opening}}}
+			mustSay(t, appendFails(t, path, guessed), "accounts.A", "nothing is written")
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Errorf("Stat = %v, want no file to be made of what it cannot keep", err)
+			}
+		})
+	}
+}
+
+// A number is what it is whatever way it is written: 1.50 is read back as 1.5, and
+// that is the same quantity, not a value that changed.
+func TestAppendKeepsANumberThatIsWrittenAnotherWay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mapping.yaml")
+	guessed := model.Mapping{Rows: map[string]model.RowOverride{
+		"r1": {Quantity: ptr("1.50")},
+		"r2": {Quantity: ptr("100")},
+		"r3": {Quantity: ptr("1e2")},
+		"r4": {Quantity: ptr("-0.0010")},
+	}}
+	appendTo(t, path, guessed)
+	sameMapping(t, load(t, path).Mapping, guessed)
+}
+
 func TestAppendRefusesNamesThatCannotBeOneLine(t *testing.T) {
 	long := strings.Repeat("k", 200)
 	for name, key := range map[string]string{"a line break": "two\nlines", "more than 128 characters": long} {
@@ -750,14 +849,6 @@ func TestAppendRefusesNamesThatCannotBeOneLine(t *testing.T) {
 		appendTo(t, path, model.Mapping{Accounts: map[string]model.AccountMap{long: {Name: "x"}}})
 		wantUntouched(t, path, text, old)
 	})
-}
-
-func TestAppendRefusesHalfAPeriod(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mapping.yaml")
-	message := appendFails(t, path, model.Mapping{Projects: map[string]model.ProjectMap{
-		"P": {Kind: "project", Name: "P", ActiveFrom: day("2026-04-15")},
-	}})
-	mustSay(t, message, "active_period", "both")
 }
 
 func TestAppendWithAContextThatIsDone(t *testing.T) {

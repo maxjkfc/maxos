@@ -9,7 +9,9 @@ import (
 // Verify compares the balances of every month that is confirmed so far. A month is
 // confirmed when everything the plan records in it is confirmed (or voided, which is
 // the user's say), and the balance adjustments of it are made; the months are
-// looked at in order, up to the first that is not.
+// looked at in order, up to the first that is not: one that has a draft, a unit not
+// recorded yet, or a unit whose confirmed version is not what the plan says now, which
+// Verify reports.
 func (a *Importer) Verify(ctx context.Context, in usecase.VerifyInput) (usecase.VerifyOutput, error) {
 	var out usecase.VerifyOutput
 	ld, err := a.inputs.load(ctx, in.Files)
@@ -20,13 +22,15 @@ func (a *Importer) Verify(ctx context.Context, in usecase.VerifyInput) (usecase.
 	if plan.Blocked() {
 		return out, &usecase.BlockedError{Plan: plan}
 	}
-	st, err := a.readState(ctx)
+	st, err := a.readState(ctx, plan)
 	if err != nil {
 		return out, err
 	}
 
 	for _, m := range plan.Months() {
-		if drafts, notApplied, adjustments := open(plan, st, m); drafts+notApplied+adjustments > 0 {
+		stale := st.staleUnits(plan, m)
+		out.Stale = append(out.Stale, stale...)
+		if drafts, notApplied, adjustments := open(plan, st, m); drafts+notApplied+adjustments > 0 || len(stale) > 0 {
 			out.Open = m
 			break
 		}

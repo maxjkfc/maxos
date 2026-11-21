@@ -1,11 +1,13 @@
 package service
 
 import (
-	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/shopspring/decimal"
 
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
 )
@@ -54,7 +56,7 @@ func (b *builder) transfers() {
 		os, is := outs[m], ins[m]
 		if len(os) != len(is) || len(os) == 0 {
 			for _, r := range append(slices.Clone(os), is...) {
-				b.skip(model.ReasonUnpaired, fmt.Sprintf("%d 轉出、%d 轉入", len(os), len(is)), r)
+				b.skipWith(model.ReasonUnpaired, minuteCounts(os, is), r)
 			}
 			continue
 		}
@@ -62,11 +64,11 @@ func (b *builder) transfers() {
 		switch status {
 		case matchNone:
 			for _, r := range append(slices.Clone(os), is...) {
-				b.skip(model.ReasonUnpaired, "金額對不上任何一種配法", r)
+				b.skip(model.ReasonNoPairing, r)
 			}
 		case matchAmbiguous:
 			for _, r := range append(slices.Clone(os), is...) {
-				b.skip(model.ReasonAmbiguousPair, fmt.Sprintf("%d 筆轉出、%d 筆轉入，有不只一種配法", len(os), len(is)), r)
+				b.skipWith(model.ReasonAmbiguousPair, minuteCounts(os, is), r)
 			}
 		default:
 			for i, j := range pairs {
@@ -74,6 +76,12 @@ func (b *builder) transfers() {
 			}
 		}
 	}
+}
+
+// minuteCounts says how many 轉出 and how many 轉入 a minute has, as the arguments of
+// the reasons that tell of it.
+func minuteCounts(outs, ins []model.Row) []string {
+	return []string{strconv.Itoa(len(outs)), strconv.Itoa(len(ins))}
 }
 
 type matchStatus int
@@ -161,7 +169,7 @@ func (b *builder) pair(o, i model.Row) {
 	b.handled[o.Pos], b.handled[i.Pos] = true, true
 	ovO, ovI := b.override(o), b.override(i)
 	if ovO.Treatment == model.TreatmentSkip || ovI.Treatment == model.TreatmentSkip {
-		b.skip(model.ReasonSkipped, "", o, i)
+		b.skip(model.ReasonSkipped, o, i)
 		return
 	}
 	quantity := ovO.Quantity
@@ -169,95 +177,123 @@ func (b *builder) pair(o, i model.Row) {
 		quantity = ovI.Quantity
 	}
 
-	fromAccount, toAccount := b.ledger(o.Account), b.ledger(i.Account)
+	j := b.join(o, i)
 	u := model.Unit{
-		Key:         model.KeyPrefix + o.Key + "+" + i.Key,
+		ID:          o.Key + "+" + i.Key,
 		Rows:        []string{o.Key, i.Key},
 		Date:        o.Date,
 		Clock:       o.Clock,
 		Order:       min(o.Pos, i.Pos),
-		Description: pairDescription(o, i),
+		Description: pairDescription(o, i, j.notes),
+		Merchant:    j.merchant,
+		Area:        j.area,
+		Project:     j.project,
+		Tags:        j.tags,
 	}
-	out, in := o.Amount.Neg(), i.Amount
-
+	var made bool
 	switch {
 	case o.Currency == i.Currency:
-		if !out.Equal(in) {
-			b.skip(model.ReasonAmountMismatch, "", o, i)
-			return
-		}
-		if !in.IsPositive() {
-			b.skip(model.ReasonZeroAmount, "", o, i)
-			return
-		}
-		if fromAccount == toAccount {
-			b.skip(model.ReasonSameAccount, fromAccount, o, i)
-			return
-		}
-		if !b.fits(o.Currency, in) {
-			b.skip(model.ReasonTooManyDecimals, o.Currency, o, i)
-			return
-		}
-		if o.Sub == exchangeSub {
-			b.caveat(model.CaveatSameInstrumentExchange, o, "")
-		}
-		u.Kind = model.KindTransfer
-		u.Main = model.Leg{Account: fromAccount, Instrument: o.Currency, Amount: in}
-		u.Other = &model.Leg{Account: toAccount, Instrument: i.Currency, Amount: in}
-
+		made = b.transfer(&u, o, i)
 	case b.isCurrency(o.Currency) && b.isCurrency(i.Currency):
-		if !out.IsPositive() || !in.IsPositive() {
-			b.skip(model.ReasonZeroAmount, "", o, i)
-			return
-		}
-		if !b.fits(o.Currency, out) || !b.fits(i.Currency, in) {
-			b.skip(model.ReasonTooManyDecimals, o.Currency+"/"+i.Currency, o, i)
-			return
-		}
-		u.Kind = model.KindExchange
-		u.Main = model.Leg{Account: fromAccount, Instrument: o.Currency, Amount: out}
-		u.Other = &model.Leg{Account: toAccount, Instrument: i.Currency, Amount: in}
-
+		made = b.exchange(&u, o, i)
 	case b.isCurrency(o.Currency) != b.isCurrency(i.Currency):
-		// One side is a currency and the other is not: money bought a coin, or a coin
-		// was sold for money. The side that is not a currency is the quantity.
-		asset, cash := i, o
-		u.Direction = "buy"
-		if b.isCurrency(i.Currency) {
-			asset, cash = o, i
-			u.Direction = "sell"
-		}
-		assetAmount, cashAmount := asset.Amount.Abs(), cash.Amount.Abs()
-		if assetAmount.IsZero() && quantity != nil {
-			assetAmount = *quantity
-		}
-		if !assetAmount.IsPositive() {
-			b.skip(model.ReasonZeroQuantity, asset.Currency, o, i)
-			return
-		}
-		if !cashAmount.IsPositive() {
-			b.skip(model.ReasonZeroAmount, "", o, i)
-			return
-		}
-		if !b.fits(asset.Currency, assetAmount) || !b.fits(cash.Currency, cashAmount) {
-			b.skip(model.ReasonTooManyDecimals, o.Currency+"/"+i.Currency, o, i)
-			return
-		}
-		u.Kind = model.KindTrade
-		u.Main = model.Leg{Account: b.ledger(asset.Account), Instrument: asset.Currency, Amount: assetAmount}
-		u.Other = &model.Leg{Account: b.ledger(cash.Account), Instrument: cash.Currency, Amount: cashAmount}
-
+		made = b.trade(&u, o, i, quantity)
 	default:
-		b.skip(model.ReasonNotCurrencies, o.Currency+"/"+i.Currency, o, i)
+		b.skipWith(model.ReasonNotCurrencies, []string{o.Currency, i.Currency}, o, i)
+	}
+	if !made {
 		return
 	}
 	u.Fees = append(b.feeOf(o), b.feeOf(i)...)
 	b.add(u)
 }
 
+// transfer makes the unit of two halves of one instrument: money that moved from one
+// account to another. It leaves the rows out, and says it did not make it, when they
+// cannot be one.
+func (b *builder) transfer(u *model.Unit, o, i model.Row) bool {
+	out, in := o.Amount.Neg(), i.Amount
+	from, to := b.ledger(o.Account), b.ledger(i.Account)
+	switch {
+	case !out.Equal(in):
+		b.skip(model.ReasonAmountMismatch, o, i)
+	case !in.IsPositive():
+		b.skip(model.ReasonZeroAmount, o, i)
+	case from == to:
+		b.skipWith(model.ReasonSameAccount, []string{from}, o, i)
+	case !b.fits(o.Currency, in, o.Fee, i.Fee):
+		b.skipWith(model.ReasonTooManyDecimals, []string{o.Currency}, o, i)
+	default:
+		if o.Sub == exchangeSub {
+			b.caveat(model.CaveatSameInstrumentExchange, o)
+		}
+		u.Kind = model.KindTransfer
+		u.Main = model.Leg{Account: from, Instrument: o.Currency, Amount: in}
+		u.Other = &model.Leg{Account: to, Instrument: i.Currency, Amount: in}
+		return true
+	}
+	return false
+}
+
+// exchange makes the unit of two halves in two currencies.
+func (b *builder) exchange(u *model.Unit, o, i model.Row) bool {
+	out, in := o.Amount.Neg(), i.Amount
+	switch {
+	case !out.IsPositive() || !in.IsPositive():
+		b.skip(model.ReasonZeroAmount, o, i)
+	case !b.fits(o.Currency, out, o.Fee) || !b.fits(i.Currency, in, i.Fee):
+		b.skipWith(model.ReasonTooManyDecimals, []string{o.Currency, i.Currency}, o, i)
+	default:
+		u.Kind = model.KindExchange
+		u.Main = model.Leg{Account: b.ledger(o.Account), Instrument: o.Currency, Amount: out}
+		u.Other = &model.Leg{Account: b.ledger(i.Account), Instrument: i.Currency, Amount: in}
+		return true
+	}
+	return false
+}
+
+// trade makes the unit of two halves of which one is a currency and the other is not:
+// money bought a coin, or a coin was sold for money. The side that is not a currency
+// is the quantity, which is the one the user gave when the export has it as zero.
+func (b *builder) trade(u *model.Unit, o, i model.Row, given *decimal.Decimal) bool {
+	asset, cash := i, o
+	u.Direction = "buy"
+	if b.isCurrency(i.Currency) {
+		asset, cash = o, i
+		u.Direction = "sell"
+	}
+	assetAmount, cashAmount := asset.Amount.Abs(), cash.Amount.Abs()
+	standsIn := assetAmount.IsZero() && given != nil
+	if standsIn {
+		assetAmount = *given
+	}
+	switch {
+	case !assetAmount.IsPositive():
+		b.skipWith(model.ReasonZeroQuantity, []string{asset.Currency}, o, i)
+	case !cashAmount.IsPositive():
+		b.skip(model.ReasonZeroAmount, o, i)
+	case !b.fits(asset.Currency, assetAmount, asset.Fee) || !b.fits(cash.Currency, cashAmount, cash.Fee):
+		b.skipWith(model.ReasonTooManyDecimals, []string{o.Currency, i.Currency}, o, i)
+	default:
+		u.Kind = model.KindTrade
+		u.Main = model.Leg{Account: b.ledger(asset.Account), Instrument: asset.Currency, Amount: assetAmount}
+		u.Other = &model.Leg{Account: b.ledger(cash.Account), Instrument: cash.Currency, Amount: cashAmount}
+		if standsIn {
+			// The row of the asset moved what the user says, though the export has it as
+			// nothing: that is what it does to the balance, as the sign of its side says.
+			b.quantities[asset.Key] = assetAmount
+			if u.Direction == "sell" {
+				b.quantities[asset.Key] = assetAmount.Neg()
+			}
+		}
+		return true
+	}
+	return false
+}
+
 // pairDescription is what the two halves say of themselves: the name of each, what
-// they say, and the category they have.
-func pairDescription(o, i model.Row) string {
+// they say, what the unit has no place for, and the category each had.
+func pairDescription(o, i model.Row, notes []string) string {
 	name := o.Name
 	if i.Name != "" && i.Name != o.Name {
 		name = joinNonEmpty(" / ", o.Name, i.Name)
@@ -266,6 +302,10 @@ func pairDescription(o, i model.Row) string {
 	if i.Description != "" && i.Description != o.Description {
 		details = append(details, i.Description)
 	}
+	details = append(details, notes...)
 	details = append(details, categoryNote(o))
+	if categoryNote(i) != categoryNote(o) {
+		details = append(details, categoryNote(i))
+	}
 	return joinNonEmpty("\n", details...)
 }

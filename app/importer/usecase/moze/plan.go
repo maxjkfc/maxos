@@ -50,20 +50,7 @@ func (p *Planner) Plan(ctx context.Context, in usecase.PlanInput) (usecase.PlanO
 		return usecase.PlanOutput{}, fmt.Errorf("add the guesses to the mapping %s: %w", in.Mapping, err)
 	}
 	out.MappingCreated = !ld.mapping.Exists
-	out.MappingAdded = entries(ld.plan.Guessed)
+	out.MappingAdded = ld.plan.Guessed.Entries()
 	out.Guessed += out.MappingAdded
 	return out, nil
-}
-
-// entries counts the entries of a mapping: every item of every section, and each
-// default that is set.
-func entries(m model.Mapping) int {
-	n := len(m.Instruments) + len(m.Accounts) + len(m.Projects) + len(m.Expense) + len(m.Income) +
-		len(m.Parties) + len(m.Tags) + len(m.Rows)
-	for _, d := range []string{m.Defaults.FeeCategory, m.Defaults.InterestCategory, m.Defaults.RefundCategory} {
-		if d != "" {
-			n++
-		}
-	}
-	return n
 }

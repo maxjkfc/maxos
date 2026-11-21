@@ -35,7 +35,8 @@ func adjustmentsOf(plan model.Plan, month string) []model.Adjustment {
 }
 
 // open tells what is left to confirm in a month: the units that are drafts or that
-// the ledger does not have, and the adjustments that are not confirmed.
+// the ledger does not have in the version the plan says, and the adjustments that are
+// not confirmed.
 func open(plan model.Plan, st *state, month string) (drafts, notApplied, adjustments int) {
 	for _, u := range unitsOf(plan, month) {
 		switch s, _ := st.of(u); s {
@@ -54,8 +55,9 @@ func open(plan model.Plan, st *state, month string) (drafts, notApplied, adjustm
 }
 
 // Confirm confirms the month, day by day: the drafts of the import of each day, in
-// the order of the plan, and then the balance adjustments of the day, so that an
-// adjustment is made once everything of its account up to its day is confirmed.
+// the order of the plan, and then the reconciliations of the balance adjustments of the
+// day, so that an adjustment is made once everything of its account up to its day is
+// confirmed.
 func (a *Importer) Confirm(ctx context.Context, in usecase.ConfirmInput) (usecase.ConfirmOutput, error) {
 	out := usecase.ConfirmOutput{Month: in.Month}
 	ld, err := a.inputs.load(ctx, in.Files)
@@ -69,9 +71,22 @@ func (a *Importer) Confirm(ctx context.Context, in usecase.ConfirmInput) (usecas
 	if !slices.Contains(plan.Months(), in.Month) {
 		return out, fmt.Errorf("%w: %s", usecase.ErrUnknownMonth, in.Month)
 	}
-	st, err := a.readState(ctx)
+	st, err := a.readState(ctx, plan)
 	if err != nil {
 		return out, err
+	}
+
+	// A confirmed transaction is never changed. One that is not what the plan says
+	// stands in the way until the user voids it, and apply records the unit again.
+	var stale []usecase.StaleUnit
+	for _, m := range plan.Months() {
+		if m > in.Month {
+			break
+		}
+		stale = append(stale, st.staleUnits(plan, m)...)
+	}
+	if len(stale) > 0 {
+		return out, &usecase.StaleError{Month: in.Month, Units: stale}
 	}
 
 	// The months are confirmed in order: what an adjustment adds is to what the account
@@ -122,6 +137,7 @@ func (a *Importer) Confirm(ctx context.Context, in usecase.ConfirmInput) (usecas
 			for _, t := range confirmed.Transactions {
 				st.byKey[t.IdempotencyKey] = t
 			}
+			st.index(plan)
 			out.Confirmed += len(confirmed.Transactions)
 		}
 		for _, adj := range adjustments {
@@ -169,14 +185,8 @@ func (a *Importer) applyAdjustment(ctx context.Context, st *state, adj model.Adj
 	}
 	actual := recorded[model.Pair{Account: adj.Account, Instrument: adj.Instrument}].Add(adj.Amount)
 
-	details := finance.RecordDetails{
-		IdempotencyKey: adj.Key,
-		OccurredOn:     adj.Date,
-		OccurredAt:     a.occurredAt(model.Unit{Date: adj.Date, Clock: adj.Clock}),
-		Description:    adj.Description,
-	}
 	rec, err := a.ledger.Reconcile.Reconcile(ctx, finance.ReconcileInput{
-		RecordDetails:        details,
+		RecordDetails:        a.detailsOf(st.refs, adj.Key, adj.Date, adj.Clock, adj.Description, adj.Merchant, adj.Area, adj.Project, adj.Tags),
 		AccountID:            accountID,
 		InstrumentID:         instrumentID,
 		ActualBalance:        actual,

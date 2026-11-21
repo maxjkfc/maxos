@@ -8,7 +8,6 @@ import (
 
 	finance "github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
-	"github.com/maxjkfc/maxos/app/importer/usecase/port/in/usecase"
 )
 
 // check compares, for each account and instrument of the plan, what the ledger holds
@@ -16,14 +15,14 @@ import (
 // confirmed and dated up to that day, which is how the export's own balance is made
 // up, so that what the import recorded and confirmed is what is compared; what the
 // plan does not record is Unrecorded, and is what a difference can be explained by.
-func (a *Importer) check(ctx context.Context, plan model.Plan, st *state, month string) (usecase.MonthCheck, error) {
+func (a *Importer) check(ctx context.Context, plan model.Plan, st *state, month string) (model.MonthCheck, error) {
 	end, err := model.MonthEnd(month)
 	if err != nil {
-		return usecase.MonthCheck{}, fmt.Errorf("month %q: %w", month, err)
+		return model.MonthCheck{}, fmt.Errorf("month %q: %w", month, err)
 	}
 	balances, err := a.ledger.GetBalances.GetBalances(ctx, finance.GetBalancesInput{AsOf: &end})
 	if err != nil {
-		return usecase.MonthCheck{}, fmt.Errorf("get the balances at %s: %w", end.Format("2006-01-02"), err)
+		return model.MonthCheck{}, fmt.Errorf("get the balances at %s: %w", end.Format("2006-01-02"), err)
 	}
 
 	mine := map[string]bool{}
@@ -47,9 +46,9 @@ func (a *Importer) check(ctx context.Context, plan model.Plan, st *state, month 
 			all[pair] = decimal.Zero
 		}
 	}
-	check := usecase.MonthCheck{Month: month, End: end, Decimals: map[string]int{}}
+	check := model.MonthCheck{Month: month, End: end, Decimals: map[string]int{}}
 	for _, pair := range all.Pairs() {
-		line := usecase.BalanceLine{
+		line := model.BalanceLine{
 			Account:    pair.Account,
 			Instrument: pair.Instrument,
 			Ledger:     ledger[pair],

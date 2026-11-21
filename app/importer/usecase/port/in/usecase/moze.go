@@ -8,9 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
-
-	"github.com/shopspring/decimal"
 
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
 )
@@ -55,11 +52,23 @@ type PlanOutput struct {
 }
 
 // Apply records the export in the ledger as drafts. It refuses a plan that has
-// anything to map or to put right (a *BlockedError). It makes the reference data the
-// mapping names that the ledger does not have (instruments, institutions, accounts,
-// categories, areas, projects, tags, parties) and records each unit of the plan with
-// the use case of its kind, under an idempotency key made of the rows, so that a
-// second run records nothing and a longer export adds only the rows it has more.
+// anything to map or to put right, and a mapping file that still has an entry marked
+// "# guessed" (a *BlockedError): what the ledger is made of, the accounts and the
+// instruments, cannot be changed afterwards, so the user looks at every guess first.
+//
+// It makes the reference data the mapping names that the ledger does not have
+// (instruments, institutions, accounts, categories, areas, projects, tags, parties)
+// and records each unit of the plan with the use case of its kind, under an
+// idempotency key made of the unit's rows and its version (model.Unit.Key), so that a
+// second run records nothing, a longer export adds only the rows it has more, and what
+// the plan says differently since the last run reaches the ledger:
+//
+//   - a unit that the ledger has in its present version is there already;
+//   - a unit that the ledger has in an earlier version, as a draft, is discarded and
+//     recorded again;
+//   - a unit that the ledger has in an earlier version that is confirmed is left
+//     alone and reported as stale, and so are the units that are made of the rows of
+//     one that is: the user voids it, and the next run records the unit again.
 //
 // A unit that the ledger refuses is reported and does not stop the others.
 type Apply interface {
@@ -75,19 +84,24 @@ type ApplyInput struct {
 type ApplyOutput struct {
 	// Created is how much reference data was made, by what it is.
 	Created map[string]int
-	// New and Duplicate count the units recorded now and the units the ledger already
-	// had, by kind.
+	// New, Updated and Duplicate count the units recorded now, the units whose draft
+	// of an earlier version was discarded and recorded again, and the units the ledger
+	// already had, by kind.
 	New       map[model.UnitKind]int
+	Updated   map[model.UnitKind]int
 	Duplicate map[model.UnitKind]int
 	// Failed are the units the ledger refused.
 	Failed []Failure
+	// Stale are the units whose confirmed version is not what the plan says now.
+	Stale []StaleUnit
+	// ProjectDifferences are the projects the ledger already had, which are used as
+	// they are, whose default area is not the one the mapping says.
+	ProjectDifferences []ProjectDifference
 	// Adjustments are the balance adjustments that are left for confirmation, and
 	// NoOps the rows that need nothing; Skipped is how many rows are not recorded.
 	Adjustments int
 	NoOps       int
 	Skipped     int
-	// Guessed is how many entries of the mapping are still marked "# guessed".
-	Guessed int
 }
 
 // Failure is a unit that the ledger would not take.
@@ -98,12 +112,30 @@ type Failure struct {
 	Err   error
 }
 
+// StaleUnit is a unit that the ledger has in a version that is confirmed, and that
+// the plan now says in another: a confirmed transaction is never changed, so the
+// import does not touch it, and does not record the new version beside it.
+type StaleUnit struct {
+	Unit model.Unit
+	// Lines are the lines of the export the unit is made of.
+	Lines []int
+}
+
+// ProjectDifference is a project that the ledger had already, whose default area is
+// not what the mapping says it is. Names are of areas, empty for none.
+type ProjectDifference struct {
+	Project string
+	Mapping string
+	Ledger  string
+}
+
 // Confirm confirms the drafts of the import that are dated in a month, in date
 // order, and applies the balance adjustments of that month: each when everything of
 // its account and instrument up to its day is confirmed, by reconciling the account
 // to what it held plus what the adjustment adds. It refuses when a month before it
 // still has a draft of the import to confirm, or an adjustment, so that the months
-// are confirmed in order. It touches nothing the import did not record.
+// are confirmed in order, and when a unit of that month or of an earlier one is stale
+// (a *StaleError). It touches nothing the import did not record.
 type Confirm interface {
 	Confirm(ctx context.Context, in ConfirmInput) (ConfirmOutput, error)
 }
@@ -128,7 +160,7 @@ type ConfirmOutput struct {
 	// Orphans are drafts of the import that the export does not have any more, which
 	// Confirm leaves alone.
 	Orphans int
-	Check   MonthCheck
+	Check   model.MonthCheck
 }
 
 // AdjustmentState is what became of a balance adjustment.
@@ -166,65 +198,14 @@ type VerifyInput struct {
 
 // VerifyOutput is the comparison for every month confirmed so far.
 type VerifyOutput struct {
-	Months []MonthCheck
+	Months []model.MonthCheck
 	// Open is the first month that is not confirmed yet, or empty.
 	Open string
 	// Unexplained is how many differences that nothing explains there are in all.
 	Unexplained int
-}
-
-// MonthCheck is the balances of the accounts at the end of a month, by the ledger and
-// by the export.
-type MonthCheck struct {
-	Month string
-	End   time.Time
-	Lines []BalanceLine
-	// Decimals are the decimal places of each instrument in Lines, by code.
-	Decimals map[string]int
-}
-
-// Differences are the lines whose ledger balance is not what the export says.
-func (c MonthCheck) Differences() []BalanceLine {
-	var out []BalanceLine
-	for _, l := range c.Lines {
-		if !l.Difference().IsZero() {
-			out = append(out, l)
-		}
-	}
-	return out
-}
-
-// Unexplained is how many differences are not accounted for by rows that the import
-// does not record.
-func (c MonthCheck) Unexplained() int {
-	n := 0
-	for _, l := range c.Lines {
-		if !l.Unexplained().IsZero() {
-			n++
-		}
-	}
-	return n
-}
-
-// BalanceLine is what an account holds of an instrument at a day.
-type BalanceLine struct {
-	Account    string
-	Instrument string
-	// Ledger is what the ledger says, Expected what the export says, and Unrecorded
-	// what the rows that are not recorded add to it: the part of the export that the
-	// ledger does not have.
-	Ledger     decimal.Decimal
-	Expected   decimal.Decimal
-	Unrecorded decimal.Decimal
-}
-
-// Difference is how much more the ledger holds than the export says.
-func (l BalanceLine) Difference() decimal.Decimal { return l.Ledger.Sub(l.Expected) }
-
-// Unexplained is the difference that the rows that are not recorded do not account
-// for: it is nothing when the ledger holds what the export says without them.
-func (l BalanceLine) Unexplained() decimal.Decimal {
-	return l.Ledger.Sub(l.Expected.Sub(l.Unrecorded))
+	// Stale are the units of the months confirmed so far, and of the month that is
+	// open, whose confirmed version is not what the plan says now.
+	Stale []StaleUnit
 }
 
 // Status counts, for each month of the export, what the import has done.
@@ -249,11 +230,14 @@ type StatusOutput struct {
 type MonthStatus struct {
 	Month string
 	// Drafts and Confirmed are the units the ledger has as drafts and as confirmed,
-	// NotApplied those it does not have yet, Voided those that were voided.
+	// NotApplied those it does not have yet (or has in an earlier version, which a
+	// run of apply puts right), Voided those that were voided, and Stale those whose
+	// confirmed version is not what the plan says now.
 	Drafts     int
 	Confirmed  int
 	NotApplied int
 	Voided     int
+	Stale      int
 	// Skipped is how many rows are not recorded.
 	Skipped int
 	// AdjustmentsPending are the balance adjustments not confirmed yet.
@@ -263,16 +247,24 @@ type MonthStatus struct {
 // ErrBlocked is what a plan with things to map or to put right is refused with.
 var ErrBlocked = errors.New("the plan has something to map or to put right")
 
-// BlockedError is the refusal of a plan that is not one to record from.
+// BlockedError is the refusal of a plan that is not one to record from: it has
+// entries to add to the mapping, or something wrong, or the mapping file still has
+// entries that are marked as guessed.
 type BlockedError struct {
 	Plan model.Plan
+	// Guessed is how many entries of the mapping file are still marked "# guessed".
+	// Only Apply refuses for them; a plan can be made, and a month confirmed, with
+	// them.
+	Guessed int
 }
 
+// Missing lists the entries the mapping lacks: what the plan had to guess, which is
+// added to the mapping file with a mark.
+func (e *BlockedError) Missing() []model.EntryRef { return e.Plan.Guessed.Items() }
+
 func (e *BlockedError) Error() string {
-	g := e.Plan.Guessed
-	unmapped := len(g.Accounts) + len(g.Instruments) + len(g.Projects) + len(g.Expense) + len(g.Income) + len(g.Parties) + len(g.Tags)
-	return fmt.Sprintf("%v: %d entries of the mapping are missing and %d things are wrong; run plan, review the mapping and run it again",
-		ErrBlocked, unmapped, len(e.Plan.Problems))
+	return fmt.Sprintf("%v: %d entries of the mapping are missing, %d are still marked as guessed and %d things are wrong; run plan, review the mapping and run it again",
+		ErrBlocked, e.Plan.Guessed.Entries(), e.Guessed, len(e.Plan.Problems))
 }
 
 // Is tells ErrBlocked.
@@ -301,6 +293,25 @@ func (e *MonthOrderError) Error() string {
 
 // Is tells ErrMonthOrder.
 func (e *MonthOrderError) Is(target error) bool { return target == ErrMonthOrder }
+
+// ErrStale is what confirming a month is refused with while a unit of it, or of an
+// earlier month, has a confirmed version that is not what the plan says now.
+var ErrStale = errors.New("a confirmed transaction of the import is not what the plan says")
+
+// StaleError names the units that are stale, which the user voids, so that apply
+// records them again as the plan says.
+type StaleError struct {
+	// Month is the month that was asked for.
+	Month string
+	Units []StaleUnit
+}
+
+func (e *StaleError) Error() string {
+	return fmt.Sprintf("%v: %d units of %s or before; void them, run apply, and confirm again", ErrStale, len(e.Units), e.Month)
+}
+
+// Is tells ErrStale.
+func (e *StaleError) Is(target error) bool { return target == ErrStale }
 
 // ErrUnknownMonth is returned for a month that the export has nothing in.
 var ErrUnknownMonth = errors.New("the export has nothing in that month")

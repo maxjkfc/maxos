@@ -58,6 +58,8 @@ type fakeLedger struct {
 	reconciled []finance.ReconcileInput
 	// confirms are the ids each ConfirmTransactions was asked for.
 	confirms [][]uuid.UUID
+	// discards are the ids DiscardDraft was asked for, in order.
+	discards []uuid.UUID
 	// events are the confirmations and the reconciliations in the order they were made:
 	// "confirm <n>" with how many it confirmed, "reconcile <account> <day>".
 	events []string
@@ -82,7 +84,7 @@ func (f *fakeLedger) ledger() moze.Ledger {
 		RecordExchange: f, RecordTrade: f, RecordDealing: f, RecordReward: f, RecordBillInstalment: f,
 		SetOpeningBalance: f, Reconcile: f, ConfirmTransactions: f, ListTransactions: f, GetBalances: f,
 		CreateArea: f, ListAreas: f, CreateProject: f, ListProjects: f, CreateParty: f, ListParties: f,
-		CreateTag: f, ListTags: f,
+		CreateTag: f, ListTags: f, DiscardDraft: f,
 	}
 }
 
@@ -382,6 +384,36 @@ func (f *fakeLedger) ConfirmTransactions(_ context.Context, in finance.ConfirmTr
 	return out, nil
 }
 
+// DiscardDraft deletes a draft: what the real ledger does, which frees its idempotency
+// key. A transaction that is not a draft cannot be.
+func (f *fakeLedger) DiscardDraft(_ context.Context, id uuid.UUID) error {
+	f.discards = append(f.discards, id)
+	for i, t := range f.txns {
+		if t.ID != id {
+			continue
+		}
+		if t.Status != "draft" {
+			return fmt.Errorf("fake: %s is %s, not a draft", id, t.Status)
+		}
+		f.txns = slices.Delete(f.txns, i, i+1)
+		return nil
+	}
+	return fmt.Errorf("fake: no transaction %s", id)
+}
+
+// void is the user voiding a confirmed transaction of the import, by the start of its
+// key: it stops counting, and keeps its key.
+func (f *fakeLedger) void(keyStart string) int {
+	n := 0
+	for _, t := range f.txns {
+		if strings.HasPrefix(t.IdempotencyKey, keyStart) && t.Status == "confirmed" {
+			t.Status = "void"
+			n++
+		}
+	}
+	return n
+}
+
 func (f *fakeLedger) ListTransactions(_ context.Context, in finance.ListTransactionsInput) (finance.ListTransactionsOutput, error) {
 	all := make([]finance.Transaction, 0, len(f.txns))
 	for _, t := range f.txns {
@@ -486,6 +518,7 @@ func (m *fakeMapping) Append(_ context.Context, _ string, guessed model.Mapping)
 	m.appended = append(m.appended, guessed)
 	m.loaded.Mapping = m.loaded.Mapping.Merge(guessed)
 	m.loaded.Exists = true
+	m.loaded.Guessed += guessed.Entries()
 	return nil
 }
 

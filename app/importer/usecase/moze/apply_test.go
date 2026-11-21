@@ -263,10 +263,10 @@ func TestALongerExportAddsOnlyTheRowsItHasMore(t *testing.T) {
 func TestApplyReportsWhatTheLedgerRefusesAndGoesOn(t *testing.T) {
 	w := newWorld(t, fixture(), fixtureMapping()).reviewed()
 	victim := w.plan().Units[10]
-	w.ledger.failOn = victim.Key
+	w.ledger.failOn = victim.Key()
 	out := w.apply()
 
-	if len(out.Failed) != 1 || out.Failed[0].Unit.Key != victim.Key || len(out.Failed[0].Lines) == 0 {
+	if len(out.Failed) != 1 || out.Failed[0].Unit.Key() != victim.Key() || len(out.Failed[0].Lines) == 0 {
 		t.Fatalf("failed = %+v, want the one the ledger refused, with its lines", out.Failed)
 	}
 	if got, want := sum(out.New), len(w.plan().Units)-1; got != want {

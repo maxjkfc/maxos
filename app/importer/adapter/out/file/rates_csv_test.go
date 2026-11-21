@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io/fs"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -25,9 +24,9 @@ func parseRates(t *testing.T, text string) model.Rates {
 // ratesFail parses a rates file that must be refused, and returns what it says.
 func ratesFail(t *testing.T, text string) string {
 	t.Helper()
-	r, err := file.ParseRates(strings.NewReader(text))
+	_, err := file.ParseRates(strings.NewReader(text))
 	if err == nil {
-		t.Fatalf("ParseRates read rates of %v from text that is wrong:\n%s", r.Codes(), text)
+		t.Fatalf("ParseRates read text that is wrong:\n%s", text)
 	}
 	return err.Error()
 }
@@ -60,14 +59,8 @@ date,instrument,twd_per_unit
 	wantRate(t, r, "USD", "2026-06-01", "31.80") // long after the last
 	wantRate(t, r, "USD", "2026-03-31", "")      // before the first
 	wantRate(t, r, "JPY", "2026-04-05", "0.21")  // a code is read in upper case
+	wantRate(t, r, "jpy", "2026-04-05", "")      // a code is looked up as it is: jpy is not JPY
 	wantRate(t, r, "EUR", "2026-04-05", "")      // no rates at all
-	if got := r.Codes(); !slices.Equal(got, []string{"JPY", "USD"}) {
-		t.Errorf("Codes() = %v, want JPY and USD", got)
-	}
-	first, last, ok := r.Range("USD")
-	if !ok || first.Format("2006-01-02") != "2026-04-01" || last.Format("2006-01-02") != "2026-04-03" {
-		t.Errorf("Range(USD) = %v, %v, %v, want 2026-04-01 to 2026-04-03", first, last, ok)
-	}
 }
 
 func TestParseRatesCommentsAndBlankLines(t *testing.T) {
@@ -83,9 +76,6 @@ date,instrument,twd_per_unit
 
 `)
 	wantRate(t, r, "USD", "2026-04-02", "31.50")
-	if got := r.Codes(); !slices.Equal(got, []string{"USD"}) {
-		t.Errorf("Codes() = %v, want USD alone", got)
-	}
 }
 
 func TestParseRatesAnyOrder(t *testing.T) {
@@ -116,9 +106,8 @@ func TestParseRatesBOM(t *testing.T) {
 }
 
 func TestParseRatesNoRates(t *testing.T) {
-	if r := parseRates(t, "date,instrument,twd_per_unit\n"); len(r.Codes()) != 0 {
-		t.Errorf("Codes() = %v, want none for a header alone", r.Codes())
-	}
+	// A header alone is no rates.
+	wantRate(t, parseRates(t, "date,instrument,twd_per_unit\n"), "USD", "2026-04-01", "")
 	mustSay(t, ratesFail(t, ""), "empty")
 	mustSay(t, ratesFail(t, "# only a comment\n"), "empty")
 }
@@ -180,9 +169,10 @@ func TestRatesCSVLoad(t *testing.T) {
 	})
 	t.Run("a file that is not there is no rates", func(t *testing.T) {
 		r, exists, err := store.Load(ctx, filepath.Join(dir, "none.csv"))
-		if err != nil || exists || len(r.Codes()) != 0 {
-			t.Errorf("Load = %v, %v, %v, want no rates, no file and no error", r.Codes(), exists, err)
+		if err != nil || exists {
+			t.Errorf("Load = %v, %v, want no file and no error", exists, err)
 		}
+		wantRate(t, r, "USD", "2026-04-01", "")
 	})
 	t.Run("a file that is wrong names the file and the line", func(t *testing.T) {
 		path := writeFile(t, dir, "bad.csv", "date,instrument,twd_per_unit\n2026-04-01,USD,0\n")

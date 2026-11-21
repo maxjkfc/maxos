@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -40,7 +41,7 @@ func (v planView) rowLabel(key string) []string {
 	}
 }
 
-var rowHeaders = []string{"key", "時間", "帳戶", "類型", "金額", "名稱"}
+var rowHeaders = []string{"key", "時間", "帳戶", "MOZE 記錄類型", "金額", "名稱"}
 
 // effectOf is what the rows with the keys do to the balances, as text.
 func (v planView) effectOf(keys ...string) string {
@@ -48,12 +49,21 @@ func (v planView) effectOf(keys ...string) string {
 	for _, k := range keys {
 		want[k] = true
 	}
-	sums := map[model.Pair]decimal.Decimal{}
+	var effects []model.Effect
 	for _, e := range v.plan.Effects {
 		if want[e.Row] {
-			k := model.Pair{Account: e.Account, Instrument: e.Instrument}
-			sums[k] = sums[k].Add(e.Quantity)
+			effects = append(effects, e)
 		}
+	}
+	return v.effectsText(effects)
+}
+
+// effectsText writes effects as what they come to by account and instrument.
+func (v planView) effectsText(effects []model.Effect) string {
+	sums := map[model.Pair]decimal.Decimal{}
+	for _, e := range effects {
+		k := model.Pair{Account: e.Account, Instrument: e.Instrument}
+		sums[k] = sums[k].Add(e.Quantity)
 	}
 	var parts []string
 	for _, p := range model.Balances(sums).Pairs() {
@@ -90,7 +100,7 @@ func planSummary(w *strings.Builder, out usecase.PlanOutput, reportPath string) 
 		fmt.Fprintf(w, "對照檔新增 %d 個猜測項目（標了 # guessed）\n", out.MappingAdded)
 	}
 	if out.Guessed > 0 {
-		fmt.Fprintf(w, "對照檔裡仍有 %d 個 # guessed 的項目\n", out.Guessed)
+		fmt.Fprintf(w, "對照檔裡仍有 %d 個 # guessed 的項目；看過、改好之後把標記拿掉，apply 才會執行\n", out.Guessed)
 	}
 	if !out.RatesFound {
 		fmt.Fprintln(w, "找不到匯率檔：外幣的列沒有本位幣金額")
@@ -106,7 +116,7 @@ func planSummary(w *strings.Builder, out usecase.PlanOutput, reportPath string) 
 			fmt.Fprintf(w, "  %-8s %d\n", kindText[k], counts[k])
 		}
 	}
-	fmt.Fprintf(w, "  餘額調整  %d（確認該月時才對帳記錄）\n", len(p.Adjustments))
+	fmt.Fprintf(w, "  MOZE 的餘額調整  %d（確認該月時才做對帳）\n", len(p.Adjustments))
 	zeroOpenings, zeroAdjustments := 0, 0
 	for _, n := range p.NoOps {
 		if n.Reason == model.NoOpZeroOpening {
@@ -115,7 +125,7 @@ func planSummary(w *strings.Builder, out usecase.PlanOutput, reportPath string) 
 			zeroAdjustments++
 		}
 	}
-	fmt.Fprintf(w, "  不需記錄  %d（期初為 0：%d、調整為 0：%d）\n", len(p.NoOps), zeroOpenings, zeroAdjustments)
+	fmt.Fprintf(w, "  不需記錄  %d（期初為 0：%d、MOZE 的餘額調整為 0：%d）\n", len(p.NoOps), zeroOpenings, zeroAdjustments)
 
 	reasons, pairing := map[model.Reason]int{}, 0
 	for _, s := range p.Skipped {
@@ -140,14 +150,29 @@ func planSummary(w *strings.Builder, out usecase.PlanOutput, reportPath string) 
 		}
 	}
 
+	if len(p.Differences) > 0 {
+		fmt.Fprintf(w, "\n記錄下來、但金額與 CSV 不同的單位 %d 個：\n", len(p.Differences))
+		byReason := map[model.DifferenceReason]int{}
+		for _, d := range p.Differences {
+			for _, r := range d.Reasons {
+				byReason[r]++
+			}
+		}
+		for _, r := range []model.DifferenceReason{model.DifferenceFee, model.DifferenceDiscount, model.DifferenceOther} {
+			if byReason[r] > 0 {
+				fmt.Fprintf(w, "  %-4d %s\n", byReason[r], differenceText[r])
+			}
+		}
+	}
+
 	if len(p.Problems) > 0 {
 		fmt.Fprintf(w, "\n要先處理的問題 %d 項：\n", len(p.Problems))
 		for _, pr := range p.Problems {
-			fmt.Fprintf(w, "  %s\n", pr)
+			fmt.Fprintf(w, "  %s\n", problemText(pr))
 		}
 	}
 	for _, warning := range p.Warnings {
-		fmt.Fprintf(w, "注意：%s\n", warning)
+		fmt.Fprintf(w, "注意：%s\n", warningText(warning))
 	}
 	if reportPath != "" {
 		fmt.Fprintf(w, "\n完整報告：%s\n", reportPath)
@@ -200,6 +225,7 @@ func planReport(w *strings.Builder, out usecase.PlanOutput) {
 
 	v.renderBlocking(w)
 	v.renderSkipped(w)
+	v.renderDifferences(w)
 	v.renderCaveats(w)
 	v.renderProjects(w)
 	v.renderExpected(w)
@@ -215,29 +241,40 @@ func (v planView) renderBlocking(w *strings.Builder) {
 	fmt.Fprintln(w, "## 先處理，才能 apply")
 	fmt.Fprintln(w)
 	if !g.Empty() {
-		fmt.Fprintln(w, "對照檔缺少下列項目。它們已加進對照檔（標了 `# guessed`），請逐項確認、改好，再執行一次 plan。")
+		fmt.Fprintln(w, "對照檔缺少下列項目。它們已加進對照檔（標了 `# guessed`），請逐項確認、改好、把標記拿掉，再執行一次 plan。")
 		fmt.Fprintln(w)
-		counts := []struct {
-			name string
-			n    int
-		}{
-			{"標的", len(g.Instruments)}, {"帳戶", len(g.Accounts)}, {"專案值", len(g.Projects)},
-			{"支出類別", len(g.Expense)}, {"收入類別", len(g.Income)}, {"對象", len(g.Parties)}, {"標籤", len(g.Tags)},
-		}
-		for _, c := range counts {
-			if c.n > 0 {
-				fmt.Fprintf(w, "- %s：%d 個\n", c.name, c.n)
-			}
-		}
+		writeMissing(w, g.Items(), "- ")
 		fmt.Fprintln(w)
 	}
 	if len(v.plan.Problems) > 0 {
 		fmt.Fprintln(w, "有問題的項目：")
 		fmt.Fprintln(w)
 		for _, p := range v.plan.Problems {
-			fmt.Fprintf(w, "- %s\n", p)
+			fmt.Fprintf(w, "- %s\n", problemText(p))
 		}
 		fmt.Fprintln(w)
+	}
+}
+
+// writeMissing writes entries of a mapping by section, how many of each, and what
+// they are, with the prefix before each line.
+func writeMissing(w *strings.Builder, items []model.EntryRef, prefix string) {
+	bySection := map[string][]string{}
+	var order []string
+	for _, it := range items {
+		if _, seen := bySection[it.Section]; !seen {
+			order = append(order, it.Section)
+		}
+		bySection[it.Section] = append(bySection[it.Section], it.Key)
+	}
+	const listed = 5
+	for _, section := range order {
+		keys := bySection[section]
+		line := fmt.Sprintf("%s%s：%d 個", prefix, sectionText[section], len(keys))
+		if len(keys) <= listed || section == model.SectionDefaults {
+			line += "（" + strings.Join(keys, "、") + "）"
+		}
+		fmt.Fprintln(w, line)
 	}
 }
 
@@ -270,12 +307,12 @@ func (v planView) renderSkipped(w *strings.Builder) {
 				effect, detail := "", ""
 				if i == 0 {
 					effect = v.effectOf(g.Rows...)
-					detail = g.Detail
+					detail = reasonDetail(g.Reason, g.Args)
 				}
 				rows = append(rows, append(label, effect, detail))
 			}
 		}
-		table(w, append(rowHeaders, "這組對餘額的影響", "說明"), rows)
+		table(w, append(slices.Clone(rowHeaders), "這組對餘額的影響", "說明"), rows)
 	}
 }
 
@@ -285,6 +322,28 @@ func countByReason(skipped []model.Skipped) map[model.Reason]int {
 		out[s.Reason] += len(s.Rows)
 	}
 	return out
+}
+
+// renderDifferences lists the units that are recorded with an amount that is not what
+// their rows say, and what the ledger lacks because of it.
+func (v planView) renderDifferences(w *strings.Builder) {
+	if len(v.plan.Differences) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "## 記錄下來、但金額與 CSV 不同的單位")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "這些單位照帳本能記的方式記下，記下來的金額與 CSV 的列不同：帳本會比 CSV 少記下表最後一欄的金額。`confirm` 與 `verify` 把這個差額視為已說明的差異。")
+	fmt.Fprintln(w)
+	var rows [][]string
+	for _, d := range v.plan.Differences {
+		var why []string
+		for _, r := range d.Reasons {
+			why = append(why, differenceText[r])
+		}
+		label := v.rowLabel(d.Rows[0])
+		rows = append(rows, append(label, strings.Join(why, "；"), v.effectsText(d.Effects)))
+	}
+	table(w, append(slices.Clone(rowHeaders), "原因", "帳本少記的金額"), rows)
 }
 
 // renderCaveats lists the rows that are recorded and need a word: the 收款 that are
@@ -305,41 +364,18 @@ func (v planView) renderCaveats(w *strings.Builder) {
 		fmt.Fprintf(w, "### %s（%d 列）\n\n%s\n\n", caveatText[k].Title, counts[k], caveatText[k].Note)
 		var rows [][]string
 		for _, c := range by[k] {
-			rows = append(rows, append(v.rowLabel(c.Row), v.effectOf(c.Row), c.Detail))
+			rows = append(rows, append(v.rowLabel(c.Row), v.effectOf(c.Row), caveatDetail(c.Kind, c.Args)))
 		}
-		table(w, append(rowHeaders, "對餘額的影響", "說明"), rows)
+		table(w, append(slices.Clone(rowHeaders), "對餘額的影響", "說明"), rows)
 	}
 }
 
-// renderProjects proposes what the values of the 專案 column are, with what is in the
-// rows that have them, for the ones the user has not decided: every one that was
-// guessed.
+// renderProjects says what every value of the 專案 column is in the mapping, with what
+// is in the rows that have it. For a project it also gives the period its rows suggest,
+// for information: the import never sets the active period of a project.
 func (v planView) renderProjects(w *strings.Builder) {
-	g := v.plan.Guessed.Projects
-	if len(g) == 0 {
+	if len(v.plan.Projects) == 0 {
 		return
-	}
-	type tally struct {
-		rows        int
-		first, last time.Time
-	}
-	tallies := map[string]*tally{}
-	for _, r := range v.plan.Rows {
-		if r.Project == "" || !r.HasDate() {
-			continue
-		}
-		t := tallies[r.Project]
-		if t == nil {
-			t = &tally{first: r.Date, last: r.Date}
-			tallies[r.Project] = t
-		}
-		t.rows++
-		if r.Date.Before(t.first) {
-			t.first = r.Date
-		}
-		if r.Date.After(t.last) {
-			t.last = r.Date
-		}
 	}
 	empty := 0
 	for _, r := range v.plan.Rows {
@@ -348,44 +384,39 @@ func (v planView) renderProjects(w *strings.Builder) {
 		}
 	}
 
-	fmt.Fprintln(w, "## 專案值的建議")
+	fmt.Fprintln(w, "## 專案值")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "專案欄的每個值要對到領域、專案、標籤、往來的對象，或什麼都不是。下面是依名稱與列的日期猜的建議（已寫進對照檔，標了 `# guessed`）：")
+	fmt.Fprintln(w, "專案欄的每個值對到領域、專案、標籤、往來的對象，或什麼都不是；下表是對照檔現在怎麼對（含猜測的）。")
 	fmt.Fprintln(w)
-	var rows [][]string
-	values := make([]string, 0, len(g))
-	for value := range g {
-		values = append(values, value)
-	}
-	sort.Strings(values)
+	fmt.Fprintln(w, "專案的進行期間只是依列的日期看出來的參考：匯入從不設定專案的進行期間。帳本會把日期落在進行期間、又沒有專案的交易自動歸入該專案，猜出來的期間會把不屬於旅行的交易也歸進去；要設定，到帳本裡設，再依需要重新匯入。")
+	fmt.Fprintln(w)
 	kindName := map[string]string{
 		model.ProjectArea: "領域", model.ProjectProject: "專案", model.ProjectTag: "標籤",
 		model.ProjectDealings: "往來（代付）", model.ProjectNone: "不歸類",
 	}
-	for _, value := range values {
-		p := g[value]
-		t := tallies[value]
-		rowCount, span := 0, ""
-		if t != nil {
-			rowCount = t.rows
-			span = t.first.Format(time.DateOnly) + " ～ " + t.last.Format(time.DateOnly)
+	var rows [][]string
+	for _, e := range v.plan.Projects {
+		p := v.plan.Mapping.Projects[e.Value]
+		span := ""
+		if e.Rows > 0 {
+			span = e.First.Format(time.DateOnly) + " ～ " + e.Last.Format(time.DateOnly)
 		}
 		extra := p.Name
-		switch {
-		case p.Kind == model.ProjectDealings:
+		switch p.Kind {
+		case model.ProjectDealings:
 			extra = "對象 " + p.Party
-		case p.Kind == model.ProjectProject && !p.ActiveFrom.IsZero():
-			extra += "；進行期間 " + p.ActiveFrom.Format(time.DateOnly) + " ～ " + p.ActiveTo.Format(time.DateOnly)
-		case p.Kind == model.ProjectProject && p.DefaultArea != "":
-			extra += "；預設領域 " + p.DefaultArea
+		case model.ProjectProject:
+			if p.DefaultArea != "" {
+				extra += "；預設領域 " + p.DefaultArea
+			}
+			if !e.From.IsZero() {
+				extra += "；列的日期看起來是 " + e.From.Format(time.DateOnly) + " ～ " + e.To.Format(time.DateOnly) + "（僅供參考，匯入不設定）"
+			}
 		}
-		if p.Kind == model.ProjectProject && p.DefaultArea != "" && !p.ActiveFrom.IsZero() {
-			extra += "；預設領域 " + p.DefaultArea
-		}
-		rows = append(rows, []string{value, fmt.Sprint(rowCount), span, kindName[p.Kind], extra})
+		rows = append(rows, []string{e.Value, fmt.Sprint(e.Rows), span, kindName[p.Kind], extra})
 	}
-	rows = append(rows, []string{"（空）", fmt.Sprint(empty), "", "不歸類", "沒有專案的列不帶領域；交易日期落在專案的進行期間時，帳本會自動歸入該專案"})
-	table(w, []string{"專案值", "列數", "日期範圍", "建議", "說明"}, rows)
+	rows = append(rows, []string{"（空）", fmt.Sprint(empty), "", "不歸類", "沒有專案的列不帶領域，也不帶專案"})
+	table(w, []string{"專案值", "列數", "日期範圍", "對照", "說明"}, rows)
 }
 
 // renderExpected writes what each account holds of each instrument at the end of each
@@ -397,7 +428,7 @@ func (v planView) renderExpected(w *strings.Builder) {
 	}
 	fmt.Fprintln(w, "## 每月底的預期餘額（只由 CSV 算出）")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "含餘額調整的金額，期初餘額從它的日期起算；確認該月之後，`confirm` 與 `verify` 拿帳本的餘額與這裡比對。")
+	fmt.Fprintln(w, "含 MOZE 的餘額調整，期初餘額從它的日期起算；確認該月之後，`confirm` 與 `verify` 拿帳本的餘額與這裡比對。")
 	fmt.Fprintln(w)
 	for _, month := range months {
 		end, err := model.MonthEnd(month)

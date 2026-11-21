@@ -11,37 +11,42 @@ import (
 
 // occurredAt is the moment of a unit: its day and its time of day, in the timezone
 // of the application. A unit with no time of day has none.
-func (a *Importer) occurredAt(u model.Unit) *time.Time {
-	if u.Clock == "" {
+func (a *Importer) occurredAt(day time.Time, clock string) *time.Time {
+	if clock == "" {
 		return nil
 	}
-	clock, err := time.Parse("15:04", u.Clock)
+	parsed, err := time.Parse("15:04", clock)
 	if err != nil {
 		return nil
 	}
-	at := time.Date(u.Date.Year(), u.Date.Month(), u.Date.Day(), clock.Hour(), clock.Minute(), 0, 0, a.loc)
+	at := time.Date(day.Year(), day.Month(), day.Day(), parsed.Hour(), parsed.Minute(), 0, 0, a.loc)
 	return &at
 }
 
 // details are the facts every transaction of a unit has: its key, its day, its text
 // and the project, area and tags it belongs to.
 func (a *Importer) details(r refs, u model.Unit, key, description string) finance.RecordDetails {
+	return a.detailsOf(r, key, u.Date, u.Clock, description, u.Merchant, u.Area, u.Project, u.Tags)
+}
+
+// detailsOf makes the details of a transaction from what the plan says of it.
+func (a *Importer) detailsOf(r refs, key string, day time.Time, clock, description, merchant, area, project string, tags []string) finance.RecordDetails {
 	d := finance.RecordDetails{
 		IdempotencyKey: key,
-		OccurredOn:     u.Date,
-		OccurredAt:     a.occurredAt(u),
+		OccurredOn:     day,
+		OccurredAt:     a.occurredAt(day, clock),
 		Description:    description,
-		Merchant:       u.Merchant,
+		Merchant:       merchant,
 	}
-	if u.Project != "" {
-		id := r.projects[u.Project]
+	if project != "" {
+		id := r.projects[project]
 		d.ProjectID = &id
 	}
-	if u.Area != "" {
-		id := r.areas[u.Area]
+	if area != "" {
+		id := r.areas[area]
 		d.AreaID = &id
 	}
-	for _, t := range u.Tags {
+	for _, t := range tags {
 		d.TagIDs = append(d.TagIDs, r.tags[t])
 	}
 	return d
@@ -68,6 +73,7 @@ func (r refs) fees(fees []model.Fee) []finance.Fee {
 			CategoryID:   r.expense[f.Category],
 			Amount:       f.Amount,
 			BaseAmount:   f.Base,
+			Memo:         f.Memo,
 		})
 	}
 	return out
@@ -96,7 +102,7 @@ func (a *Importer) record(ctx context.Context, r refs, u model.Unit) (recorded, 
 	switch u.Kind {
 	case model.KindExpense, model.KindExpenseReward:
 		out, err := a.ledger.RecordExpense.RecordExpense(ctx, finance.RecordExpenseInput{
-			RecordDetails: a.details(r, u, u.Key, u.Description),
+			RecordDetails: a.details(r, u, u.Key(), u.Description),
 			AccountID:     &acct,
 			InstrumentID:  inst,
 			Lines:         r.lines(false, u.Lines),
@@ -107,7 +113,7 @@ func (a *Importer) record(ctx context.Context, r refs, u model.Unit) (recorded, 
 		c.count(out.Duplicate)
 		if u.Reward != nil {
 			reward, err := a.ledger.RecordReward.RecordReward(ctx, finance.RecordRewardInput{
-				RecordDetails: a.details(r, u, u.Key+model.RewardKeySuffix, u.Reward.Description),
+				RecordDetails: a.details(r, u, u.Key()+model.RewardKeySuffix, u.Reward.Description),
 				AccountID:     acct,
 				InstrumentID:  inst,
 				Amount:        u.Reward.Amount,
@@ -120,7 +126,7 @@ func (a *Importer) record(ctx context.Context, r refs, u model.Unit) (recorded, 
 		}
 	case model.KindIncome:
 		out, err := a.ledger.RecordIncome.RecordIncome(ctx, finance.RecordIncomeInput{
-			RecordDetails: a.details(r, u, u.Key, u.Description),
+			RecordDetails: a.details(r, u, u.Key(), u.Description),
 			AccountID:     acct,
 			InstrumentID:  inst,
 			Lines:         r.lines(true, u.Lines),
@@ -132,7 +138,7 @@ func (a *Importer) record(ctx context.Context, r refs, u model.Unit) (recorded, 
 		c.count(out.Duplicate)
 	case model.KindReward:
 		out, err := a.ledger.RecordReward.RecordReward(ctx, finance.RecordRewardInput{
-			RecordDetails: a.details(r, u, u.Key, u.Description),
+			RecordDetails: a.details(r, u, u.Key(), u.Description),
 			AccountID:     acct,
 			InstrumentID:  inst,
 			Amount:        u.Main.Amount,
@@ -145,7 +151,7 @@ func (a *Importer) record(ctx context.Context, r refs, u model.Unit) (recorded, 
 		c.count(out.Duplicate)
 	case model.KindDealing:
 		out, err := a.ledger.RecordDealing.RecordDealing(ctx, finance.RecordDealingInput{
-			RecordDetails: a.details(r, u, u.Key, u.Description),
+			RecordDetails: a.details(r, u, u.Key(), u.Description),
 			AccountID:     acct,
 			PartyID:       r.parties[u.Party],
 			InstrumentID:  inst,
@@ -159,7 +165,7 @@ func (a *Importer) record(ctx context.Context, r refs, u model.Unit) (recorded, 
 		c.count(out.Duplicate)
 	case model.KindTransfer:
 		out, err := a.ledger.RecordTransfer.RecordTransfer(ctx, finance.RecordTransferInput{
-			RecordDetails: a.details(r, u, u.Key, u.Description),
+			RecordDetails: a.details(r, u, u.Key(), u.Description),
 			FromAccountID: acct,
 			ToAccountID:   r.accounts[u.Other.Account],
 			InstrumentID:  inst,
@@ -172,7 +178,7 @@ func (a *Importer) record(ctx context.Context, r refs, u model.Unit) (recorded, 
 		c.count(out.Duplicate)
 	case model.KindExchange:
 		out, err := a.ledger.RecordExchange.RecordExchange(ctx, finance.RecordExchangeInput{
-			RecordDetails:    a.details(r, u, u.Key, u.Description),
+			RecordDetails:    a.details(r, u, u.Key(), u.Description),
 			FromAccountID:    acct,
 			ToAccountID:      r.accounts[u.Other.Account],
 			FromInstrumentID: inst,
@@ -187,7 +193,7 @@ func (a *Importer) record(ctx context.Context, r refs, u model.Unit) (recorded, 
 		c.count(out.Duplicate)
 	case model.KindTrade:
 		out, err := a.ledger.RecordTrade.RecordTrade(ctx, finance.RecordTradeInput{
-			RecordDetails: a.details(r, u, u.Key, u.Description),
+			RecordDetails: a.details(r, u, u.Key(), u.Description),
 			Direction:     u.Direction,
 			AccountID:     acct,
 			InstrumentID:  inst,
@@ -203,7 +209,7 @@ func (a *Importer) record(ctx context.Context, r refs, u model.Unit) (recorded, 
 		c.count(out.Duplicate)
 	case model.KindOpening:
 		out, err := a.ledger.SetOpeningBalance.SetOpeningBalance(ctx, finance.SetOpeningBalanceInput{
-			RecordDetails: a.details(r, u, u.Key, u.Description),
+			RecordDetails: a.details(r, u, u.Key(), u.Description),
 			AccountID:     acct,
 			InstrumentID:  inst,
 			Amount:        u.Main.Amount,
@@ -222,11 +228,12 @@ func (a *Importer) record(ctx context.Context, r refs, u model.Unit) (recorded, 
 			schedule.InterestCategoryID = &id
 		}
 		out, err := a.ledger.RecordBillInstalment.RecordBillInstalment(ctx, finance.RecordBillInstalmentInput{
-			RecordDetails: a.details(r, u, u.Key, u.Description),
+			RecordDetails: a.details(r, u, u.Key(), u.Description),
 			AccountID:     acct,
 			InstrumentID:  inst,
 			Principal:     u.Main.Amount,
 			Schedule:      schedule,
+			Fees:          r.fees(u.Fees),
 		})
 		if err != nil {
 			return c, err

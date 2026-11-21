@@ -20,7 +20,6 @@ const (
 	pendingIncomeTag     = "待確認"
 	creditCardOffsetSub  = "信用卡抵扣"
 	companyCollectSuffix = "代收款"
-	paidForSuffix        = "代付"
 	exchangeSub          = "兌換"
 	investmentSub        = "投資"
 	genericIncomeMain    = "收入"
@@ -71,15 +70,10 @@ var kindWords = []struct {
 // at a word that says what the account is, or of what it holds.
 var institutionStop = regexp.MustCompile(`信用卡|銀行|證卷|證券|證劵|活期|帳戶|美金|日幣|外幣|主帳戶|卡$|\s`)
 
-// GuessAccount guesses what an account of MOZE is from its name: the kind from what
-// the name says it is, the institution from what comes before that.
-func GuessAccount(name string) model.AccountMap {
-	return GuessAccountHolding(name, nil)
-}
-
-// GuessAccountHolding is GuessAccount for an account that holds the currencies: a
-// name that says nothing of what the account is, and holds only cryptocurrencies, is
-// an exchange.
+// GuessAccountHolding guesses what an account of MOZE is from its name and from the
+// currencies it holds: the kind from what the name says it is, and the institution
+// from what comes before that. A name that says nothing of what the account is, on an
+// account that holds only cryptocurrencies, is an exchange.
 func GuessAccountHolding(name string, currencies []string) model.AccountMap {
 	kind, named := "bank", false
 	for _, k := range kindWords {
@@ -188,9 +182,11 @@ func CleanName(value string) string {
 	return name
 }
 
-// guessProject guesses what a value of the 專案 column is, from its name and the
-// days of the rows that carry it.
-func guessProject(value string, days []time.Time) model.ProjectMap {
+// guessProject guesses what a value of the 專案 column is, from its name. It never
+// gives a project an active period, however clear the days of its rows are: the
+// ledger puts every transaction that has no project of its own into the project that
+// is active on its day, which would pull in transactions that are no part of it.
+func guessProject(value string) model.ProjectMap {
 	name := CleanName(value)
 	if m := dealingProject.FindStringSubmatch(value); m != nil {
 		return model.ProjectMap{Kind: model.ProjectDealings, Party: strings.TrimSpace(CleanName(m[1]))}
@@ -200,9 +196,7 @@ func guessProject(value string, days []time.Time) model.ProjectMap {
 	}
 	startsWithDate := datePrefix.FindString(value) != "" && datePrefix.FindString(value) != value
 	if startsWithDate || tripWords.MatchString(value) || projectSuffix.MatchString(value) {
-		p := model.ProjectMap{Kind: model.ProjectProject, Name: name}
-		p.ActiveFrom, p.ActiveTo = evidentPeriod(days)
-		return p
+		return model.ProjectMap{Kind: model.ProjectProject, Name: name}
 	}
 	return model.ProjectMap{Kind: model.ProjectArea, Name: name}
 }
@@ -262,6 +256,35 @@ func evidentPeriod(days []time.Time) (from, to time.Time) {
 	return bestFrom, bestTo
 }
 
+// projectEvidence says, for every value of 專案 that the rows have, whatever the
+// mapping makes of it, how many rows with a day carry it, the first and the last of
+// those days, and the period they would suggest. It is for the report alone.
+func projectEvidence(rows []model.Row) []model.ProjectEvidence {
+	days := map[string][]time.Time{}
+	for _, r := range rows {
+		if r.Project == "" {
+			continue
+		}
+		list := days[r.Project] // nothing yet for a value that only rows with no day have
+		if r.HasDate() {
+			list = append(list, r.Date)
+		}
+		days[r.Project] = list
+	}
+	var evidence []model.ProjectEvidence
+	for _, value := range sortedStringKeys(days) {
+		list := days[value]
+		e := model.ProjectEvidence{Value: value, Rows: len(list)}
+		if len(list) > 0 {
+			e.First = slices.MinFunc(list, time.Time.Compare)
+			e.Last = slices.MaxFunc(list, time.Time.Compare)
+			e.From, e.To = evidentPeriod(list)
+		}
+		evidence = append(evidence, e)
+	}
+	return evidence
+}
+
 // expensePath guesses the category of the ledger of an expense of MOZE: the two
 // levels it has, or one when the two are the same word.
 func expensePath(main, sub string) string {
@@ -300,151 +323,194 @@ func guessIncome(main, sub string) model.CategoryMap {
 // complete returns the mapping the plan is made with, which is the user's with the
 // guess for each thing in the rows that it has no entry for, and the guesses alone.
 func complete(rows []model.Row, user model.Mapping) (effective, guessed model.Mapping) {
+	defaults, guessedDefaults := guessDefaults(rows, user)
 	guessed = model.Mapping{
-		Instruments: map[string]model.InstrumentMap{},
-		Accounts:    map[string]model.AccountMap{},
-		Projects:    map[string]model.ProjectMap{},
-		Expense:     map[string]model.CategoryMap{},
-		Income:      map[string]model.CategoryMap{},
-		Parties:     map[string]string{},
-		Tags:        map[string]string{},
+		Instruments: guessInstruments(rows, user),
+		Accounts:    guessAccounts(rows, user),
+		Projects:    guessProjects(rows, user),
+		Parties:     guessParties(rows, user),
+		Tags:        guessTags(rows, user),
+		Defaults:    guessedDefaults,
 		Rows:        map[string]model.RowOverride{},
 	}
+	guessed.Expense, guessed.Income = guessCategories(rows, user)
+	effective = user.Merge(guessed)
+	effective.Defaults = defaults
+	return effective, guessed
+}
 
-	held := map[string][]string{}
-	projectDays := map[string][]time.Time{}
-	interestPath := ""
+// guessInstruments guesses the instruments of the rows that the mapping has no entry
+// for. The base currency has none to guess.
+func guessInstruments(rows []model.Row, user model.Mapping) map[string]model.InstrumentMap {
+	guessed := map[string]model.InstrumentMap{}
 	for _, r := range rows {
-		if r.Currency != model.BaseCurrencyCode {
-			if _, ok := user.Instruments[r.Currency]; !ok {
-				guessed.Instruments[r.Currency] = GuessInstrument(r.Currency)
-			}
+		if _, ok := user.Instruments[r.Currency]; !ok && r.Currency != model.BaseCurrencyCode {
+			guessed[r.Currency] = GuessInstrument(r.Currency)
 		}
+	}
+	return guessed
+}
+
+// guessAccounts guesses the accounts of the rows that the mapping has no entry for:
+// by their names and by what they hold, with the institution that accounts of alike
+// names share; as the user's, when the ledger account they are is one the user made;
+// and as one, when they are the accounts of the rows of one instalment plan.
+func guessAccounts(rows []model.Row, user model.Mapping) map[string]model.AccountMap {
+	held := map[string][]string{}
+	for _, r := range rows {
 		if _, ok := user.Accounts[r.Account]; !ok {
 			held[r.Account] = append(held[r.Account], r.Currency)
 		}
-		if r.Project != "" {
-			if r.HasDate() {
-				projectDays[r.Project] = append(projectDays[r.Project], r.Date)
-			} else if _, seen := projectDays[r.Project]; !seen {
-				projectDays[r.Project] = nil
-			}
-		}
-		switch r.Type {
-		case model.TypeExpense:
-			key := model.CategoryKey(r.Main, r.Sub)
-			if _, ok := user.Expense[key]; !ok {
-				guessed.Expense[key] = model.CategoryMap{Category: expensePath(r.Main, r.Sub)}
-			}
-		case model.TypeIncome:
-			key := model.CategoryKey(r.Main, r.Sub)
-			if _, ok := user.Income[key]; !ok {
-				guessed.Income[key] = guessIncome(r.Main, r.Sub)
-			}
-		case model.TypeInterest:
-			if interestPath == "" {
-				interestPath = expensePath(r.Main, r.Sub)
-			}
-		}
-		if r.Party != "" {
-			if _, ok := user.Parties[r.Party]; !ok {
-				guessed.Parties[r.Party] = r.Party
-			}
-		}
-		for _, t := range r.Tags {
-			if _, ok := user.Tags[t]; !ok {
-				guessed.Tags[t] = t
-			}
-		}
 	}
-	for value, days := range projectDays {
-		if _, ok := user.Projects[value]; !ok {
-			guessed.Projects[value] = guessProject(value, days)
-		}
-	}
-
+	guessed := make(map[string]model.AccountMap, len(held))
 	for name, currencies := range held {
-		guessed.Accounts[name] = GuessAccountHolding(name, currencies)
+		guessed[name] = GuessAccountHolding(name, currencies)
 	}
-	shareInstitutions(guessed.Accounts)
-	// An account of MOZE that the guess puts in an account of the ledger that the user
-	// has made already is that account, and takes what the user said of it.
-	userNames := make([]string, 0, len(user.Accounts))
-	for n := range user.Accounts {
-		userNames = append(userNames, n)
-	}
-	slices.Sort(userNames)
-	own := map[string]model.AccountMap{}
-	for _, n := range userNames {
-		if _, seen := own[user.Accounts[n].Name]; !seen {
-			own[user.Accounts[n].Name] = user.Accounts[n]
-		}
-	}
-	for name, g := range guessed.Accounts {
-		if mine, ok := own[g.Name]; ok {
-			guessed.Accounts[name] = mine
-		}
-	}
+	shareInstitutions(guessed)
+	takeWhatTheUserSaid(guessed, user.Accounts)
+	alignInstalments(guessed, user.Accounts, rows)
+	return guessed
+}
 
-	// A conversion of a bill into instalments is one plan of one account in the ledger:
-	// where its rows are in accounts of MOZE that the user has not mapped yet, the
-	// guess puts them in the account the bill was converted in.
+// takeWhatTheUserSaid makes an account of MOZE that the guess puts in an account of the
+// ledger that the user has made already that account, with what the user said of it.
+func takeWhatTheUserSaid(guessed, user map[string]model.AccountMap) {
+	own := map[string]model.AccountMap{}
+	for _, n := range sortedStringKeys(user) {
+		if _, seen := own[user[n].Name]; !seen {
+			own[user[n].Name] = user[n]
+		}
+	}
+	for name, g := range guessed {
+		if mine, ok := own[g.Name]; ok {
+			guessed[name] = mine
+		}
+	}
+}
+
+// alignInstalments puts the rows of a conversion of a bill into instalments in one
+// account of the ledger, as the plan is of one: where they are in accounts of MOZE
+// that the user has not mapped yet, the guess is the account the bill was converted
+// in.
+func alignInstalments(guessed, user map[string]model.AccountMap, rows []model.Row) {
 	groups, _ := findInstalments(rows)
 	for _, g := range groups {
 		main := g.mainAccount()
-		entry, ok := user.Accounts[main]
+		entry, ok := user[main]
 		if !ok {
-			entry, ok = guessed.Accounts[main]
+			entry, ok = guessed[main]
 		}
 		if !ok {
 			continue
 		}
 		for _, r := range g.rows() {
-			if _, own := user.Accounts[r.Account]; !own && r.Account != main {
-				guessed.Accounts[r.Account] = entry
+			if _, own := user[r.Account]; !own && r.Account != main {
+				guessed[r.Account] = entry
 			}
 		}
 	}
+}
 
-	// A project goes to the default area of its own kind of thing, when the mapping
-	// has the area.
+// guessProjects guesses the values of 專案 that the mapping has no entry for, and
+// for the projects among them the default area of their own kind of thing, when the
+// mapping has the area.
+func guessProjects(rows []model.Row, user model.Mapping) map[string]model.ProjectMap {
+	guessed := map[string]model.ProjectMap{}
+	for _, r := range rows {
+		if _, known := user.Projects[r.Project]; r.Project == "" || known {
+			continue
+		}
+		if _, done := guessed[r.Project]; !done {
+			guessed[r.Project] = guessProject(r.Project)
+		}
+	}
 	areas := map[string]bool{}
-	for _, p := range user.Projects {
-		if p.Kind == model.ProjectArea {
-			areas[p.Name] = true
+	for _, projects := range []map[string]model.ProjectMap{user.Projects, guessed} {
+		for _, p := range projects {
+			if p.Kind == model.ProjectArea {
+				areas[p.Name] = true
+			}
 		}
 	}
-	for _, p := range guessed.Projects {
-		if p.Kind == model.ProjectArea {
-			areas[p.Name] = true
-		}
-	}
-	for value, p := range guessed.Projects {
+	for value, p := range guessed {
 		if p.Kind == model.ProjectProject && p.DefaultArea == "" {
 			p.DefaultArea = guessDefaultArea(p, areas)
-			guessed.Projects[value] = p
+			guessed[value] = p
 		}
 	}
+	return guessed
+}
 
-	defaults := user.Defaults
+// guessCategories guesses the categories of the expenses and of the incomes of the rows
+// that the mapping has no entry for.
+func guessCategories(rows []model.Row, user model.Mapping) (expense, income map[string]model.CategoryMap) {
+	expense, income = map[string]model.CategoryMap{}, map[string]model.CategoryMap{}
+	for _, r := range rows {
+		key := model.CategoryKey(r.Main, r.Sub)
+		switch r.Type {
+		case model.TypeExpense:
+			if _, ok := user.Expense[key]; !ok {
+				expense[key] = model.CategoryMap{Category: expensePath(r.Main, r.Sub)}
+			}
+		case model.TypeIncome:
+			if _, ok := user.Income[key]; !ok {
+				income[key] = guessIncome(r.Main, r.Sub)
+			}
+		}
+	}
+	return expense, income
+}
+
+// guessParties guesses that the parties of the rows that the mapping has no entry for
+// are called in the ledger what MOZE calls them.
+func guessParties(rows []model.Row, user model.Mapping) map[string]string {
+	guessed := map[string]string{}
+	for _, r := range rows {
+		if _, ok := user.Parties[r.Party]; r.Party != "" && !ok {
+			guessed[r.Party] = r.Party
+		}
+	}
+	return guessed
+}
+
+// guessTags guesses that the tags of the rows that the mapping has no entry for are
+// called in the ledger what MOZE calls them.
+func guessTags(rows []model.Row, user model.Mapping) map[string]string {
+	guessed := map[string]string{}
+	for _, r := range rows {
+		for _, t := range r.Tags {
+			if _, ok := user.Tags[t]; !ok {
+				guessed[t] = t
+			}
+		}
+	}
+	return guessed
+}
+
+// guessDefaults gives the categories of what has none of its own: the user's, and for
+// each that the user has not set, a guess, which is also returned alone. The guess for
+// interest is the category of the first interest the rows have.
+func guessDefaults(rows []model.Row, user model.Mapping) (defaults, guessed model.Defaults) {
+	defaults = user.Defaults
 	if defaults.FeeCategory == "" {
 		defaults.FeeCategory = "手續費"
-		guessed.Defaults.FeeCategory = defaults.FeeCategory
+		guessed.FeeCategory = defaults.FeeCategory
 	}
 	if defaults.InterestCategory == "" {
 		defaults.InterestCategory = "利息"
-		if interestPath != "" {
-			defaults.InterestCategory = interestPath
+		for _, r := range rows {
+			if path := expensePath(r.Main, r.Sub); r.Type == model.TypeInterest && path != "" {
+				defaults.InterestCategory = path
+				break
+			}
 		}
-		guessed.Defaults.InterestCategory = defaults.InterestCategory
+		guessed.InterestCategory = defaults.InterestCategory
 	}
 	if defaults.RefundCategory == "" {
 		defaults.RefundCategory = "退款"
-		guessed.Defaults.RefundCategory = defaults.RefundCategory
+		guessed.RefundCategory = defaults.RefundCategory
 	}
-	effective = user.Merge(guessed)
-	effective.Defaults = defaults
-	return effective, guessed
+	return defaults, guessed
 }
 
 // quantityDecimals tells whether a quantity has no more decimal places than allowed.

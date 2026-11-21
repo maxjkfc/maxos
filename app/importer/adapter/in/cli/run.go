@@ -38,19 +38,41 @@ func applyText(w *strings.Builder, out usecase.ApplyOutput) {
 		fmt.Fprintf(w, "參考資料：新增 %s\n", strings.Join(made, "、"))
 	}
 
-	newTotal, dupTotal := sum(out.New), sum(out.Duplicate)
-	fmt.Fprintf(w, "草稿：新增 %d 筆，已存在 %d 筆，失敗 %d 筆\n", newTotal, dupTotal, len(out.Failed))
+	newTotal, updatedTotal, dupTotal := sum(out.New), sum(out.Updated), sum(out.Duplicate)
+	fmt.Fprintf(w, "草稿：新增 %d 筆，已更新 %d 筆，已存在 %d 筆，失敗 %d 筆\n", newTotal, updatedTotal, dupTotal, len(out.Failed))
 	if newTotal > 0 {
 		fmt.Fprintf(w, "  新增的：%s\n", kinds(out.New))
 	}
-	fmt.Fprintf(w, "餘額調整 %d 筆留到確認該月時處理；不需記錄 %d 筆；無法記錄的列 %d 筆（見 plan 的報告）\n",
+	if updatedTotal > 0 {
+		fmt.Fprintf(w, "  已更新的（對照改了，原來的草稿已捨棄、依新的對照重記）：%s\n", kinds(out.Updated))
+	}
+	if len(out.Stale) > 0 {
+		fmt.Fprintf(w, "已確認的內容與對照不同 %d 筆；不會動它們，也不會在旁邊再記一筆：\n", len(out.Stale))
+		for _, s := range out.Stale {
+			writeStale(w, s)
+		}
+		fmt.Fprintln(w, "  把它們作廢之後再執行一次 apply，會依現在的對照重記成草稿。")
+	}
+	for _, d := range out.ProjectDifferences {
+		fmt.Fprintf(w, "注意：專案「%s」在帳本的預設領域是「%s」，對照檔寫的是「%s」；匯入沿用帳本的，沒有改\n",
+			d.Project, orNone(d.Ledger), orNone(d.Mapping))
+	}
+	fmt.Fprintf(w, "MOZE 的餘額調整 %d 筆留到確認該月時對帳；不需記錄 %d 筆；無法記錄的列 %d 筆（見 plan 的報告）\n",
 		out.Adjustments, out.NoOps, out.Skipped)
-	if out.Guessed > 0 {
-		fmt.Fprintf(w, "注意：對照檔裡仍有 %d 個 # guessed 的項目，確認過就把標記拿掉\n", out.Guessed)
-	}
 	for _, f := range out.Failed {
-		fmt.Fprintf(w, "失敗：%s %s（檔案第 %s 行）：%v\n", kindText[f.Unit.Kind], f.Unit.Date.Format(time.DateOnly), lineList(f.Lines), f.Err)
+		fmt.Fprintf(w, "失敗：%s %s（檔案第 %s 行），帳本的回覆：%v\n", kindText[f.Unit.Kind], f.Unit.Date.Format(time.DateOnly), lineList(f.Lines), f.Err)
 	}
+}
+
+func writeStale(w *strings.Builder, s usecase.StaleUnit) {
+	fmt.Fprintf(w, "  %s %s（檔案第 %s 行）%s\n", kindText[s.Unit.Kind], s.Unit.Date.Format(time.DateOnly), lineList(s.Lines), clip(s.Unit.Description, 24))
+}
+
+func orNone(area string) string {
+	if area == "" {
+		return "無"
+	}
+	return area
 }
 
 func sum(m map[model.UnitKind]int) int {
@@ -79,29 +101,20 @@ func lineList(lines []int) string {
 	return strings.Join(parts, "、")
 }
 
-// RenderBlocked says why a plan was refused.
-func RenderBlocked(w io.Writer, e *usecase.BlockedError) error {
-	var b strings.Builder
-	blockedText(&b, e)
-	return flush(w, &b)
-}
-
 func blockedText(w *strings.Builder, e *usecase.BlockedError) {
-	g := e.Plan.Guessed
-	fmt.Fprintln(w, "plan 還有要處理的項目，不能執行：")
-	for _, c := range []struct {
-		name string
-		n    int
-	}{
-		{"標的", len(g.Instruments)}, {"帳戶", len(g.Accounts)}, {"專案值", len(g.Projects)},
-		{"支出類別", len(g.Expense)}, {"收入類別", len(g.Income)}, {"對象", len(g.Parties)}, {"標籤", len(g.Tags)},
-	} {
-		if c.n > 0 {
-			fmt.Fprintf(w, "  對照檔缺少 %s %d 個\n", c.name, c.n)
-		}
+	fmt.Fprintln(w, "對照檔還有要處理的項目，不能繼續：")
+	if missing := e.Missing(); len(missing) > 0 {
+		fmt.Fprintf(w, "  對照檔缺少 %d 個項目：\n", len(missing))
+		writeMissing(w, missing, "    ")
 	}
-	for _, p := range e.Plan.Problems {
-		fmt.Fprintf(w, "  %s\n", p)
+	if e.Guessed > 0 {
+		fmt.Fprintf(w, "  對照檔裡還有 %d 個標了 # guessed 的項目：逐項看過、改好之後，把標記拿掉\n", e.Guessed)
+	}
+	if len(e.Plan.Problems) > 0 {
+		fmt.Fprintf(w, "  有問題的項目 %d 個：\n", len(e.Plan.Problems))
+		for _, p := range e.Plan.Problems {
+			fmt.Fprintf(w, "    %s\n", problemText(p))
+		}
 	}
 	fmt.Fprintln(w, "先執行 plan（它會把缺的項目寫進對照檔），確認對照檔後再來。")
 }
@@ -128,11 +141,11 @@ func confirmText(w *strings.Builder, out usecase.ConfirmOutput) {
 		}
 	}
 	if len(out.Adjustments) > 0 {
-		fmt.Fprintf(w, "餘額調整：套用 %d 筆、先前已完成 %d 筆、被擋下 %d 筆\n", applied, done, blocked)
+		fmt.Fprintf(w, "對帳（MOZE 的餘額調整）：套用 %d 筆、先前已完成 %d 筆、被擋下 %d 筆\n", applied, done, blocked)
 	}
 	for _, a := range out.Adjustments {
 		if a.State == usecase.AdjustmentBlocked {
-			fmt.Fprintf(w, "  擋下：%s %s %s %s：%v\n", a.Adjustment.Date.Format(time.DateOnly), a.Adjustment.Account, a.Adjustment.Instrument, a.Adjustment.Amount, a.Err)
+			fmt.Fprintf(w, "  擋下：%s %s %s %s，帳本的回覆：%v\n", a.Adjustment.Date.Format(time.DateOnly), a.Adjustment.Account, a.Adjustment.Instrument, a.Adjustment.Amount, a.Err)
 		}
 	}
 	if out.Orphans > 0 {
@@ -142,15 +155,9 @@ func confirmText(w *strings.Builder, out usecase.ConfirmOutput) {
 	checkText(w, out.Check, false)
 }
 
-// RenderCheck writes the balances of a month by the ledger and by the export. With
+// checkText writes the balances of a month by the ledger and by the export. With
 // onlyDifferences it writes the lines that differ alone.
-func RenderCheck(w io.Writer, c usecase.MonthCheck, onlyDifferences bool) error {
-	var b strings.Builder
-	checkText(&b, c, onlyDifferences)
-	return flush(w, &b)
-}
-
-func checkText(w *strings.Builder, c usecase.MonthCheck, onlyDifferences bool) {
+func checkText(w *strings.Builder, c model.MonthCheck, onlyDifferences bool) {
 	lines := c.Lines
 	if onlyDifferences {
 		lines = c.Differences()
@@ -171,7 +178,7 @@ func checkText(w *strings.Builder, c usecase.MonthCheck, onlyDifferences bool) {
 		note := ""
 		switch {
 		case l.Unexplained().IsZero() && !l.Difference().IsZero():
-			note = "已說明：有不匯入的列"
+			note = "已說明：有不匯入的部分"
 		case !l.Unexplained().IsZero():
 			note = "無法解釋"
 		}
@@ -180,7 +187,7 @@ func checkText(w *strings.Builder, c usecase.MonthCheck, onlyDifferences bool) {
 			signed(l.Difference(), d), signed(l.Unrecorded, d), note,
 		}
 	}
-	table(w, []string{"帳戶", "標的", "帳本", "CSV 預期", "差額", "不匯入的列", "說明"}, rows)
+	table(w, []string{"帳戶", "標的", "帳本", "CSV 預期", "差額", "不匯入的部分", "說明"}, rows)
 }
 
 // RenderVerify says, for every month that is confirmed, whether the ledger holds what
@@ -197,25 +204,31 @@ func verifyText(w *strings.Builder, out usecase.VerifyOutput) {
 		if out.Open != "" {
 			fmt.Fprintf(w, "最早還沒確認完的月份：%s\n", out.Open)
 		}
-		return
-	}
-	fmt.Fprintf(w, "已確認的月份 %d 個（%s 至 %s）\n", len(out.Months), out.Months[0].Month, out.Months[len(out.Months)-1].Month)
-	if out.Open != "" {
-		fmt.Fprintf(w, "下一個還沒確認完的月份：%s\n", out.Open)
-	}
-	fmt.Fprintln(w)
-	for _, m := range out.Months {
-		if len(m.Differences()) == 0 {
-			fmt.Fprintf(w, "%s：全部吻合（%d 個帳戶與標的）\n", m.Month, len(m.Lines))
-			continue
-		}
-		checkText(w, m, true)
-	}
-	fmt.Fprintln(w)
-	if out.Unexplained == 0 {
-		fmt.Fprintln(w, "沒有無法解釋的差異")
 	} else {
-		fmt.Fprintf(w, "無法解釋的差異共 %d 項\n", out.Unexplained)
+		fmt.Fprintf(w, "已確認的月份 %d 個（%s 至 %s）\n", len(out.Months), out.Months[0].Month, out.Months[len(out.Months)-1].Month)
+		if out.Open != "" {
+			fmt.Fprintf(w, "下一個還沒確認完的月份：%s\n", out.Open)
+		}
+		fmt.Fprintln(w)
+		for _, m := range out.Months {
+			if len(m.Differences()) == 0 {
+				fmt.Fprintf(w, "%s：全部吻合（%d 個帳戶與標的）\n", m.Month, len(m.Lines))
+				continue
+			}
+			checkText(w, m, true)
+		}
+		fmt.Fprintln(w)
+		if out.Unexplained == 0 {
+			fmt.Fprintln(w, "沒有無法解釋的差異")
+		} else {
+			fmt.Fprintf(w, "無法解釋的差異共 %d 項\n", out.Unexplained)
+		}
+	}
+	if len(out.Stale) > 0 {
+		fmt.Fprintf(w, "已確認的內容與對照不同 %d 筆（作廢它們，再執行 apply 依現在的對照重記）：\n", len(out.Stale))
+		for _, s := range out.Stale {
+			writeStale(w, s)
+		}
 	}
 }
 
@@ -226,31 +239,54 @@ func RenderStatus(w io.Writer, out usecase.StatusOutput) error {
 	for _, m := range out.Months {
 		rows = append(rows, []string{
 			m.Month, fmt.Sprint(m.Drafts), fmt.Sprint(m.Confirmed), fmt.Sprint(m.Skipped),
-			fmt.Sprint(m.AdjustmentsPending), fmt.Sprint(m.NotApplied), fmt.Sprint(m.Voided),
+			fmt.Sprint(m.AdjustmentsPending), fmt.Sprint(m.NotApplied), fmt.Sprint(m.Voided), fmt.Sprint(m.Stale),
 		})
 	}
-	table(&b, []string{"月份", "草稿", "已確認", "略過", "待套用的餘額調整", "尚未匯入", "已作廢"}, rows)
+	table(&b, []string{"月份", "草稿", "已確認", "略過", "待對帳", "尚未匯入", "已作廢", "已確認但與對照不同"}, rows)
 	if out.Orphans > 0 {
 		fmt.Fprintf(&b, "有 %d 筆匯入的草稿不在檔案裡了\n", out.Orphans)
 	}
 	return flush(w, &b)
 }
 
-// Problem says, in plain terms, what the use cases refuse with when it is something
-// the user can put right: a plan that has something to map, and a month that comes
-// after one that is not confirmed. It returns whether it said anything.
-func Problem(w io.Writer, err error) (bool, error) {
+// Refusal says, in plain terms, what the use cases refuse with when it is something the
+// user can put right: a mapping that is not ready, a month that comes after one that is
+// not confirmed, a confirmed transaction that is not what the plan says. It returns the
+// error for the command to fail with, in words the user reads, or the error as it is for
+// anything else (the ledger's own errors are English, as everything of the ledger is).
+func Refusal(w io.Writer, err error) error {
 	var blocked *usecase.BlockedError
 	var order *usecase.MonthOrderError
+	var stale *usecase.StaleError
 	var b strings.Builder
+	var out error
 	switch {
 	case errors.As(err, &blocked):
 		blockedText(&b, blocked)
+		out = errors.New("對照檔還有要處理的項目，什麼都沒有寫入")
+		if len(blocked.Missing()) == 0 && len(blocked.Plan.Problems) == 0 {
+			out = fmt.Errorf("對照檔裡還有 %d 個標了 # guessed 的項目，看過、改好之後把標記拿掉，再執行 apply", blocked.Guessed)
+		}
 	case errors.As(err, &order):
-		fmt.Fprintf(&b, "不能確認 %s：%s 還有 %d 筆草稿、%d 筆尚未匯入的列、%d 筆餘額調整沒處理完。請先確認 %s。\n",
+		fmt.Fprintf(&b, "不能確認 %s：%s 還有 %d 筆草稿、%d 筆尚未匯入的列、%d 筆對帳沒處理完。請先確認 %s。\n",
 			order.Month, order.Open, order.Drafts, order.NotApplied, order.Adjustments, order.Open)
+		out = fmt.Errorf("%s 之前的月份還沒確認完，什麼都沒有確認", order.Month)
+	case errors.As(err, &stale):
+		fmt.Fprintf(&b, "不能確認 %s：已確認的內容與對照不同 %d 筆：\n", stale.Month, len(stale.Units))
+		for _, s := range stale.Units {
+			writeStale(&b, s)
+		}
+		fmt.Fprintln(&b, "把它們作廢，執行 apply 依現在的對照重記，再確認。")
+		out = fmt.Errorf("有 %d 筆已確認的交易與對照不同，什麼都沒有確認", len(stale.Units))
+	case errors.Is(err, usecase.ErrUnknownMonth):
+		return errors.New("匯出裡沒有這個月份的資料")
+	case errors.Is(err, usecase.ErrNotApplied):
+		return errors.New("這個月有列還沒有 apply 進帳本，請先執行 apply")
 	default:
-		return false, nil
+		return err
 	}
-	return true, flush(w, &b)
+	if werr := flush(w, &b); werr != nil {
+		return werr
+	}
+	return out
 }

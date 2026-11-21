@@ -28,8 +28,9 @@ var _ mapping.Store = (*MappingYAML)(nil)
 // is not one of them is an error, and so is a key that is there twice:
 //
 //	instruments:  # by currency code: name, kind, is_currency, decimals, rate_as
-//	accounts:     # by MOZE account name: name, kind, institution, closing_day, payment_due_day
-//	projects:     # by value of 專案: kind, name, default_area, party, active_period {from, to}
+//	accounts:     # by MOZE account name: name, kind, institution, closing_day, payment_due_day,
+//	              # opening_date (a day, 2026-04-15)
+//	projects:     # by value of 專案: kind, name, default_area, party
 //	categories:   # expense and income, each by "主類別/子類別": a category path, or
 //	              # {category, treatment, party, tag}
 //	parties:      # MOZE name: ledger name
@@ -51,16 +52,18 @@ func NewMappingYAML() *MappingYAML { return &MappingYAML{} }
 // guessedMark is the comment that ends the line of an entry the import has guessed.
 const guessedMark = "# guessed"
 
-// The sections of the file, and the keys of what they hold.
+// The sections of the file, and the keys of what they hold. The sections that are the
+// model's, and the keys of its defaults, have the names the model gives them: they
+// are how an entry of the mapping is told from the others.
 const (
-	secInstruments = "instruments"
-	secAccounts    = "accounts"
-	secProjects    = "projects"
+	secInstruments = model.SectionInstruments
+	secAccounts    = model.SectionAccounts
+	secProjects    = model.SectionProjects
 	secCategories  = "categories"
-	secParties     = "parties"
-	secTags        = "tags"
-	secDefaults    = "defaults"
-	secRows        = "rows"
+	secParties     = model.SectionParties
+	secTags        = model.SectionTags
+	secDefaults    = model.SectionDefaults
+	secRows        = model.SectionRows
 
 	// The two sections of categories.
 	secExpense = "expense"
@@ -74,18 +77,16 @@ const (
 	keyInstitution      = "institution"
 	keyClosingDay       = "closing_day"
 	keyPaymentDueDay    = "payment_due_day"
+	keyOpeningDate      = "opening_date"
 	keyDefaultArea      = "default_area"
 	keyParty            = "party"
-	keyActivePeriod     = "active_period"
-	keyFrom             = "from"
-	keyTo               = "to"
 	keyCategory         = "category"
 	keyTreatment        = "treatment"
 	keyTag              = "tag"
 	keyQuantity         = "quantity"
-	keyFeeCategory      = "fee_category"
-	keyInterestCategory = "interest_category"
-	keyRefundCategory   = "refund_category"
+	keyFeeCategory      = model.DefaultFeeCategory
+	keyInterestCategory = model.DefaultInterestCategory
+	keyRefundCategory   = model.DefaultRefundCategory
 )
 
 // sectionOrder is the order the sections are written in.
@@ -99,9 +100,8 @@ var categorySections = []string{secExpense, secIncome}
 // The keys that each kind of entry may have.
 var (
 	instrumentKeys = []string{keyName, keyKind, keyIsCurrency, keyDecimals, keyRateAs}
-	accountKeys    = []string{keyName, keyKind, keyInstitution, keyClosingDay, keyPaymentDueDay}
-	projectKeys    = []string{keyKind, keyName, keyDefaultArea, keyParty, keyActivePeriod}
-	periodKeys     = []string{keyFrom, keyTo}
+	accountKeys    = []string{keyName, keyKind, keyInstitution, keyClosingDay, keyPaymentDueDay, keyOpeningDate}
+	projectKeys    = []string{keyKind, keyName, keyDefaultArea, keyParty}
 	categoryKeys   = []string{keyCategory, keyTreatment, keyParty, keyTag}
 	defaultsKeys   = []string{keyFeeCategory, keyInterestCategory, keyRefundCategory}
 	rowKeys        = []string{keyTreatment, keyCategory, keyParty, keyTag, keyQuantity}
@@ -292,6 +292,8 @@ func decodeAccount(f field) (model.AccountMap, error) {
 			a.ClosingDay, err = p.integer()
 		case keyPaymentDueDay:
 			a.PaymentDueDay, err = p.integer()
+		case keyOpeningDate:
+			a.OpeningDate, err = p.day()
 		}
 		if err != nil {
 			return a, err
@@ -316,37 +318,12 @@ func decodeProject(f field) (model.ProjectMap, error) {
 			pm.DefaultArea, err = p.text()
 		case keyParty:
 			pm.Party, err = p.text()
-		case keyActivePeriod:
-			pm.ActiveFrom, pm.ActiveTo, err = decodePeriod(p)
 		}
 		if err != nil {
 			return pm, err
 		}
 	}
 	return pm, nil
-}
-
-// decodePeriod reads an active_period, which has both its days or neither.
-func decodePeriod(f field) (from, to time.Time, err error) {
-	fields, err := objectOf(f.val, "an active_period", periodKeys)
-	if err != nil {
-		return from, to, err
-	}
-	for _, p := range fields {
-		switch p.key {
-		case keyFrom:
-			from, err = p.day()
-		case keyTo:
-			to, err = p.day()
-		}
-		if err != nil {
-			return time.Time{}, time.Time{}, err
-		}
-	}
-	if from.IsZero() != to.IsZero() {
-		return time.Time{}, time.Time{}, fmt.Errorf("line %d: %s needs both %s and %s", f.at.Line, f.key, keyFrom, keyTo)
-	}
-	return from, to, nil
 }
 
 // decodeCategories reads the categories section: the expense and the income

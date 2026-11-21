@@ -9,20 +9,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/maxjkfc/maxos/app/importer/adapter/out/file"
 	"github.com/maxjkfc/maxos/app/importer/domain/model"
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/out/mapping"
 )
-
-// dayText is a day for canon: none for the zero time.
-func dayText(t time.Time) string {
-	if t.IsZero() {
-		return "none"
-	}
-	return t.Format(time.RFC3339)
-}
 
 // canon is a mapping as lines of text, each entry on one in the order of the keys,
 // for comparing mappings that have times and decimals in them.
@@ -36,9 +27,7 @@ func canon(m model.Mapping) []string {
 		add("accounts[%q] %+v", k, m.Accounts[k])
 	}
 	for _, k := range slices.Sorted(maps.Keys(m.Projects)) {
-		p := m.Projects[k]
-		add("projects[%q] kind=%q name=%q area=%q party=%q from=%s to=%s",
-			k, p.Kind, p.Name, p.DefaultArea, p.Party, dayText(p.ActiveFrom), dayText(p.ActiveTo))
+		add("projects[%q] %+v", k, m.Projects[k])
 	}
 	for _, k := range slices.Sorted(maps.Keys(m.Expense)) {
 		add("expense[%q] %+v", k, m.Expense[k])
@@ -105,22 +94,20 @@ instruments:
   USD: {name: 美元, kind: fiat, is_currency: true, decimals: 2}
   USDT: {name: Tether USDT, kind: crypto, is_currency: true, decimals: 2, rate_as: USD}
 accounts:
-  "Fake Card A": {name: Fake Card A, kind: card, institution: FakeBank, closing_day: 5, payment_due_day: 20}
-  "Fake Cash": {name: Fake Cash, kind: cash}
+  "Fake Card A": {name: Fake Card A, kind: card, institution: FakeBank, closing_day: 5, payment_due_day: 20, opening_date: 2025-01-07}
+  "Fake Cash": {name: Fake Cash, kind: cash, opening_date: "2025-02-03"}
   2025: {name: Year Account, kind: bank}
   true: {name: Truth Account, kind: wallet}
 projects:
   "Daily": {kind: area, name: Daily}
-  "2025-04 Trip": {kind: project, name: Trip, default_area: Daily, active_period: {from: 2026-04-15, to: 2026-04-22}}
+  "2025-04 Trip": {kind: project, name: Trip, default_area: Daily}
   "Crowdfund": {kind: tag, name: Crowdfund}
   "Corp paid": {kind: dealings, party: Corp}
   "Nothing": {kind: none}
   "Block style":
     kind: project
     name: Block
-    active_period:
-      from: "2026-05-01"
-      to: 2026-05-03
+    default_area: Daily
 categories:
   expense:
     "Food/Lunch": Food/Lunch
@@ -146,18 +133,18 @@ func fullMappingWant() model.Mapping {
 			"USDT": {Name: "Tether USDT", Kind: "crypto", IsCurrency: true, Decimals: 2, RateAs: "USD"},
 		},
 		Accounts: map[string]model.AccountMap{
-			"Fake Card A": {Name: "Fake Card A", Kind: "card", Institution: "FakeBank", ClosingDay: 5, PaymentDueDay: 20},
-			"Fake Cash":   {Name: "Fake Cash", Kind: "cash"},
+			"Fake Card A": {Name: "Fake Card A", Kind: "card", Institution: "FakeBank", ClosingDay: 5, PaymentDueDay: 20, OpeningDate: day("2025-01-07")},
+			"Fake Cash":   {Name: "Fake Cash", Kind: "cash", OpeningDate: day("2025-02-03")},
 			"2025":        {Name: "Year Account", Kind: "bank"},
 			"true":        {Name: "Truth Account", Kind: "wallet"},
 		},
 		Projects: map[string]model.ProjectMap{
 			"Daily":        {Kind: "area", Name: "Daily"},
-			"2025-04 Trip": {Kind: "project", Name: "Trip", DefaultArea: "Daily", ActiveFrom: day("2026-04-15"), ActiveTo: day("2026-04-22")},
+			"2025-04 Trip": {Kind: "project", Name: "Trip", DefaultArea: "Daily"},
 			"Crowdfund":    {Kind: "tag", Name: "Crowdfund"},
 			"Corp paid":    {Kind: "dealings", Party: "Corp"},
 			"Nothing":      {Kind: "none"},
-			"Block style":  {Kind: "project", Name: "Block", ActiveFrom: day("2026-05-01"), ActiveTo: day("2026-05-03")},
+			"Block style":  {Kind: "project", Name: "Block", DefaultArea: "Daily"},
 		},
 		Expense: map[string]model.CategoryMap{
 			"Food/Lunch":  {Category: "Food/Lunch"},
@@ -268,17 +255,17 @@ func TestLoadRefusesWhatIsWrong(t *testing.T) {
 	}{
 		{"an unknown section", "accounts:\n  A: {name: A}\naccountz:\n  B: {name: B}\n", []string{"line 3", `"accountz"`}},
 		{"an unknown key of an account", "accounts:\n  A: {name: A, kindd: card}\n", []string{"line 2", `"kindd"`, "an account"}},
-		{"an unknown key of a period", "projects:\n  P:\n    kind: project\n    active_period: {from: 2026-01-01, till: 2026-01-02}\n", []string{"line 4", `"till"`}},
 		{"an unknown key of a category", "categories:\n  expense:\n    X: {category: Y, colour: red}\n", []string{"line 3", `"colour"`}},
 		{"an unknown section of categories", "categories:\n  savings: {}\n", []string{"line 2", `"savings"`}},
 		{"an unknown default", "defaults:\n  tax_category: Tax\n", []string{"line 2", `"tax_category"`}},
 		{"an unknown key of a row", "rows:\n  a: {note: x}\n", []string{"line 2", `"note"`}},
 		{"decimals that is not a number", "instruments:\n  USD: {name: x, kind: fiat, decimals: abc}\n", []string{"line 2", "decimals", `"abc"`}},
 		{"a day of the month that is not a number", "accounts:\n  A: {name: A, closing_day: five}\n", []string{"line 2", "closing_day", `"five"`}},
+		{"an opening date that is not a day", "accounts:\n  A: {name: A, opening_date: yesterday}\n", []string{"line 2", "opening_date", `"yesterday"`, "is not a day"}},
+		{"an opening date that is not a date of the calendar", "accounts:\n  A: {name: A, opening_date: 2025-13-01}\n", []string{"line 2", "opening_date", `"2025-13-01"`, "is not a day"}},
+		{"an opening date with a time of day", "accounts:\n  A: {name: A, opening_date: 2025-01-07T10:00:00Z}\n", []string{"line 2", "opening_date", `"2025-01-07T10:00:00Z"`, "is not a day"}},
+		{"an opening date that is a list", "accounts:\n  A: {name: A, opening_date: [2025, 1, 7]}\n", []string{"line 2", "opening_date", "single value"}},
 		{"is_currency that is not true or false", "instruments:\n  USD: {name: x, kind: fiat, is_currency: maybe}\n", []string{"line 2", "is_currency", `"maybe"`}},
-		{"half a period", "projects:\n  P: {kind: project, name: P, active_period: {from: 2026-01-01}}\n", []string{"line 2", "active_period", "both"}},
-		{"a period with an end and no start", "projects:\n  P: {kind: project, name: P, active_period: {to: 2026-01-01}}\n", []string{"line 2", "active_period", "both"}},
-		{"a day that is not a day", "projects:\n  P: {kind: project, name: P, active_period: {from: 2026-13-01, to: 2026-01-02}}\n", []string{"line 2", "from", `"2026-13-01"`}},
 		{"a quantity that is not a number", "rows:\n  a: {quantity: lots}\n", []string{"line 2", "quantity", `"lots"`}},
 		{"a key twice", "accounts:\n  A: {name: A}\n  B: {name: B}\n  A: {name: C}\n", []string{"line 4", "twice", "line 2"}},
 		{"a section twice", "accounts: {}\nparties: {}\naccounts: {}\n", []string{"line 3", "twice", "line 1"}},
@@ -305,6 +292,23 @@ func TestLoadErrorNamesTheFile(t *testing.T) {
 		t.Fatal("Load read a file with a key that is not known")
 	}
 	mustSay(t, err.Error(), path, "line 2")
+}
+
+// A project has no active period: the import never sets one, since the ledger puts
+// every transaction that has no project of its own into the project that is active
+// on its day. A file that still has the key is refused like any key that is not known.
+func TestLoadRefusesAnActivePeriod(t *testing.T) {
+	tests := []struct {
+		name, text, wantLine string
+	}{
+		{"in flow style", "projects:\n  Trip: {kind: project, name: Trip, active_period: {from: 2026-04-15, to: 2026-04-22}}\n", "line 2"},
+		{"in block style", "projects:\n  Trip:\n    kind: project\n    name: Trip\n    active_period:\n      from: 2026-04-15\n      to: 2026-04-22\n", "line 5"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mustSay(t, loadFails(t, tt.text), tt.wantLine, `unknown key "active_period"`)
+		})
+	}
 }
 
 // What a mapping may be is for the mapping to say (model.Mapping.Validate), not for

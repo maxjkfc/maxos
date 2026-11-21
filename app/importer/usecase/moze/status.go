@@ -6,9 +6,9 @@ import (
 	"github.com/maxjkfc/maxos/app/importer/usecase/port/in/usecase"
 )
 
-// Status counts, for each month, the units that are drafts, confirmed, voided and not
-// recorded yet, the rows that are not recorded at all, and the adjustments that are
-// still to make.
+// Status counts, for each month, the units that are drafts, confirmed, voided, stale
+// and not recorded yet, the rows that are not recorded at all, and the adjustments
+// that are still to make.
 func (a *Importer) Status(ctx context.Context, in usecase.StatusInput) (usecase.StatusOutput, error) {
 	var out usecase.StatusOutput
 	ld, err := a.inputs.load(ctx, in.Files)
@@ -19,7 +19,7 @@ func (a *Importer) Status(ctx context.Context, in usecase.StatusInput) (usecase.
 	if plan.Blocked() {
 		return out, &usecase.BlockedError{Plan: plan}
 	}
-	st, err := a.readState(ctx)
+	st, err := a.readState(ctx, plan)
 	if err != nil {
 		return out, err
 	}
@@ -44,6 +44,8 @@ func (a *Importer) Status(ctx context.Context, in usecase.StatusInput) (usecase.
 				ms.Confirmed++
 			case unitVoid:
 				ms.Voided++
+			case unitStale:
+				ms.Stale++
 			}
 		}
 		_, _, ms.AdjustmentsPending = open(plan, st, m)
