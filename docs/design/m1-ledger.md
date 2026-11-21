@@ -203,7 +203,7 @@ port/in：標的、機構、帳戶、類別的建立、封存、列出、查詢�
 
 固定扣款的例外在 M3 處理。
 
-交易邊界由 use case 決定：每個 Record*、確認、捨棄、作廢（含驗證所需的讀取與冪等鍵查詢）在同一個資料庫交易內完成，repo 不自行開交易，唯一的例外是 `TransactionRepo.List` 與 `TransactionRepo.Statement` 的唯讀快照。需要一個 `pkg/postgres` 的交易輔助（透過 context 傳遞 `pgx.Tx`）；use case 經 `usecase/port/out/tx.Transactor`（只有 `WithinTx`）使用它，由 `cmd/` 注入 `*postgres.DB`。`WithinTx` 不巢狀：use case 不互相呼叫，每個 Record*、確認、捨棄、作廢都是自己最外層的交易；傳給 `WithinTx` 的 context 已帶著交易時，它回傳 `ErrNestedTx`，不執行 `fn`、不送任何語句，開著的交易照舊，呼叫它的 `fn` 把錯誤回傳，整個交易回滾。`TransactionRepo.Insert` 以多條語句寫入交易、分錄與標籤，必須在資料庫交易內呼叫，否則平衡檢查會在第一條語句提交時拒絕。
+交易邊界由 use case 決定：每個 Record*、確認、捨棄、作廢（含驗證所需的讀取與冪等鍵查詢）在同一個資料庫交易內完成，repo 不自行開交易，唯一的例外是 `TransactionRepo.List` 與 `TransactionRepo.Statement` 的唯讀快照。需要一個 `pkg/postgres` 的交易輔助（透過 context 傳遞 `pgx.Tx`）；use case 經 `usecase/port/out/tx.Transactor`（只有 `WithinTx`）使用它，由 `cmd/` 注入 `*postgres.DB`。`WithinTx` 不巢狀：`fn` 裡呼叫的任何東西都不能再開交易（`fn` 可以呼叫別的 use case，例如 `header` 經 catalog 的 `VerifyReferences` 驗證參照，只要它們自己不開交易）；傳給 `WithinTx` 的 context 已帶著交易時，它回傳 `ErrNestedTx`，不執行 `fn`、不送任何語句，開著的交易照舊，呼叫它的 `fn` 把錯誤回傳，整個交易回滾。`TransactionRepo.Insert` 以多條語句寫入交易、分錄與標籤，必須在資料庫交易內呼叫，否則平衡檢查會在第一條語句提交時拒絕。
 
 ### 帳本（M1b，`app/finance`）
 

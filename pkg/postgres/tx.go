@@ -66,14 +66,15 @@ func (db *DB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 }
 
 // ErrNestedTx is what WithinTx returns when the context it is given already carries a
-// transaction. Use cases do not nest: one that is inside a transaction does not call
-// another that opens its own. Joining the open transaction without a word would let the
+// transaction: nothing that runs inside a transaction may open another, whether it is
+// the function itself or a use case that the function calls (calling use cases that do
+// not open one is fine). Joining the open transaction without a word would let the
 // writes of the inner call live or die with the outer one, which its caller did not ask
 // for, and a transaction of its own inside it would be one more way to fail that every
 // caller would have to reason about. So the call fails before it runs its function or
 // sends a statement: the transaction that is open is as it was, and the function that
 // opened it returns the error, as it does for a call that must never have been made.
-var ErrNestedTx = errors.New("a transaction is open already: use cases do not nest transactions")
+var ErrNestedTx = errors.New("a transaction is open already: nothing inside a transaction opens another")
 
 // WithinTx runs fn in one transaction and passes it a context that carries the
 // transaction. It commits when fn returns nil; when fn returns an error, or
@@ -81,7 +82,7 @@ var ErrNestedTx = errors.New("a transaction is open already: use cases do not ne
 //
 // fn must make its database calls with the context it is given: a call with the
 // original context runs outside the transaction. It must not call WithinTx with that
-// context: that is ErrNestedTx.
+// context, or call anything that does: that is ErrNestedTx.
 func (db *DB) WithinTx(ctx context.Context, fn func(ctx context.Context) error) error {
 	if _, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
 		return ErrNestedTx

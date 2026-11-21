@@ -132,6 +132,9 @@ func TestExpenseOfAProjectThatIsPaidForAPartyIsADealingOfWhatLeftTheAccount(t *t
 		{"with no fee", "Card", "TWD", "-500", nil, "Card", "500", "Team lunch\n〔Food/Lunch〕"},
 		{"with a discount", "Card", "TWD", "-500", []rowOpt{discount("50")}, "Card", "450", "Team lunch\n折扣 50 TWD\n〔Food/Lunch〕"},
 		{"with a discount and a fee", "Card", "TWD", "-500", []rowOpt{discount("50"), fee("-5")}, "Card", "455", "Team lunch\n折扣 50 TWD\n手續費 5 TWD\n〔Food/Lunch〕"},
+		// A discount that is the whole price takes nothing but the fee: the dealing is the fee alone.
+		{"whose discount is the whole price, with a fee", "Card", "TWD", "-500", []rowOpt{discount("500"), fee("-5")}, "Card", "5", "Team lunch\n折扣 500 TWD\n手續費 5 TWD\n〔Food/Lunch〕"},
+		{"whose discount is more than the price, with a fee that is more than the excess", "Card", "TWD", "-100", []rowOpt{discount("120"), fee("-25")}, "Card", "5", "Team lunch\n折扣 120 TWD\n手續費 25 TWD\n〔Food/Lunch〕"},
 		// The USD account of MOZE is the account of the bank of the ledger: the dealing is in USD.
 		{"with a fee, in the currency of the row", "Bank USD", "USD", "-10", []rowOpt{fee("-0.5")}, "Bank", "10.5", "Team lunch\n手續費 0.5 USD\n〔Food/Lunch〕"},
 	} {
@@ -158,6 +161,22 @@ func TestExpenseOfAProjectThatIsPaidForAPartyIsADealingOfWhatLeftTheAccount(t *t
 	}
 }
 
+// A row paid for a party that took nothing from the account has no dealing: its discount is
+// the whole price and it has no fee, or it is more than the price and the fee does not make
+// up for the excess. It is left out as a row of no amount.
+func TestRowPaidForAPartyThatTookNothingFromTheAccountIsLeftOut(t *testing.T) {
+	p := plan(
+		row(model.TypeExpense, "Card", "TWD", "-500", main_("Food", "Lunch"), project("Corp paid"), discount("500")),
+		row(model.TypeExpense, "Card", "TWD", "-100", main_("Food", "Lunch"), project("Corp paid"), discount("120"), fee("-15")),
+	)
+	if got := skippedReasons(p); !reflect.DeepEqual(got, []model.Reason{model.ReasonZeroAmount, model.ReasonZeroAmount}) {
+		t.Errorf("reasons = %v, want both rows left out as rows of no amount", got)
+	}
+	if len(p.Units) != 0 {
+		t.Errorf("units = %+v, want none: a dealing has a positive amount", p.Units)
+	}
+}
+
 // What a party owes is what the rows paid for it take from the accounts: their effects, with
 // the fee and the discount that are in them. A dealing says no less and no more, for every
 // row that is paid for the party, and a row that is not is not in it.
@@ -165,6 +184,7 @@ func TestWhatAPartyOwesIsWhatTheRowsPaidForItTakeFromTheAccounts(t *testing.T) {
 	p := plan(
 		row(model.TypeExpense, "Card", "TWD", "-500", main_("Food", "Lunch"), project("Corp paid"), fee("-5"), discount("50"), on("2026-03-04")),
 		row(model.TypeExpense, "Cash", "TWD", "-200", main_("Food", "Lunch"), project("Corp paid"), fee("-3"), on("2026-03-05")),
+		row(model.TypeExpense, "Card", "TWD", "-300", main_("Food", "Lunch"), project("Corp paid"), discount("300"), fee("-4"), on("2026-03-05")),
 		row(model.TypeExpense, "Card", "TWD", "-120", main_("Food", "Lunch"), fee("-2"), on("2026-03-06")),
 	)
 	byRow := map[string]decimal.Decimal{}
@@ -182,8 +202,8 @@ func TestWhatAPartyOwesIsWhatTheRowsPaidForItTakeFromTheAccounts(t *testing.T) {
 			left = left.Sub(byRow[key])
 		}
 	}
-	if dealings != 2 || !owed.Equal(left) || !owed.Equal(d("658")) {
-		t.Errorf("Corp owes %s by %d dealings, the rows paid for it take %s from the accounts, want both to be 658 (455 and 203)", owed, dealings, left)
+	if dealings != 3 || !owed.Equal(left) || !owed.Equal(d("662")) {
+		t.Errorf("Corp owes %s by %d dealings, the rows paid for it take %s from the accounts, want both to be 662 (455, 203 and the 4 of the row that its discount paid)", owed, dealings, left)
 	}
 }
 

@@ -195,6 +195,43 @@ func TestWhatWasPaidForTheCompanyIsOneDealingOfAllThatLeftTheAccount(t *testing.
 	}
 }
 
+// A row paid for the company whose discount is the whole price took nothing from the
+// account but its fee, and the company owes that: the row is a dealing of the fee alone,
+// and not a row that is left out with its fee unrecorded.
+func TestWhatWasPaidForTheCompanyWithADiscountOfTheWholePriceIsADealingOfItsFee(t *testing.T) {
+	free := row("2026-04-20 12:00", model.TypeExpense, "Card", "TWD", "-100", cat("Food", "Lunch"), project("Corp paid"), discount("100"), fee("-3"), name("Free lunch"))
+	w := newWorld(t, fixtureWith(free), fixtureMapping()).reviewed()
+	w.apply()
+
+	var got finance.RecordDealingInput
+	dealings := 0
+	for _, c := range w.ledger.calls {
+		if in, ok := c.(finance.RecordDealingInput); ok && strings.HasPrefix(in.Description, "Free lunch") {
+			got, dealings = in, dealings+1
+		}
+	}
+	if dealings != 1 || !got.Amount.Equal(d("3")) || got.Direction != "paid_out" || len(got.Fees) != 0 ||
+		!strings.Contains(got.Description, "折扣 100 TWD") || !strings.Contains(got.Description, "手續費 3 TWD") {
+		t.Errorf("dealings of the free lunch = %d, %+v, want one of 3 (the fee), paid out, with the discount and the fee in its description", dealings, got)
+	}
+	key := w.rowKeyOf("Free lunch")
+	for _, s := range w.plan().Skipped {
+		for _, k := range s.Rows {
+			if k == key {
+				t.Errorf("the free lunch is left out (%s), want it recorded", s.Reason)
+			}
+		}
+	}
+
+	for _, m := range []string{"2026-01", "2026-02", "2026-03", "2026-04"} {
+		w.mustConfirm(m)
+	}
+	v, err := w.imp.Verify(context.Background(), usecase.VerifyInput{Files: w.files})
+	if err != nil || v.Unexplained != 0 || len(v.Months) != 4 {
+		t.Errorf("verify = %d months, %d unexplained, %v, want four months that agree with the file", len(v.Months), v.Unexplained, err)
+	}
+}
+
 func TestApplyMakesTheReferenceDataOnce(t *testing.T) {
 	w := newWorld(t, fixture(), fixtureMapping()).reviewed()
 	first := w.apply()
