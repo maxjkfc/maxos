@@ -1,0 +1,86 @@
+{{define "content"}}{{with .Data}}
+<p><a href="{{.CardHref}}">← 所有信用卡帳單</a></p>
+
+<h2>{{.Card}}{{if .Open}} <span class="badge">未結帳</span>{{end}}</h2>
+<nav class="month-nav" aria-label="切換帳單">
+<a class="button" href="{{.Prev}}" rel="prev">← 上一期</a>
+<strong>{{.ClosingOn}}</strong>
+<a class="button" href="{{.Next}}" rel="next">下一期 →</a>
+</nav>
+
+<dl class="facts">
+<dt>期間</dt><dd>{{.Range}}</dd>
+<dt>結帳日期</dt><dd>{{.ClosingOn}}</dd>
+<dt>繳款日期</dt><dd>{{.Due}}</dd>
+</dl>
+
+{{if .Drafts}}<p class="note note-draft">這一期的範圍內還有 <strong>{{.Drafts}}</strong> 筆草稿沒有確認，確認之後下面的數字會改變。<a href="{{.DraftsHref}}">查看草稿</a></p>
+{{end}}
+
+<h3>帳單數字</h3>
+{{if .Figures}}<div class="table-wrap">
+<table class="stack" role="table">
+<caption class="sr-only">這一期每個標的的帳單數字</caption>
+<thead role="rowgroup"><tr role="row">
+<th scope="col" role="columnheader" class="num">上期餘額</th>
+<th scope="col" role="columnheader" class="num">本期消費</th>
+<th scope="col" role="columnheader" class="num">本期繳款與退款</th>
+<th scope="col" role="columnheader" class="num">期末餘額</th>
+</tr></thead>
+<tbody role="rowgroup">
+{{range .Figures}}<tr role="row">
+<td role="cell" data-label="上期餘額" class="num">{{template "amount" .Previous}}</td>
+<td role="cell" data-label="本期消費" class="num">{{template "amount" .Charges}}</td>
+<td role="cell" data-label="繳款與退款" class="num">{{template "amount" .Credits}}</td>
+<td role="cell" data-label="期末餘額" class="num">{{template "amount" .Closing}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</div>
+{{else}}<p class="empty">這一期沒有款項，也沒有上期留下來的餘額。</p>
+{{end}}
+
+<h3>這一期的交易</h3>
+{{if .Rows}}<div class="table-wrap">
+<table class="stack wide" role="table">
+<caption class="sr-only">帳單上的交易，舊的在前，和銀行寄來的帳單一行一行對照</caption>
+<thead role="rowgroup"><tr role="row">
+<th scope="col" role="columnheader">帳單日期</th>
+<th scope="col" role="columnheader">發生日</th>
+<th scope="col" role="columnheader">種類</th>
+<th scope="col" role="columnheader">類別</th>
+<th scope="col" role="columnheader">說明</th>
+<th scope="col" role="columnheader" class="num">卡上的金額</th>
+</tr></thead>
+<tbody role="rowgroup">
+{{range .Rows}}<tr role="row">
+<th scope="row" role="rowheader" class="nowrap"><a href="{{.Href}}">{{.Date}}</a></th>
+<td role="cell" data-label="發生日" class="nowrap">{{.Happened}}</td>
+<td role="cell" data-label="種類">{{.Kind}}</td>
+<td role="cell" data-label="類別">{{.Categories}}</td>
+<td role="cell" data-label="說明" class="memo">{{.Description}}{{if .Merchant}}<span class="line muted small">{{.Merchant}}</span>{{end}}</td>
+<td role="cell" data-label="卡上的金額" class="num">{{range .Amounts}}<span class="line">{{template "amount" .}}</span>{{end}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</div>
+{{else}}<p class="empty">這一期沒有已確認的交易。</p>
+{{end}}
+
+<h3>本期消費依類別</h3>
+{{range .Charges}}<div class="split">
+<div>{{.Chart}}</div>
+<div class="table-wrap">
+<table>
+<caption>{{.Instrument}}</caption>
+<thead><tr><th scope="col">類別</th><th scope="col" class="num">金額</th><th scope="col" class="num">占比</th></tr></thead>
+<tbody>
+{{range .Rows}}<tr><th scope="row">{{.Label}}</th><td class="num">{{template "amount" .Amount}}</td><td class="num">{{.Share}}</td></tr>
+{{end}}</tbody>
+<tfoot><tr><th scope="row">本期消費</th><td class="num">{{template "amount" .Total}}</td><td class="num"></td></tr></tfoot>
+</table>
+</div>
+</div>
+{{else}}<p class="empty">這一期沒有消費。</p>
+{{end}}
+{{end}}{{end}}

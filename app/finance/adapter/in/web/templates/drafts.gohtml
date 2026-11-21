@@ -1,0 +1,48 @@
+{{define "content"}}{{with .Data}}
+{{if .Months}}<p class="note note-draft">共有 <strong>{{.Count}}</strong> 筆草稿等著確認。草稿不影響餘額、預算和報表，確認後才生效。分期計畫算一筆（它的起點），各期不另外算。</p>
+<p class="muted small">流出、流入和淨額是如果這些草稿今天全部確認，帳戶的餘額今天會有的變動。還沒到期的分期各期要到扣款日才會影響餘額；日期在今天之後的草稿也是，所以它們不在金額裡。</p>
+{{range .Months}}
+<section class="panel">
+<h2>{{.Label}} <span class="muted small">{{.Count}} 筆</span> <a class="small" href="{{.Href}}">查看這個月的草稿</a></h2>
+<div class="table-wrap">
+<table class="stack" role="table">
+<caption class="sr-only">{{.Label}} 的草稿，依帳戶</caption>
+<thead role="rowgroup"><tr role="row">
+<th scope="col" role="columnheader">帳戶</th>
+<th scope="col" role="columnheader" class="num">筆數</th>
+<th scope="col" role="columnheader" class="num">流出</th>
+<th scope="col" role="columnheader" class="num">流入</th>
+<th scope="col" role="columnheader" class="num">淨額</th>
+</tr></thead>
+<tbody role="rowgroup">
+{{range .Accounts}}<tr role="row">
+<th scope="row" role="rowheader"><a href="{{.Href}}">{{.Name}}</a></th>
+<td role="cell" data-label="筆數" class="num">{{.Count}}</td>
+{{if .NoAccount}}<td role="cell" data-label="" class="muted note-cell" colspan="3">沒有帳戶的變動</td>{{else}}<td role="cell" data-label="流出" class="num">{{range .Amounts}}<span class="line">{{template "amount" .Outflow}}</span>{{end}}</td>
+<td role="cell" data-label="流入" class="num">{{range .Amounts}}<span class="line">{{template "amount" .Inflow}}</span>{{end}}</td>
+<td role="cell" data-label="淨額" class="num">{{range .Amounts}}<span class="line">{{template "amount" .Net}}</span>{{end}}</td>{{end}}
+</tr>
+{{end}}</tbody>
+<tfoot role="rowgroup">
+{{if .OwnTransfers}}<tr role="row">
+<th scope="row" role="rowheader">自己帳戶之間的轉帳</th>
+<td role="cell" data-label="筆數" class="num">{{.OwnTransfers}}</td>
+<td role="cell" data-label="流出" class="num">{{range .OwnTransferAmounts}}<span class="line">{{template "amount" .Outflow}}</span>{{end}}</td>
+<td role="cell" data-label="流入" class="num">{{range .OwnTransferAmounts}}<span class="line">{{template "amount" .Inflow}}</span>{{end}}</td>
+<td role="cell" data-label="淨額" class="num">{{range .OwnTransferAmounts}}<span class="line">{{template "amount" .Net}}</span>{{end}}</td>
+</tr>
+{{end}}<tr role="row">
+<th scope="row" role="rowheader">這個月合計</th>
+<td role="cell" data-label="筆數" class="num">{{.Count}}</td>
+<td role="cell" data-label="流出" class="num">{{range .Amounts}}<span class="line">{{template "amount" .Outflow}}</span>{{end}}</td>
+<td role="cell" data-label="流入" class="num">{{range .Amounts}}<span class="line">{{template "amount" .Inflow}}</span>{{end}}</td>
+<td role="cell" data-label="淨額" class="num">{{range .Amounts}}<span class="line">{{template "amount" .Net}}</span>{{end}}</td>
+</tr></tfoot>
+</table>
+</div>
+<p class="muted small">帳戶的列包含轉帳進出這個帳戶的部分，所以一筆轉帳在轉出和轉入的兩個帳戶各算一次，合計只算一次。{{if .OwnTransfers}}「自己帳戶之間的轉帳」那一列把這些錢從合計扣掉（錢只是從一個帳戶移到另一個），所以每一欄的各列加上它，剛好是「這個月合計」。{{end}}</p>
+</section>
+{{end}}
+{{else}}<p class="empty">沒有等著確認的草稿。</p>
+{{end}}
+{{end}}{{end}}

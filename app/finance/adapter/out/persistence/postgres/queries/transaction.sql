@@ -231,3 +231,25 @@ WHERE t.status = 'draft'
   AND EXISTS (
       SELECT 1 FROM fin_posting p
       WHERE p.transaction_id = t.id AND p.book = 'account' AND p.account_id = @account_id);
+
+-- name: ListDraftPostings :many
+-- What the summary of the drafts is worked out from, which is the model's to do
+-- (SummarizeDrafts): every transaction whose status is draft, whatever day it
+-- happened on, with the postings that have an account (account_id is not NULL: those
+-- of the account book and of the instalment book), one row for each, and one row with
+-- no posting for a draft that has none, such as an expense that a party paid. The
+-- periods of an instalment plan are drafts of their own in the table and are here
+-- with the origin of their plan, as plan_id and plan_seq say: which of them is a draft
+-- that counts, in which month, and which postings change a balance today is not
+-- decided here. account_name and instrument_code are what the model puts the accounts
+-- and the instruments in order by. By transaction, and in it by the position of its
+-- postings. It is one statement, so every row is of one snapshot.
+SELECT t.id AS transaction_id, t.kind, t.occurred_on, t.plan_id, t.plan_seq,
+       p.account_id, a.name AS account_name, p.book,
+       p.instrument_id, i.code AS instrument_code, p.quantity
+FROM fin_transaction t
+LEFT JOIN fin_posting p ON p.transaction_id = t.id AND p.account_id IS NOT NULL
+LEFT JOIN fin_account a ON a.id = p.account_id
+LEFT JOIN fin_instrument i ON i.id = p.instrument_id
+WHERE t.status = 'draft'
+ORDER BY t.id, p.seq;

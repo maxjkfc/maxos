@@ -496,6 +496,9 @@ func TestAnAllocationNothingFellIntoHasNothingSpent(t *testing.T) {
 	if len(got.Allocations) != 1 || !got.Allocations[0].Spent.IsZero() || !got.Spent.IsZero() || !got.Unallocated.IsZero() || got.Over {
 		t.Errorf("status = %+v, want the allocation listed with nothing spent, and nothing over", got)
 	}
+	if got.Allocations[0].Over {
+		t.Error("the allocation nothing fell into is over, want it not to be: nothing is more than 400")
+	}
 }
 
 func TestABudgetIsOverOnlyWhenMoreThanItIsSpent(t *testing.T) {
@@ -525,6 +528,79 @@ func TestABudgetIsOverOnlyWhenMoreThanItIsSpent(t *testing.T) {
 	zero := decimal.Zero
 	if got := model.NewBudgetStatus(&zero, nil, []model.Spending{spend(food, "0.01")}); !got.Over {
 		t.Error("not over a budget of nothing with 0.01 spent, want over")
+	}
+}
+
+func TestAnAllocationIsOverOnlyWhenMoreThanItsAmountFellIntoIt(t *testing.T) {
+	food := topLevel(t, model.DirectionExpense, "飲食")
+	tests := []struct {
+		name  string
+		spent string
+		want  bool
+	}{
+		{"less", "399.99", false},
+		{"all of it", "400", false},
+		{"a cent more", "400.01", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			budget := dec("1000")
+
+			got := model.NewBudgetStatus(&budget, []model.Allocation{allocation(food, "400")}, []model.Spending{spend(food, tt.spent)})
+
+			if got.Allocations[0].Over != tt.want {
+				t.Errorf("over = %v, want %v for %s of 400", got.Allocations[0].Over, tt.want, tt.spent)
+			}
+		})
+	}
+}
+
+func TestWhatFellIntoAnAllocationFromItsSubcategoriesCountsTowardsItBeingOver(t *testing.T) {
+	food := topLevel(t, model.DirectionExpense, "飲食")
+	lunch := subcategory(t, food, "午餐")
+	dinner := subcategory(t, food, "晚餐")
+	rent := topLevel(t, model.DirectionExpense, "房租")
+	hostel := subcategory(t, rent, "民宿")
+	budget := dec("10000")
+
+	// Food has 300: its own 100 and the 150 of lunch are within it, and the 100 of dinner, which falls into
+	// it as well, makes 350. Rent has 500 and nothing is spent on rent itself: the 600 of its subcategory,
+	// the hostel, is all that makes it over.
+	got := model.NewBudgetStatus(&budget, []model.Allocation{allocation(food, "300"), allocation(rent, "500")}, []model.Spending{
+		spend(food, "100"), spend(lunch, "150"), spend(dinner, "100"), spend(hostel, "600"),
+	})
+
+	if !got.Allocations[0].Over || !got.Allocations[0].Spent.Equal(dec("350")) {
+		t.Errorf("food: over = %v, spent = %s, want over with 350: the subcategories are in it", got.Allocations[0].Over, got.Allocations[0].Spent)
+	}
+	if !got.Allocations[1].Over || !got.Allocations[1].Spent.Equal(dec("600")) {
+		t.Errorf("rent: over = %v, spent = %s, want over with 600: the hostel is a subcategory of it", got.Allocations[1].Over, got.Allocations[1].Spent)
+	}
+
+	// The allocation of a subcategory takes only what is spent on it: what is spent on its parent and on its
+	// sibling is in none.
+	got = model.NewBudgetStatus(&budget, []model.Allocation{allocation(lunch, "200")}, []model.Spending{
+		spend(food, "500"), spend(lunch, "150"), spend(dinner, "500"),
+	})
+	if got.Allocations[0].Over {
+		t.Errorf("lunch: over with %s of 200, want not over", got.Allocations[0].Spent)
+	}
+}
+
+func TestAnAllocationBeingOverDoesNotMakeTheBudgetOverNorTheOtherWayRound(t *testing.T) {
+	food := topLevel(t, model.DirectionExpense, "飲食")
+	fun := topLevel(t, model.DirectionExpense, "娛樂")
+	budget := dec("1000")
+
+	// An allocation can be spent beyond while the budget has room, and the budget can be spent beyond by
+	// what is in no allocation while the allocation has room.
+	got := model.NewBudgetStatus(&budget, []model.Allocation{allocation(food, "100")}, []model.Spending{spend(food, "150")})
+	if !got.Allocations[0].Over || got.Over {
+		t.Errorf("allocation over = %v, budget over = %v, want the allocation over and the budget not: 150 of 1000", got.Allocations[0].Over, got.Over)
+	}
+	got = model.NewBudgetStatus(&budget, []model.Allocation{allocation(food, "100")}, []model.Spending{spend(food, "50"), spend(fun, "2000")})
+	if got.Allocations[0].Over || !got.Over {
+		t.Errorf("allocation over = %v, budget over = %v, want the budget over and the allocation not: 50 of 100", got.Allocations[0].Over, got.Over)
 	}
 }
 

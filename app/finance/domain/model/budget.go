@@ -265,6 +265,10 @@ type AllocationStatus struct {
 	CategoryID uuid.UUID
 	Amount     decimal.Decimal
 	Spent      decimal.Decimal
+	// Over is true when Spent is more than Amount. Spending the whole of an
+	// allocation is not over it. It says nothing of the budget, which has its own
+	// Over, and nothing is blocked either way.
+	Over bool
 }
 
 // BudgetStatus is how what has been spent compares with a budget.
@@ -288,7 +292,8 @@ type BudgetStatus struct {
 // amount that is divided by the allocations. A nil budget is no budget: nothing
 // is over then, and, as there are no allocations to fall into, all of it is
 // unallocated. Each spending falls into the allocation of its own category, else
-// the allocation of its parent category, else into none.
+// the allocation of its parent category, else into none. An allocation is over
+// when more than its amount fell into it, whatever the budget is.
 func NewBudgetStatus(budget *decimal.Decimal, allocations []Allocation, spending []Spending) BudgetStatus {
 	status := BudgetStatus{Budget: clonePtr(budget), Allocations: make([]AllocationStatus, len(allocations))}
 	index := make(map[uuid.UUID]int, len(allocations))
@@ -308,6 +313,9 @@ func NewBudgetStatus(budget *decimal.Decimal, allocations []Allocation, spending
 		} else {
 			status.Unallocated = status.Unallocated.Add(s.Amount)
 		}
+	}
+	for i := range status.Allocations {
+		status.Allocations[i].Over = status.Allocations[i].Spent.GreaterThan(status.Allocations[i].Amount)
 	}
 	status.Over = budget != nil && status.Spent.GreaterThan(*budget)
 	return status

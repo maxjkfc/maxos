@@ -285,6 +285,7 @@ func TestListTransactionsPassesTheFilterOn(t *testing.T) {
 
 	_, err := e.svc.ListTransactions(context.Background(), usecase.ListTransactionsInput{
 		Status:    "confirmed",
+		Kind:      "transfer",
 		From:      &from,
 		To:        &to,
 		AccountID: &e.cash.ID,
@@ -301,8 +302,8 @@ func TestListTransactionsPassesTheFilterOn(t *testing.T) {
 
 	f := e.txns.listed
 	wantFrom, wantTo := time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
-	if f.Status != model.StatusConfirmed || f.From == nil || !f.From.Equal(wantFrom) || f.To == nil || !f.To.Equal(wantTo) {
-		t.Errorf("filter = %+v, want confirmed, from %v to %v: the day each time falls on", f, wantFrom, wantTo)
+	if f.Status != model.StatusConfirmed || f.Kind != model.KindTransfer || f.From == nil || !f.From.Equal(wantFrom) || f.To == nil || !f.To.Equal(wantTo) {
+		t.Errorf("filter = %+v, want confirmed, of the kind transfer, from %v to %v: the day each time falls on", f, wantFrom, wantTo)
 	}
 	if f.AccountID == nil || *f.AccountID != e.cash.ID || f.PartyID == nil || *f.PartyID != party ||
 		f.PlanID == nil || *f.PlanID != plan ||
@@ -316,8 +317,16 @@ func TestListTransactionsPassesTheFilterOn(t *testing.T) {
 	if _, err := e.svc.ListTransactions(context.Background(), usecase.ListTransactionsInput{}); err != nil {
 		t.Fatalf("ListTransactions without a filter: %v", err)
 	}
-	if f := e.txns.listed; f.Status != "" || f.From != nil || f.To != nil || f.AccountID != nil || f.PartyID != nil || f.PlanID != nil || f.ProjectID != nil || f.AreaID != nil {
+	if f := e.txns.listed; f.Status != "" || f.Kind != "" || f.From != nil || f.To != nil || f.AccountID != nil || f.WithoutAccount || f.WithoutPlanPeriods || f.PartyID != nil || f.PlanID != nil || f.ProjectID != nil || f.AreaID != nil {
 		t.Errorf("filter = %+v, want no condition set", f)
+	}
+
+	// No account is a filter of its own, passed on as it is.
+	if _, err := e.svc.ListTransactions(context.Background(), usecase.ListTransactionsInput{WithoutAccount: true}); err != nil {
+		t.Fatalf("ListTransactions of no account: %v", err)
+	}
+	if f := e.txns.listed; !f.WithoutAccount || f.AccountID != nil {
+		t.Errorf("filter = %+v, want the transactions of no account", f)
 	}
 }
 
@@ -330,9 +339,14 @@ func TestListTransactionsRefusesWhatCannotBeRight(t *testing.T) {
 		want error
 	}{
 		{"a status that is not one", usecase.ListTransactionsInput{Status: "pending"}, model.ErrInvalidStatus},
+		{"a kind that is not one", usecase.ListTransactionsInput{Kind: "loan"}, model.ErrInvalidKind},
+		{"a kind written another way", usecase.ListTransactionsInput{Kind: "Expense"}, model.ErrInvalidKind},
+		{"a kind with a space around it", usecase.ListTransactionsInput{Kind: " expense "}, model.ErrInvalidKind},
+		{"a status where a kind is wanted", usecase.ListTransactionsInput{Kind: "draft"}, model.ErrInvalidKind},
 		{"a range that ends before it starts", usecase.ListTransactionsInput{From: &late, To: &early}, model.ErrDateRangeReversed},
 		{"a negative limit", usecase.ListTransactionsInput{Limit: -1}, model.ErrInvalidPage},
 		{"a negative offset", usecase.ListTransactionsInput{Offset: -1}, model.ErrInvalidPage},
+		{"an account and no account at once", usecase.ListTransactionsInput{AccountID: &e.cash.ID, WithoutAccount: true}, model.ErrConflictingFilters},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -348,6 +362,71 @@ func TestListTransactionsRefusesWhatCannotBeRight(t *testing.T) {
 	// The two ends of a range may be the same day.
 	if _, err := e.svc.ListTransactions(context.Background(), usecase.ListTransactionsInput{From: &early, To: &early}); err != nil {
 		t.Errorf("a one-day range: %v, want it accepted", err)
+	}
+}
+
+// The periods of an instalment plan are transactions of their own, and the list has
+// them with the status they have: the status draft lists the periods of a draft plan,
+// which are drafts, and a page that is to list the drafts as GetDraftSummary counts
+// them, a plan by its origin, says so with ExcludePlanPeriods. Nothing else leaves
+// the periods out, whatever the status is.
+func TestListTransactionsLeavesThePeriodsOfPlansOutOnlyWhenAskedTo(t *testing.T) {
+	e := newEnv(t)
+	plan := uuid.Must(uuid.NewV7())
+	tests := []struct {
+		name            string
+		in              usecase.ListTransactionsInput
+		wantWithoutPlan bool
+	}{
+		{"the drafts: their periods are drafts too", usecase.ListTransactionsInput{Status: "draft"}, false},
+		{"the drafts of an account", usecase.ListTransactionsInput{Status: "draft", AccountID: &e.card.ID}, false},
+		{"the drafts of no account", usecase.ListTransactionsInput{Status: "draft", WithoutAccount: true}, false},
+		{"the drafts of a plan", usecase.ListTransactionsInput{Status: "draft", PlanID: &plan}, false},
+		{"every status", usecase.ListTransactionsInput{}, false},
+		{"the confirmed ones", usecase.ListTransactionsInput{Status: "confirmed"}, false},
+		{"the void ones", usecase.ListTransactionsInput{Status: "void"}, false},
+		{"asked to leave the periods out, with the status draft", usecase.ListTransactionsInput{Status: "draft", ExcludePlanPeriods: true}, true},
+		{"asked to leave the periods out, of an account", usecase.ListTransactionsInput{Status: "draft", AccountID: &e.card.ID, ExcludePlanPeriods: true}, true},
+		{"asked to leave the periods out, with no status", usecase.ListTransactionsInput{ExcludePlanPeriods: true}, true},
+		{"asked to leave the periods out of a plan: its origin", usecase.ListTransactionsInput{PlanID: &plan, ExcludePlanPeriods: true}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := e.svc.ListTransactions(context.Background(), tt.in); err != nil {
+				t.Fatalf("ListTransactions: %v", err)
+			}
+			if got := e.txns.listed.WithoutPlanPeriods; got != tt.wantWithoutPlan {
+				t.Errorf("the repo was asked to leave the periods of plans out = %v, want %v", got, tt.wantWithoutPlan)
+			}
+		})
+	}
+}
+
+func TestListTransactionsTakesEveryKindThereIsAndPassesItOn(t *testing.T) {
+	kinds := []model.Kind{
+		model.KindExpense, model.KindIncome, model.KindTransfer, model.KindExchange, model.KindOpening,
+		model.KindReward, model.KindDealing, model.KindReconciliation, model.KindInstalment, model.KindTrade,
+	}
+	e := newEnv(t)
+
+	for _, kind := range kinds {
+		if _, err := e.svc.ListTransactions(context.Background(), usecase.ListTransactionsInput{Kind: string(kind)}); err != nil {
+			t.Errorf("kind %q: err = %v, want it taken", kind, err)
+			continue
+		}
+		if e.txns.listed.Kind != kind {
+			t.Errorf("kind %q: the repo was asked for the kind %q, want the same", kind, e.txns.listed.Kind)
+		}
+	}
+
+	// An invalid kind is the error for it, which names the kind, and nothing is asked of the repo.
+	asked := e.txns.lists
+	_, err := e.svc.ListTransactions(context.Background(), usecase.ListTransactionsInput{Kind: "loan"})
+	if !errors.Is(err, model.ErrInvalidKind) || !strings.Contains(err.Error(), `"loan"`) {
+		t.Errorf("err = %v, want ErrInvalidKind naming the kind", err)
+	}
+	if e.txns.lists != asked {
+		t.Errorf("the repo was asked %d times for a kind that is not one, want it not asked", e.txns.lists-asked)
 	}
 }
 

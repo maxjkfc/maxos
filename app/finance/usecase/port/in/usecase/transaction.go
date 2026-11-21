@@ -401,9 +401,10 @@ type SetOpeningBalanceInput struct {
 //
 // The origin of an instalment plan stands for the whole plan: it confirms the
 // origin and each period with it, in one go, and is one transaction of the call.
-// The periods are transactions of their own, which ListTransactions lists, so a
-// caller that confirms every draft it lists gives the id of a period beside that
-// of its origin: the period is covered by the origin, and confirmed once, with it.
+// The periods are transactions of their own, which ListTransactions lists (unless
+// ExcludePlanPeriods is set), so a caller that confirms every draft it lists gives
+// the id of a period beside that of its origin: the period is covered by the
+// origin, and confirmed once, with it.
 // The id of a period whose origin is not among the ids is ErrPartOfPlan: a period
 // is never confirmed alone. The output has what the ids name, each once and in the
 // order given: a period that was given is there, confirmed, in its place, and one
@@ -469,23 +470,43 @@ type ListTransactions interface {
 // for a transaction to be listed.
 type ListTransactionsInput struct {
 	// Status is "draft", "confirmed" or "void" to list only the transactions in
-	// that status; empty lists all of them.
+	// that status; empty lists all of them. A period of an instalment plan is a
+	// transaction of its own, so it is listed with the status it has (a period of a
+	// draft plan is a draft); ExcludePlanPeriods leaves the periods out.
 	Status string
+	// Kind is "expense", "income", "transfer", "exchange", "opening", "reward",
+	// "dealing", "reconciliation", "instalment" or "trade" to list only the
+	// transactions of that kind; empty lists all of them. Any other value is
+	// model.ErrInvalidKind.
+	Kind string
 	// From and To bound the day the transactions happened on, both ends included;
 	// only the day each falls on counts. nil leaves that end open. To may not be
 	// before From.
 	From *time.Time
 	To   *time.Time
-	// AccountID lists the transactions that move that account.
+	// AccountID lists the transactions that move that account: that have a posting
+	// to it, of any book (the origin of a purchase paid in instalments has one, of
+	// the instalment book, to the card).
 	AccountID *uuid.UUID
+	// WithoutAccount lists the transactions that have a posting to no account, such
+	// as an expense that a party paid for me. It is the other side of AccountID, so
+	// both set is model.ErrConflictingFilters.
+	WithoutAccount bool
 	// PartyID lists the transactions that have a dealing with that party: money
 	// paid out to them or received from them, a share of an expense that they
 	// owe me, or an expense that they paid.
 	PartyID *uuid.UUID
 	// PlanID lists the transactions of that instalment plan: its origin, which has
 	// the id of the plan, and its periods. They are ordinary transactions to the
-	// list, each on its own day.
+	// list, each on its own day, whatever Status says.
 	PlanID *uuid.UUID
+	// ExcludePlanPeriods leaves the periods of instalment plans out of the list: a
+	// plan is listed by its origin, which stands for the whole plan, as
+	// GetDraftSummary counts it, and a transaction that is not part of a plan is
+	// listed as always. It is for a list that is to be the drafts that
+	// GetDraftSummary counts, which Status "draft" alone is not: the periods of a
+	// draft plan are drafts too, and are listed with it unless this is set.
+	ExcludePlanPeriods bool
 	// ProjectID and AreaID list the transactions of that project and of that area.
 	ProjectID *uuid.UUID
 	AreaID    *uuid.UUID

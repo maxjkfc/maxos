@@ -416,6 +416,44 @@ func (r *TransactionRepo) Statement(ctx context.Context, f repo.StatementFilter)
 	return content, nil
 }
 
+// DraftTransactions reads every draft with its postings to accounts, and the periods
+// of draft plans among them, in one statement (ListDraftPostings): a row for each
+// posting, and one for a draft that has none. The rows of a transaction come together,
+// which is what puts them back under it. One statement reads one snapshot, so a draft
+// that is confirmed or discarded meanwhile is in it with all its postings, or not at
+// all, and nothing here needs a database transaction of its own.
+func (r *TransactionRepo) DraftTransactions(ctx context.Context) ([]model.DraftTransaction, error) {
+	rows, err := r.q.ListDraftPostings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list the drafts with their postings to accounts: %w", err)
+	}
+	var txns []model.DraftTransaction
+	for _, row := range rows {
+		if len(txns) == 0 || txns[len(txns)-1].ID != row.TransactionID {
+			txns = append(txns, model.DraftTransaction{
+				ID:         row.TransactionID,
+				Kind:       model.Kind(row.Kind),
+				OccurredOn: row.OccurredOn,
+				PlanID:     optionalUUID(row.PlanID),
+				PlanSeq:    planSeq(row.PlanSeq),
+			})
+		}
+		if !row.AccountID.Valid {
+			continue // a draft with no posting to an account
+		}
+		txn := &txns[len(txns)-1]
+		txn.Postings = append(txn.Postings, model.DraftPosting{
+			AccountID:      row.AccountID.UUID,
+			AccountName:    row.AccountName.String,
+			Book:           model.Book(row.Book.String),
+			InstrumentID:   row.InstrumentID.UUID,
+			InstrumentCode: row.InstrumentCode.String,
+			Quantity:       row.Quantity.Decimal,
+		})
+	}
+	return txns, nil
+}
+
 // loadOne returns the transaction a row holds, with its postings and tags.
 func (r *TransactionRepo) loadOne(ctx context.Context, row dbgen.FinTransaction) (model.Transaction, error) {
 	txns, err := r.load(ctx, []dbgen.FinTransaction{row})

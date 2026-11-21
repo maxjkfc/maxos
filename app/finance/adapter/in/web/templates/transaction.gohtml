@@ -1,0 +1,54 @@
+{{define "content"}}{{with .Data}}
+<p><a href="{{.Back}}">← 回到 {{.Month}} 的交易</a></p>
+
+<h2>{{.Kind}} <span class="badge badge-{{.StatusKey}}">{{.Status}}</span></h2>
+{{if eq .StatusKey "draft"}}<p class="note note-draft">這是草稿：還沒有確認，不影響餘額、預算和報表。</p>
+{{end}}{{if eq .StatusKey "void"}}<p class="note">這筆交易已作廢，不再計入餘額、預算和報表。</p>
+{{end}}
+<dl class="facts">
+<dt>發生日</dt><dd>{{.Date}}</dd>
+{{if .Posted}}<dt>入帳日</dt><dd>{{.Posted}}</dd>
+{{end}}{{if .Occurred}}<dt>發生時間</dt><dd>{{.Occurred}}</dd>
+{{end}}{{if .Description}}<dt>說明</dt><dd>{{.Description}}</dd>
+{{end}}{{if .Merchant}}<dt>商家</dt><dd>{{.Merchant}}</dd>
+{{end}}{{if .Area}}<dt>領域</dt><dd>{{.Area}}</dd>
+{{end}}{{if .Project}}<dt>專案</dt><dd>{{.Project}}</dd>
+{{end}}{{if .Tags}}<dt>標籤</dt><dd>{{range .Tags}}<span class="badge">{{.}}</span> {{end}}</dd>
+{{end}}<dt>建立時間</dt><dd>{{.Created}}</dd>
+{{if .Confirmed}}<dt>確認時間</dt><dd>{{.Confirmed}}</dd>
+{{end}}{{if .Voided}}<dt>作廢時間</dt><dd>{{.Voided}}</dd>
+{{end}}</dl>
+
+<h3>組成</h3>
+<div class="table-wrap">
+<table class="stack" role="table">
+<caption class="sr-only">這筆交易的每一個部分</caption>
+<thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">項目</th><th scope="col" role="columnheader">帳戶、類別或對象</th><th scope="col" role="columnheader" class="num">金額</th><th scope="col" role="columnheader">備註</th></tr></thead>
+<tbody role="rowgroup">
+{{range .Parts}}<tr role="row">
+<th scope="row" role="rowheader">{{.Role}}</th>
+<td role="cell" data-label="帳戶、類別或對象">{{.Target}}</td>
+<td role="cell" data-label="金額" class="num">{{template "amount" .Amount}}</td>
+<td role="cell" data-label="備註">{{.Memo}}{{if .Note}}<span class="line muted small">{{.Note}}</span>{{end}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</div>
+
+{{with .Plan}}<h3>分期計畫：{{.Position}}</h3>
+<div class="table-wrap">
+<table class="stack" role="table">
+<caption class="sr-only">這個分期計畫的起點和每一期</caption>
+<thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">期別</th><th scope="col" role="columnheader">日期</th><th scope="col" role="columnheader">狀態</th><th scope="col" role="columnheader" class="num">金額</th></tr></thead>
+<tbody role="rowgroup">
+{{range .Rows}}{{$many := gt (len .Moves) 1}}<tr role="row"{{if .Current}} class="current" aria-current="true"{{end}}>
+<th scope="row" role="rowheader"><a href="{{.Href}}">{{.Label}}</a>{{if .Current}} <span class="badge">目前這筆</span>{{end}}</th>
+<td role="cell" data-label="日期" class="nowrap">{{.Date}}</td>
+<td role="cell" data-label="狀態"><span class="badge badge-{{.StatusKey}}">{{.Status}}</span></td>
+<td role="cell" data-label="金額" class="num">{{range .Moves}}<span class="line">{{if or $many .Indirect}}<span class="where muted small">{{.Where}}　</span>{{end}}{{template "amount" .Amount}}</span>{{end}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</div>
+{{end}}
+{{end}}{{end}}

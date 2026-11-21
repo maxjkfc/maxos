@@ -95,7 +95,7 @@ type fakeTransactions struct {
 	beforeLock func(id uuid.UUID)
 
 	// listed is the filter List was last called with, and lists how often it was
-	// called; listResult is what it returns, cut to the limit of the filter.
+	// called; listResult is what it returns, as the test set it.
 	listed     repo.TransactionFilter
 	lists      int
 	listResult []model.Transaction
@@ -126,6 +126,10 @@ type fakeTransactions struct {
 	postedOnSet     []uuid.UUID
 	statementsAsked []repo.StatementFilter
 	figuresAsked    []figuresAsk
+	// draftRows is what DraftTransactions returns, and draftReads counts its calls;
+	// readErr is what it returns too.
+	draftRows  []model.DraftTransaction
+	draftReads int
 }
 
 func newFakeTransactions() *fakeTransactions {
@@ -257,14 +261,13 @@ func (f *fakeTransactions) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// List records the filter and returns listResult, as the test set it, whatever the
+// filter says: which transactions a filter matches is what the repo's tests show,
+// and a test of the use case only needs to see what it was asked with (listed).
 func (f *fakeTransactions) List(_ context.Context, filter repo.TransactionFilter) ([]model.Transaction, error) {
 	f.listed = filter
 	f.lists++
-	out := f.listResult
-	if len(out) > filter.Limit {
-		out = out[:filter.Limit]
-	}
-	return out, nil
+	return f.listResult, nil
 }
 
 // Balances adds up, as the repo does, the account postings of the confirmed
@@ -499,6 +502,15 @@ func (f *fakeTransactions) Statement(_ context.Context, q repo.StatementFilter) 
 		)
 	})
 	return content, nil
+}
+
+// DraftTransactions returns draftRows, as the test set them, and counts the calls.
+func (f *fakeTransactions) DraftTransactions(context.Context) ([]model.DraftTransaction, error) {
+	f.draftReads++
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	return f.draftRows, nil
 }
 
 // fakeAccounts is an in-memory repo.AccountRepo of which only Get and Lock are

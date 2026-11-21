@@ -51,18 +51,30 @@ func (s *Service) ListTransactions(ctx context.Context, in usecase.ListTransacti
 // listFilter turns the input into the filter of the repo, which asks for one more
 // than the page size, and returns the page size too.
 func listFilter(in usecase.ListTransactionsInput) (repo.TransactionFilter, int, error) {
+	if in.AccountID != nil && in.WithoutAccount {
+		return repo.TransactionFilter{}, 0, model.ErrConflictingFilters
+	}
 	filter := repo.TransactionFilter{
-		AccountID: in.AccountID,
-		PartyID:   in.PartyID,
-		PlanID:    in.PlanID,
-		ProjectID: in.ProjectID,
-		AreaID:    in.AreaID,
-		Offset:    in.Offset,
+		AccountID:          in.AccountID,
+		WithoutAccount:     in.WithoutAccount,
+		WithoutPlanPeriods: in.ExcludePlanPeriods,
+		PartyID:            in.PartyID,
+		PlanID:             in.PlanID,
+		ProjectID:          in.ProjectID,
+		AreaID:             in.AreaID,
+		Offset:             in.Offset,
 	}
 	if in.Status != "" {
 		filter.Status = model.Status(in.Status)
 		if !filter.Status.Valid() {
 			return repo.TransactionFilter{}, 0, fmt.Errorf("%w %q: want draft, confirmed or void", model.ErrInvalidStatus, in.Status)
+		}
+	}
+	if in.Kind != "" {
+		filter.Kind = model.Kind(in.Kind)
+		if !filter.Kind.Valid() {
+			return repo.TransactionFilter{}, 0, fmt.Errorf("%w %q: want expense, income, transfer, exchange, opening, reward, dealing, reconciliation, instalment or trade",
+				model.ErrInvalidKind, in.Kind)
 		}
 	}
 	if in.From != nil {

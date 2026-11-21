@@ -13,14 +13,16 @@ import (
 	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
+	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
 )
 
 // GetAreaBudgets returns where each area stands in the month the request names.
 // The budget of an area in the month is the one in force in it, which is for the
 // domain to pick from all the budgets there are (model.BudgetsInForce). What was
 // spent is what the repo adds up for the days of the month, up to today and no
-// further: the days of a month that has not begun are not asked for at all, and a
-// month that has ended is asked for to its last day.
+// further, as the domain says (model.SpendingRange): the days of a month that has
+// not begun are not asked for at all, and a month that has ended is asked for to
+// its last day.
 //
 // The areas are those that have a budget in force or spending, which the catalog
 // puts in order by name, so that an area it does not list is an error and not
@@ -37,16 +39,11 @@ func (s *Service) GetAreaBudgets(ctx context.Context, in usecase.GetAreaBudgetsI
 	}
 	inForce := model.BudgetsInForce(budgets, month)
 
-	through := model.LastDayOf(month)
-	if today := s.today(); today.Before(through) {
-		through = today
+	rows, err := s.spentIn(ctx, month, month)
+	if err != nil {
+		return usecase.GetAreaBudgetsOutput{}, err
 	}
-	var spending []model.AreaSpending
-	if !through.Before(month) {
-		if spending, err = s.budgets.AreaSpending(ctx, month, through); err != nil {
-			return usecase.GetAreaBudgetsOutput{}, fmt.Errorf("get what the areas spent in %s: %w", month.Format("2006-01"), err)
-		}
-	}
+	spending := model.AreaSpendingOfMonth(month, rows)
 
 	spendingOf := make(map[uuid.UUID][]model.AreaSpending)
 	areas := make(map[uuid.UUID]struct{}, len(inForce))
@@ -122,10 +119,14 @@ func (s *Service) GetProjectBudgets(ctx context.Context, in usecase.GetProjectBu
 	if err != nil {
 		return usecase.GetProjectBudgetsOutput{}, fmt.Errorf("get the budgets of the projects: %w", err)
 	}
-	spending, err := s.budgets.ProjectSpending(ctx, in.ProjectID, s.today())
+	// The budget of a project is for all of it, so there is no first day: every day up to today.
+	// Only the expenses that belong to a project are asked for: the rows of those that
+	// belong to none would be read to be thrown away, and they are most of the ledger.
+	rows, err := s.budgets.Spending(ctx, repo.SpendingFilter{To: s.today(), ProjectID: in.ProjectID, InProject: true})
 	if err != nil {
 		return usecase.GetProjectBudgetsOutput{}, fmt.Errorf("get what the projects spent: %w", err)
 	}
+	spending := model.ProjectSpendingOf(rows)
 
 	budgetOf := make(map[uuid.UUID]model.ProjectBudget, len(budgets))
 	projects := make(map[uuid.UUID]struct{}, len(budgets))
@@ -240,7 +241,7 @@ func inListedOrder[T any](wanted map[uuid.UUID]struct{}, listed []T, idOf func(T
 func toAllocationStatuses(statuses []model.AllocationStatus) []usecase.AllocationStatus {
 	out := make([]usecase.AllocationStatus, len(statuses))
 	for i, a := range statuses {
-		out[i] = usecase.AllocationStatus{CategoryID: a.CategoryID, Amount: a.Amount, Spent: a.Spent}
+		out[i] = usecase.AllocationStatus{CategoryID: a.CategoryID, Amount: a.Amount, Spent: a.Spent, Over: a.Over}
 	}
 	return out
 }

@@ -19,11 +19,22 @@ var ErrDuplicateKey = errors.New("idempotency key already exists")
 type TransactionFilter struct {
 	// Status limits the list to that status; empty lists every status.
 	Status model.Status
+	// Kind limits the list to that kind of transaction; empty lists every kind.
+	Kind model.Kind
 	// From and To bound the day the transactions happened on, both ends included.
 	// They are dates as model.DateOf makes them; nil leaves that end open.
 	From, To *time.Time
-	// AccountID limits the list to the transactions with a posting to that account.
+	// AccountID limits the list to the transactions with a posting to that account,
+	// of any book: the instalment posting of the origin of a purchase paid in
+	// instalments is one.
 	AccountID *uuid.UUID
+	// WithoutAccount limits the list to the transactions with a posting to no
+	// account, of any book. It does not go with AccountID, which the use case
+	// refuses.
+	WithoutAccount bool
+	// WithoutPlanPeriods leaves the periods of instalment plans out of the list: the
+	// origin of a plan, and the transactions that are in none, stay.
+	WithoutPlanPeriods bool
 	// PartyID limits the list to the transactions with a dealing posting to that
 	// party.
 	PartyID *uuid.UUID
@@ -200,4 +211,14 @@ type TransactionRepo interface {
 	// figures add up. Call it outside a database transaction, or inside one that is
 	// REPEATABLE READ or stricter, as for List.
 	Statement(ctx context.Context, f StatementFilter) (StatementContent, error)
+	// DraftTransactions returns every transaction whose status is draft, whatever day
+	// it happened on: the ordinary ones, the origins of instalment plans, and their
+	// periods, which are drafts of their own in the store. Each has the postings that
+	// have an account, of the account book or of the instalment book, in the order of
+	// their positions, with the name of the account and the code of the instrument; a
+	// draft that has none has no postings. It is what model.SummarizeDrafts works the
+	// summary of the drafts out from, and they come in no particular order. It is one
+	// statement, so what it returns is of one moment: a draft that is confirmed or
+	// discarded while it runs is in it with all its postings, or not at all.
+	DraftTransactions(ctx context.Context) ([]model.DraftTransaction, error)
 }

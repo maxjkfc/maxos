@@ -171,6 +171,10 @@ var (
 	// offset.
 	ErrInvalidPage = errors.New("the page size and offset must not be negative")
 
+	// ErrConflictingFilters is returned for a list that is asked to be of an account
+	// and of no account at once: no transaction is both.
+	ErrConflictingFilters = errors.New("a list is of an account or of no account, not both")
+
 	// ErrNoPayer is returned for an expense that does not say who paid: neither
 	// the account the money came out of nor the party that paid.
 	ErrNoPayer = errors.New("an expense needs the account it is paid from, or the party that paid it")
@@ -271,11 +275,19 @@ var (
 	ErrPastPeriodsChanged = errors.New("the new schedule changes periods that have fallen due")
 )
 
-// The errors of budgets and their allocations: what a budget can be refused for.
+// The errors of budgets and their allocations, and of reading what was spent: what
+// a budget can be refused for, and what asking for the spending of months can be
+// refused for.
 var (
 	// ErrMonthRequired is returned for the budget of an area that is set for no
-	// month, or read for none.
-	ErrMonthRequired = errors.New("the month of the budget is required")
+	// month, for the budgets of areas or the spending that are read for no month,
+	// and for the spending of a range of months that has no first or no last month.
+	ErrMonthRequired = errors.New("the month is required")
+
+	// ErrSpendingRangeTooWide is returned for asking for the spending of each month
+	// of a range of months that is longer than a trend of spending can be: one that
+	// is not limited could be asked to add up as many months as a date can name.
+	ErrSpendingRangeTooWide = errors.New("the range of months is too wide to read the spending of")
 
 	// ErrBudgetAmountNegative is returned for a budget of less than nothing. A
 	// budget of nothing is not refused: for an area it means no budget from that

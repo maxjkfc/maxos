@@ -334,6 +334,56 @@ linters:
           deny:
             - pkg: github.com/maxjkfc/maxos/app/finance/adapter/out/persistence/postgres
               desc: only the Postgres adapter may use its package and the sqlc types in dbgen
+        # The inbound adapters are of one kind each, and call the use cases (conventions
+        # section 11). The web pages may import what the list below says and nothing
+        # else: the ports (the in-ports of their own context and of the catalog, the
+        # clock of the context and not the repos or the transactor), the model of the
+        # domain for the names it gives (a book, a kind, a status), pkg/webserver and
+        # pkg/svgchart. So a page reaches no database, no use case implementation, no
+        # other adapter (a sibling such as adapter/in/webhook included) and no MCP SDK
+        # or registry. An entry matches the packages whose path starts with it: the ones
+        # that end in a slash are directories, and the ones that end in a dollar sign are
+        # exactly that package, so that no look-alike (pkg/webserverx) gets through. A
+        # test of the pages may also use the stand-in for Access.
+        finance-adapter-in-web:
+          list-mode: strict
+          files:
+            - "${config-path}/app/finance/adapter/in/web/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/google/uuid$
+            - github.com/shopspring/decimal$
+            - github.com/maxjkfc/maxos/app/finance/domain/model$
+            - github.com/maxjkfc/maxos/app/finance/usecase/port/in/
+            - github.com/maxjkfc/maxos/app/finance/usecase/port/out/clock$
+            - github.com/maxjkfc/maxos/app/catalog/usecase/port/in/
+            - github.com/maxjkfc/maxos/pkg/webserver$
+            - github.com/maxjkfc/maxos/pkg/svgchart$
+        finance-adapter-in-web-tests:
+          list-mode: strict
+          files:
+            - "${config-path}/app/finance/adapter/in/web/*_test.go"
+          allow:
+            - $gostd
+            - github.com/google/uuid$
+            - github.com/shopspring/decimal$
+            - github.com/maxjkfc/maxos/app/finance/domain/model$
+            - github.com/maxjkfc/maxos/app/finance/usecase/port/in/
+            - github.com/maxjkfc/maxos/app/finance/usecase/port/out/clock$
+            - github.com/maxjkfc/maxos/app/catalog/usecase/port/in/
+            - github.com/maxjkfc/maxos/pkg/webserver$
+            - github.com/maxjkfc/maxos/pkg/svgchart$
+            - github.com/maxjkfc/maxos/pkg/cfaccess$
+            - github.com/maxjkfc/maxos/internal/webtest$
+        finance-adapter-in-others:
+          list-mode: lax
+          files:
+            - "${config-path}/app/finance/adapter/in/**"
+            - "!${config-path}/app/finance/adapter/in/web/**"
+          deny:
+            - pkg: github.com/maxjkfc/maxos/app/finance/adapter/in/web
+              desc: only the web adapter may use its package
         finance-boundary:
           list-mode: lax
           files:

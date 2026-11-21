@@ -1,0 +1,50 @@
+{{define "budget"}}<section class="panel">
+<div class="budget-head">
+<h3>{{.Name}}</h3>
+{{if .Over}}<span class="badge badge-over">超支 {{.OverBy.Text}} {{.OverBy.Unit}}</span>{{else if .HasBudget}}<span class="badge badge-ok">沒有超支</span>{{end}}
+</div>
+<dl class="stats">
+<div><dt>預算</dt><dd>{{if .HasBudget}}{{template "amount" .Budget}}{{else}}<span class="muted">沒有預算</span>{{end}}</dd></div>
+<div><dt>已花{{if .ShowWithProjects}}（不含專案）{{end}}</dt><dd>{{template "amount" .Spent}}</dd></div>
+{{if .ShowWithProjects}}<div><dt>已花（含專案）</dt><dd>{{template "amount" .WithProjects}}</dd></div>
+{{end}}{{if .HasBudget}}{{if .Over}}<div><dt>超支</dt><dd>{{template "amount" .OverBy}}</dd></div>
+{{else}}<div><dt>還剩</dt><dd>{{template "amount" .Left}}</dd></div>
+{{end}}{{end}}</dl>
+{{if .HasBudget}}{{.Bar}}
+<p class="muted small">{{if .Percent}}已花預算的 {{.Percent}}{{else}}這個預算是 0：花任何錢都算超支。{{end}}</p>
+{{end}}
+{{if .HasBudget}}<div class="table-wrap compact">
+<table>
+<caption>分配</caption>
+<thead><tr><th scope="col">類別</th><th scope="col" class="num">分配</th><th scope="col" class="num">已花</th></tr></thead>
+<tbody>
+{{range .Allocations}}<tr>
+<th scope="row" class="nowrap">{{.Category}}</th>
+<td class="num">{{template "amount" .Amount}}</td>
+<td class="num">{{template "amount" .Spent}}{{if .Over}}<span class="line"><span class="badge badge-over">超過分配</span></span>{{end}}</td>
+</tr>
+{{end}}<tr>
+<th scope="row" class="nowrap">未分配</th>
+<td class="num muted">—</td>
+<td class="num">{{template "amount" .Unallocated}}</td>
+</tr>
+</tbody>
+</table>
+</div>
+{{end}}
+</section>{{end}}
+
+{{define "content"}}{{with .Data}}
+{{template "monthnav" .}}
+
+<h2>領域</h2>
+{{range .Areas}}{{template "budget" .}}
+{{else}}<p class="empty">{{.Month}} 沒有設預算的領域，也沒有領域花錢。</p>
+{{end}}
+
+<h2>專案</h2>
+{{if .Projects}}<p class="muted small">專案的預算和已花是整個專案的總額，不分月份，不會隨上面切換的月份改變。</p>
+{{end}}{{range .Projects}}{{template "budget" .}}
+{{else}}<p class="empty">還沒有專案設了預算或花過錢。專案的預算是整個專案一個總額，不分月份。</p>
+{{end}}
+{{end}}{{end}}

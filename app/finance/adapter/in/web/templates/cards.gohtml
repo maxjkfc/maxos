@@ -1,0 +1,40 @@
+{{define "content"}}{{with .Data}}
+{{range .Cards}}
+<section class="panel">
+<h2>{{.Name}}{{if .Archived}} <span class="badge">已封存</span>{{end}}</h2>
+<p class="muted small">結帳日：{{.Closing}}{{if .Due}}；繳款日：{{.Due}}{{end}}</p>
+<div class="table-wrap">
+<table class="stack wide" role="table">
+<caption class="sr-only">{{.Name}} 的帳單：進行中的一期和最近結帳的十二期</caption>
+<thead role="rowgroup"><tr role="row">
+<th scope="col" role="columnheader">結帳日期</th>
+<th scope="col" role="columnheader">期間</th>
+<th scope="col" role="columnheader">繳款日期</th>
+<th scope="col" role="columnheader" class="num">上期餘額</th>
+<th scope="col" role="columnheader" class="num">本期消費</th>
+<th scope="col" role="columnheader" class="num">本期繳款與退款</th>
+<th scope="col" role="columnheader" class="num">期末餘額</th>
+</tr></thead>
+<tbody role="rowgroup">
+{{range .Rows}}<tr role="row"{{if .Open}} class="current"{{end}}>
+<th scope="row" role="rowheader" class="nowrap"><a href="{{.Href}}">{{.ClosingOn}}</a>{{if .Open}} <span class="badge">未結帳</span>{{end}}</th>
+<td role="cell" data-label="期間" class="nowrap small">{{.Range}}</td>
+<td role="cell" data-label="繳款日期" class="nowrap">{{.Due}}</td>
+{{if .Figures}}<td role="cell" data-label="上期餘額" class="num">{{range .Figures}}<span class="line">{{template "amount" .Previous}}</span>{{end}}</td>
+<td role="cell" data-label="本期消費" class="num">{{range .Figures}}<span class="line">{{template "amount" .Charges}}</span>{{end}}</td>
+<td role="cell" data-label="繳款與退款" class="num">{{range .Figures}}<span class="line">{{template "amount" .Credits}}</span>{{end}}</td>
+<td role="cell" data-label="期末餘額" class="num">{{range .Figures}}<span class="line">{{template "amount" .Closing}}</span>{{end}}</td>{{else}}<td role="cell" data-label="" class="muted note-cell" colspan="4">這一期沒有款項</td>{{end}}
+</tr>
+{{end}}</tbody>
+</table>
+</div>
+</section>
+{{end}}
+{{if .Without}}<h2>沒有結帳日的信用卡</h2>
+<ul>
+{{range .Without}}<li>{{.Name}}{{if .Archived}}（已封存）{{end}}：沒有設定結帳日，所以不產生帳單。</li>
+{{end}}</ul>
+{{end}}
+{{if not (or .Cards .Without)}}<p class="empty">沒有信用卡。建立信用卡帳戶並設定結帳日之後，帳單會出現在這裡。</p>
+{{end}}
+{{end}}{{end}}

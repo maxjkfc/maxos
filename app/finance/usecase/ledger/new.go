@@ -47,8 +47,8 @@ func New(
 // RecordReward, RecordBillInstalment, SetOpeningBalance, Reconcile,
 // ConfirmTransactions, DiscardDraft, VoidTransaction, RescheduleInstalment,
 // SetPostingDate, GetTransaction, ListTransactions, GetInstalmentPlan,
-// ListInstalmentPlans, GetBalances, GetDealings, GetCardStatement and
-// ListCardStatements, all backed by one Service. It needs a tx.Transactor, a
+// ListInstalmentPlans, GetBalances, GetDealings, GetDraftSummary, GetCardStatement
+// and ListCardStatements, all backed by one Service. It needs a tx.Transactor, a
 // repo.TransactionRepo, a repo.AccountRepo, a repo.InstrumentRepo, a
 // repo.CategoryRepo, a clock.Clock, and the catalog's usecase.VerifyReferences,
 // usecase.ResolveProjectDefaults, usecase.ResolveProjectArea and
@@ -75,6 +75,7 @@ func Module() fx.Option {
 		fx.As(new(usecase.ListInstalmentPlans)),
 		fx.As(new(usecase.GetBalances)),
 		fx.As(new(usecase.GetDealings)),
+		fx.As(new(usecase.GetDraftSummary)),
 		fx.As(new(usecase.SetPostingDate)),
 		fx.As(new(usecase.GetCardStatement)),
 		fx.As(new(usecase.ListCardStatements)),

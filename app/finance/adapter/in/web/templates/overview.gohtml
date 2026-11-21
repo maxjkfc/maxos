@@ -1,0 +1,88 @@
+{{define "content"}}{{with .Data}}
+<p class="muted">資料截至今天（{{.Today}}）。</p>
+
+<h2>餘額</h2>
+{{range .Groups}}
+<div class="table-wrap">
+<table>
+<caption>{{.Name}}</caption>
+<thead><tr><th scope="col">帳戶</th><th scope="col" class="num">餘額</th></tr></thead>
+<tbody>
+{{range .Accounts}}<tr>
+<th scope="row"><a href="{{.Href}}">{{.Name}}</a>{{if .Archived}} <span class="badge">已封存</span>{{end}}<span class="line muted small">{{.Kind}}</span></th>
+<td class="num">{{range .Lines}}<span class="line">{{if .Label}}<span class="muted small">{{.Label}}　</span>{{end}}{{template "amount" .Amount}}</span>{{end}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</div>
+{{else}}
+<p class="empty">還沒有已確認的餘額。草稿確認之後，餘額會出現在這裡。</p>
+{{end}}
+{{if .ZeroAccounts}}<details>
+<summary>餘額皆為零的帳戶（{{len .ZeroAccounts}}）</summary>
+<ul>{{range .ZeroAccounts}}<li><a href="{{.Href}}">{{.Name}}</a></li>{{end}}</ul>
+</details>
+{{end}}
+
+{{if .Plans}}<h2>未到期分期</h2>
+<p class="muted small">未到期分期是還沒到扣款日的本金，是欠機構的錢：在上面的餘額裡另外列出，是負數，餘額不含它。下表的金額是這幾筆分期的本金，所以是正數。</p>
+<div class="table-wrap">
+<table class="stack" role="table">
+<caption class="sr-only">還有款項沒到扣款日的分期計畫</caption>
+<thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">帳戶</th><th scope="col" role="columnheader" class="num">分期金額</th><th scope="col" role="columnheader" class="num">已到期的本金</th><th scope="col" role="columnheader" class="num">未到期分期</th><th scope="col" role="columnheader">下次扣款日</th></tr></thead>
+<tbody role="rowgroup">
+{{range .Plans}}<tr role="row">
+<th scope="row" role="rowheader"><a href="{{.Href}}">{{.Account}}</a></th>
+<td role="cell" data-label="分期金額" class="num">{{template "amount" .Principal}}</td>
+<td role="cell" data-label="已到期的本金" class="num">{{template "amount" .Charged}}</td>
+<td role="cell" data-label="未到期分期" class="num">{{template "amount" .Remaining}}</td>
+<td role="cell" data-label="下次扣款日" class="nowrap">{{.NextDue}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</div>
+{{end}}
+
+<h2>往來</h2>
+{{if .Dealings}}<div class="table-wrap">
+<table>
+<thead><tr><th scope="col">對象</th><th scope="col" class="num">金額</th><th scope="col">誰欠誰</th></tr></thead>
+<tbody>
+{{range .Dealings}}<tr>
+<th scope="row">{{.Party}}</th>
+<td class="num">{{range .Lines}}<span class="line">{{template "amount" .Amount}}</span>{{end}}</td>
+<td>{{range .Lines}}<span class="line">{{.Meaning}}</span>{{end}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</div>
+{{else}}<p class="empty">沒有往來。</p>
+{{end}}
+{{if .ZeroParties}}<details>
+<summary>往來金額為零的對象（{{len .ZeroParties}}）</summary>
+<ul>{{range .ZeroParties}}<li>{{.}}</li>{{end}}</ul>
+</details>
+{{end}}
+
+<h2>草稿</h2>
+{{with .Drafts}}{{if .Count}}<p class="note note-draft">有 <strong>{{.Count}}</strong> 筆草稿等著確認。草稿不影響餘額、預算和報表，確認後才生效。<a href="{{.Href}}">查看草稿</a></p>
+{{if .Amounts}}<div class="table-wrap">
+<table class="stack" role="table">
+<caption>如果這些草稿今天全部確認，帳戶的餘額今天會有這些變動</caption>
+<thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">標的</th><th scope="col" role="columnheader" class="num">流出</th><th scope="col" role="columnheader" class="num">流入</th><th scope="col" role="columnheader" class="num">淨額</th></tr></thead>
+<tbody role="rowgroup">
+{{range .Amounts}}<tr role="row">
+<th scope="row" role="rowheader">{{.Net.Unit}}</th>
+<td role="cell" data-label="流出" class="num">{{template "amount" .Outflow}}</td>
+<td role="cell" data-label="流入" class="num">{{template "amount" .Inflow}}</td>
+<td role="cell" data-label="淨額" class="num">{{template "amount" .Net}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</div>
+{{else}}<p class="muted">如果這些草稿今天全部確認，帳戶的餘額今天不會有變動。</p>
+{{end}}<p class="muted small">還沒到期的分期各期要到扣款日才會影響餘額；日期在今天之後的草稿也是，所以它們不在上面。</p>
+{{if .OwnTransfers}}<p class="muted small">自己帳戶之間的轉帳：{{.OwnTransfers}} 筆。錢只是從一個帳戶移到另一個，不計入上面的流出和流入。</p>
+{{end}}{{else}}<p class="empty">沒有等著確認的草稿。</p>
+{{end}}{{end}}
+{{end}}{{end}}

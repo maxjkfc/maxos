@@ -33,6 +33,9 @@ func listIDsSQL(f repo.TransactionFilter) (string, []any) {
 	if f.Status != "" {
 		conditions = append(conditions, "t.status = "+arg(string(f.Status)))
 	}
+	if f.Kind != "" {
+		conditions = append(conditions, "t.kind = "+arg(string(f.Kind)))
+	}
 	if f.From != nil {
 		conditions = append(conditions, "t.occurred_on >= "+arg(*f.From))
 	}
@@ -45,9 +48,15 @@ func listIDsSQL(f repo.TransactionFilter) (string, []any) {
 	if f.AreaID != nil {
 		conditions = append(conditions, "t.area_id = "+arg(*f.AreaID))
 	}
+	// A posting has an account when it is of the account book or of the instalment
+	// book: the origin of a purchase paid in instalments has one, to the card.
 	if f.AccountID != nil {
 		conditions = append(conditions,
 			"EXISTS (SELECT 1 FROM fin_posting p WHERE p.transaction_id = t.id AND p.account_id = "+arg(*f.AccountID)+")")
+	}
+	if f.WithoutAccount {
+		conditions = append(conditions,
+			"NOT EXISTS (SELECT 1 FROM fin_posting p WHERE p.transaction_id = t.id AND p.account_id IS NOT NULL)")
 	}
 	if f.PartyID != nil {
 		conditions = append(conditions,
@@ -55,6 +64,11 @@ func listIDsSQL(f repo.TransactionFilter) (string, []any) {
 	}
 	if f.PlanID != nil {
 		conditions = append(conditions, "t.plan_id = "+arg(*f.PlanID))
+	}
+	// A period of a plan has a position after the origin's, which is 0; a transaction
+	// that is in no plan has none.
+	if f.WithoutPlanPeriods {
+		conditions = append(conditions, "(t.plan_seq IS NULL OR t.plan_seq = 0)")
 	}
 
 	var sb strings.Builder

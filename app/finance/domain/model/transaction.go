@@ -386,10 +386,10 @@ func (t Transaction) checkPlan() error {
 }
 
 // checkKind checks that the postings are the ones the kind is made of, and move
-// money the way it does. Besides the expense, the opening balance, the
-// reconciliation and a period of an instalment plan, a kind is checked on the
+// money the way it does. A kind that takes fees (takesFees) is checked on the
 // postings that are left once its fees are taken out.
 func (t Transaction) checkKind() error {
+	t.Postings = t.withoutFees()
 	switch t.Kind {
 	case KindExpense:
 		return t.checkExpense()
@@ -397,14 +397,6 @@ func (t Transaction) checkKind() error {
 		return t.checkOpening()
 	case KindReconciliation:
 		return t.checkReconciliation()
-	case KindInstalment:
-		if t.IsPlanPeriod() {
-			return t.checkInstalmentPeriod()
-		}
-	}
-
-	t.Postings = t.withoutFees()
-	switch t.Kind {
 	case KindIncome:
 		return t.checkIncome()
 	case KindTransfer:
@@ -418,6 +410,9 @@ func (t Transaction) checkKind() error {
 	case KindReward:
 		return t.checkReward()
 	case KindInstalment:
+		if t.IsPlanPeriod() {
+			return t.checkInstalmentPeriod()
+		}
 		return t.checkBillInstalment()
 	default:
 		return fmt.Errorf("%w %q", ErrInvalidKind, t.Kind)
@@ -433,29 +428,84 @@ func (t Transaction) booksOf() map[Book][]Posting {
 	return books
 }
 
-// withoutFees returns the postings of the transaction that are not fees. A fee is
-// a positive expense posting without a discount, in a kind that has no expense of
-// its own, together with the account posting that pays it: the same instrument,
-// the same quantity taken out. The constructors put each fee after the postings
-// the kind is made of, so when several account postings could pay one, the last is
-// the one that does. An expense posting that nothing pays is not taken for a fee:
-// it stays, and the kind refuses it.
-func (t Transaction) withoutFees() []Posting {
-	taken := make([]bool, len(t.Postings))
-	for i, fee := range t.Postings {
-		if fee.Book != BookExpense || !fee.Quantity.IsPositive() || fee.Discount != nil {
+// takesFees reports whether an expense posting of the transaction is a fee. It is
+// so in an income, a transfer, an exchange, a trade, a dealing, a reward and the
+// origin of a bill instalment, none of which has an expense of its own. An
+// expense, a reconciliation and a period of an instalment plan have: the lines of
+// the expense, what the reconciliation makes up for, the interest of the period,
+// which the account that paid for the transaction paid for. An opening balance
+// has no expense posting at all.
+func (t Transaction) takesFees() bool {
+	switch t.Kind {
+	case KindExpense, KindOpening, KindReconciliation:
+		return false
+	case KindInstalment:
+		return !t.IsPlanPeriod()
+	default:
+		return true
+	}
+}
+
+// feePair is a fee of a transaction and the account posting that pays it, as
+// indexes of the postings of the transaction.
+type feePair struct{ fee, payer int }
+
+// feePairs pairs each fee of the transaction with the account posting that pays
+// it, in the order of the fees. A fee is a positive expense posting without a
+// discount, in a kind that takes fees (takesFees), and the account posting that
+// pays it is of the same instrument and takes the same quantity out. An account
+// posting pays one fee at most. An expense posting that nothing pays is not taken
+// for a fee: it is in no pair, and the kind refuses it.
+//
+// The constructors put each fee after the postings the kind is made of, as the
+// account posting that pays it and the expense posting that follows it. The fees
+// are paired from the last to the first, each with the last account posting that
+// is left and could pay it. So when several account postings could pay a fee, the
+// last is the one that does, and not one of those the kind is made of; and when
+// several fees are of the same instrument and the same quantity, so that each
+// could be paid by the account posting of another, each is paired with the one put
+// before it, which is what says whose fee it is.
+func (t Transaction) feePairs() []feePair {
+	if !t.takesFees() {
+		return nil
+	}
+	var pairs []feePair
+	for fee := len(t.Postings) - 1; fee >= 0; fee-- {
+		f := t.Postings[fee]
+		if f.Book != BookExpense || !f.Quantity.IsPositive() || f.Discount != nil {
 			continue
 		}
-		paid := fee.Quantity.Neg()
-		for j := len(t.Postings) - 1; j >= 0; j-- {
-			p := t.Postings[j]
-			if !taken[j] && p.Book == BookAccount && p.InstrumentID == fee.InstrumentID && p.Quantity.Equal(paid) {
-				taken[i], taken[j] = true, true
-				break
+		paid := f.Quantity.Neg()
+		for payer := len(t.Postings) - 1; payer >= 0; payer-- {
+			p := t.Postings[payer]
+			if p.Book != BookAccount || p.InstrumentID != f.InstrumentID || !p.Quantity.Equal(paid) {
+				continue
 			}
+			if slices.ContainsFunc(pairs, func(x feePair) bool { return x.payer == payer }) {
+				continue
+			}
+			pairs = append(pairs, feePair{fee: fee, payer: payer})
+			break
 		}
 	}
-	core := make([]Posting, 0, len(t.Postings))
+	slices.Reverse(pairs)
+	return pairs
+}
+
+// withoutFees returns the postings of the transaction that are not fees: of a
+// kind that takes fees (takesFees), what is left of them once each fee and the
+// account posting that pays it (feePairs) are taken out, and of any other kind all
+// of them.
+func (t Transaction) withoutFees() []Posting {
+	pairs := t.feePairs()
+	if len(pairs) == 0 {
+		return t.Postings
+	}
+	taken := make([]bool, len(t.Postings))
+	for _, pair := range pairs {
+		taken[pair.fee], taken[pair.payer] = true, true
+	}
+	core := make([]Posting, 0, len(t.Postings)-2*len(pairs))
 	for i, p := range t.Postings {
 		if !taken[i] {
 			core = append(core, p)
