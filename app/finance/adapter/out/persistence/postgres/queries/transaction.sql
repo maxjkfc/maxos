@@ -7,8 +7,8 @@
 -- balance trigger checks them at its commit. plan_id and plan_seq are both NULL
 -- for a transaction that is in no instalment plan. The origin of a plan is
 -- inserted before its periods, which refer to it. posted_on is NULL unless the
--- transaction was recorded with a posting date, which the table's CHECK keeps
--- from being before occurred_on.
+-- transaction was recorded with a posting date, which the table's CHECKs keep from
+-- being before occurred_on and from being on a transaction of an instalment plan.
 INSERT INTO fin_transaction (
     id, kind, status, occurred_on, occurred_at, description, merchant,
     project_id, area_id, idempotency_key, plan_id, plan_seq, posted_on
@@ -151,9 +151,9 @@ ORDER BY o.occurred_on DESC, o.id DESC;
 
 -- name: SetTransactionPostedOn :one
 -- Sets the posting date of the transaction, or clears it with NULL. The table's
--- CHECK refuses a date before the day the transaction happened. Whether the
--- transaction may have one is the model's to say: the use case locks the row and
--- asks the model first.
+-- CHECKs refuse a date before the day the transaction happened, and any date on a
+-- transaction of an instalment plan. Whether the transaction may have one is the
+-- model's to say: the use case locks the row and asks the model first.
 UPDATE fin_transaction SET posted_on = @posted_on WHERE id = @id RETURNING *;
 
 -- name: ListStatementFigures :many

@@ -180,8 +180,9 @@ func (r *TransactionRepo) SetStatus(ctx context.Context, id uuid.UUID, status mo
 }
 
 // SetPostedOn sets the posting date of the transaction, or clears it with nil. The
-// table's CHECK constraint is the last guard of the date: one before the day the
-// transaction happened comes back as an error from the database.
+// table's CHECK constraints are the last guard of the date: one before the day the
+// transaction happened, and any on a transaction of an instalment plan, come back
+// as an error from the database.
 func (r *TransactionRepo) SetPostedOn(ctx context.Context, id uuid.UUID, postedOn *time.Time) (model.Transaction, error) {
 	row, err := r.q.SetTransactionPostedOn(ctx, dbgen.SetTransactionPostedOnParams{ID: id, PostedOn: postedOn})
 	if err != nil {

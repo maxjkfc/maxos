@@ -175,10 +175,11 @@ type TransactionRepo interface {
 	InstalmentPlans(ctx context.Context, accountID *uuid.UUID, day time.Time) ([]model.InstalmentPlanSummary, error)
 	// SetPostedOn sets the posting date of the transaction, or clears it with nil,
 	// and returns the transaction, or returns model.ErrNotFound. It checks nothing
-	// that the model checks: whether the transaction may have one is for the model,
-	// and the table only refuses a date before the day the transaction happened. The
-	// use case calls it with the transaction locked by GetForUpdate, in the database
-	// transaction it holds the lock in.
+	// that the model checks: whether the transaction may have one is for the model.
+	// The table refuses a date before the day the transaction happened, and any date
+	// on a transaction of an instalment plan. The use case calls it with the
+	// transaction locked by GetForUpdate, in the database transaction it holds the
+	// lock in.
 	SetPostedOn(ctx context.Context, id uuid.UUID, postedOn *time.Time) (model.Transaction, error)
 	// StatementFigures returns what each instrument did on each of the statements of
 	// the account, one list for each of the periods, in the order the periods are
