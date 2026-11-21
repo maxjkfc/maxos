@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -17,9 +18,15 @@ import (
 // The import works on the whole export of the history. One that ends earlier says nothing
 // of the days after its last, and what the ledger has of them is told in one line, not
 // removed and not asked to be voided; one that begins after the import in the ledger does
-// is refused, since what it says of the ledger is not meant for it, and nothing in what the
-// user is told asks to void what the ledger has right. A month in the middle that an export
-// has no rows of is another matter: that is what an edited or a deleted row looks like.
+// is refused, with the transactions of the import before it and the two things it can be: a
+// shorter export, or the first rows deleted in MOZE, whose transactions the user voids (and
+// then the opening balance of the account that lost its first row, which changes its day).
+// A month in the middle that an export has no rows of is another matter: that is what an
+// edited or a deleted row looks like.
+
+// listedOpening finds a line of a list of transactions that is an opening balance: the
+// refusal of a later start never lists one, since it is not what the user voids first.
+var listedOpening = regexp.MustCompile(`(?m)^\s+\d{4}-\d{2}-\d{2} 期初餘額`)
 
 // keepRows keeps the rows of the export (the header first) that the function says to, by
 // the account and the date of the row; the date is as the export writes it, "2026/01/05",
@@ -131,6 +138,7 @@ func TestImportRefusesAnExportThatBeginsAfterTheImportInTheLedgerDoesOnARealData
 		sentence = "這份匯出從 2026-02-05 開始，帳本裡的匯入從 2026-01-04 開始，什麼都沒有動"
 		shorter  = "這份匯出的開頭比較晚：請改用完整的匯出"
 		deleted  = "你在 MOZE 刪掉或改了最前面的列：請作廢（草稿則捨棄）上面這幾筆，再執行一次"
+		openings = "作廢之後，如果某個帳戶最前面的列被刪掉，它已確認的期初餘額會換日期，apply 會再列出來，那幾筆也要作廢"
 	)
 	for _, tt := range []struct {
 		name     string
@@ -168,7 +176,7 @@ func TestImportRefusesAnExportThatBeginsAfterTheImportInTheLedgerDoesOnARealData
 				for _, want := range []string{
 					fmt.Sprintf("這份匯出從 2026-02-05 開始，帳本裡的匯入從 2026-01-04 開始，而且帳本裡有 %d 筆匯入的交易，日期早於這份匯出的第一列：\n", n),
 					fmt.Sprintf("  …另有 %d 筆\n", n-20),
-					"有兩種可能：\n  " + shorter + "\n  " + deleted + "\n什麼都沒有動\n",
+					"有兩種可能：\n  " + shorter + "\n  " + deleted + "\n" + openings + "\n什麼都沒有動\n",
 				} {
 					if !strings.Contains(out, want) {
 						t.Errorf("%s did not print %q:\n%s", args[0], want, out)
@@ -177,10 +185,13 @@ func TestImportRefusesAnExportThatBeginsAfterTheImportInTheLedgerDoesOnARealData
 				if listed := strings.Count(out, "鍵：moze:"); listed != 20 {
 					t.Errorf("%s lists %d transactions, want 20", args[0], listed)
 				}
-				for _, not := range []string{"期初餘額", "草稿：新增", "已確認的內容與對照不同", "匯出裡沒有對應的列"} {
+				for _, not := range []string{"草稿：新增", "已確認的內容與對照不同", "匯出裡沒有對應的列"} {
 					if strings.Contains(out, not) {
 						t.Errorf("%s printed %q:\n%s", args[0], not, out)
 					}
+				}
+				if listedOpening.MatchString(out) {
+					t.Errorf("%s lists an opening balance:\n%s", args[0], out)
 				}
 			}
 			status := e.must("status")
@@ -208,23 +219,36 @@ func TestImportRefusesAnExportThatBeginsAfterTheImportInTheLedgerDoesOnARealData
 // day, which looks like an export that was cut short, and the transaction that was made of
 // the row is before it. The refusal names that transaction, and the two things it can be;
 // the user voids it (a draft is discarded), and apply, confirm and verify go on. That holds
-// with months confirmed and with a ledger of drafts only.
+// with months confirmed and with a ledger of drafts only. When the row was the first of an
+// account that has an opening balance, that opening balance is dated from the first row of
+// its account, so it changes its day: apply updates a draft; a confirmed one is not what the
+// plan says, and apply, confirm and verify tell it by the day and the key the ledger has it
+// under, and by the day the plan says now, so that the user finds the one to void.
 func TestImportRefusesAnExportThatLostItsFirstRowAndGoesOnOnceWhatWasMadeOfItIsVoidedOrDiscardedOnARealDatabase(t *testing.T) {
-	for _, confirmed := range []bool{true, false} {
-		name := "a ledger of drafts"
-		if confirmed {
-			name = "a ledger that is confirmed"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		confirmed bool
+		// account is the account of the row that is deleted, and ledgerFrom the first day
+		// of the import in the ledger while the row is there; moves says that the account has
+		// an opening balance, which is dated from that row.
+		account, ledgerFrom string
+		moves               bool
+	}{
+		{"a ledger that is confirmed", true, "Fake 信用卡", "2026-01-03", false},
+		{"a ledger of drafts", false, "Fake 信用卡", "2026-01-03", false},
+		{"a ledger that is confirmed, the row is the first of an account with an opening balance", true, "Fake Cash", "2026-01-02", true},
+		{"a ledger of drafts, the row is the first of an account with an opening balance", false, "Fake Cash", "2026-01-02", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			e := newImportEnv(t)
 			e.editExport(func(rows [][]string) [][]string {
-				return slices.Insert(rows, 8, r("支出", "Fake 信用卡", "TWD", "-5", "2026-01-03 09:00", "主類別", "飲食", "子類別", "午餐", "名稱", "First coffee"))
+				return slices.Insert(rows, 8, r("支出", tt.account, "TWD", "-5", "2026-01-03 09:00", "主類別", "飲食", "子類別", "午餐", "名稱", "First coffee"))
 			})
 			e.must("plan", "--out", filepath.Join(e.dir, "report.md"))
 			e.review()
 			e.must("apply")
 			months := []string{"2026-01", "2026-02", "2026-03", "2026-04"}
-			if confirmed {
+			if tt.confirmed {
 				for _, month := range months {
 					e.must("confirm", "--month", month)
 				}
@@ -235,28 +259,38 @@ func TestImportRefusesAnExportThatLostItsFirstRowAndGoesOnOnceWhatWasMadeOfItIsV
 				t.Fatalf("the ledger has %d transactions of the first row, want 1", len(made))
 			}
 			first := made[0]
+			var opening finance.Transaction
+			for _, tx := range e.transactions(l) {
+				if tt.moves && tx.Kind == "opening" && tx.OccurredOn.Format(time.DateOnly) == tt.ledgerFrom {
+					opening = tx
+				}
+			}
+			if tt.moves && opening.IdempotencyKey == "" {
+				t.Fatalf("the ledger has no opening balance of %s dated %s", tt.account, tt.ledgerFrom)
+			}
 			before := snapshot(e.transactions(l))
 
 			// The row is deleted in MOZE.
 			e.wholeExport()
-			status := map[bool]string{true: "已確認", false: "草稿"}[confirmed]
-			sentence := "這份匯出從 2026-01-05 開始，帳本裡的匯入從 2026-01-03 開始，什麼都沒有動"
+			status := map[bool]string{true: "已確認", false: "草稿"}[tt.confirmed]
+			sentence := "這份匯出從 2026-01-05 開始，帳本裡的匯入從 " + tt.ledgerFrom + " 開始，什麼都沒有動"
 			for _, args := range [][]string{{"apply"}, {"confirm", "--month", "2026-01"}, {"verify"}} {
 				out, err := e.moze(args...)
 				if err == nil || err.Error() != sentence {
 					t.Errorf("%s: err = %v, want the refusal %q", args[0], err, sentence)
 				}
 				for _, want := range []string{
-					"而且帳本裡有 1 筆匯入的交易，日期早於這份匯出的第一列：\n  2026-01-03 支出 Fake 信用卡 TWD -5「First coffee」（" + status + "）\n    鍵：" + first.IdempotencyKey + "\n",
+					"而且帳本裡有 1 筆匯入的交易，日期早於這份匯出的第一列：\n  2026-01-03 支出 " + tt.account + " TWD -5「First coffee」（" + status + "）\n    鍵：" + first.IdempotencyKey + "\n",
 					"這份匯出的開頭比較晚：請改用完整的匯出",
 					"你在 MOZE 刪掉或改了最前面的列：請作廢（草稿則捨棄）上面這幾筆，再執行一次",
+					"作廢之後，如果某個帳戶最前面的列被刪掉，它已確認的期初餘額會換日期，apply 會再列出來，那幾筆也要作廢",
 				} {
 					if !strings.Contains(out, want) {
 						t.Errorf("%s did not print %q:\n%s", args[0], want, out)
 					}
 				}
-				if strings.Count(out, "鍵：moze:") != 1 || strings.Contains(out, "期初餘額") {
-					t.Errorf("%s names more than the one transaction of the row, or an opening balance:\n%s", args[0], out)
+				if strings.Count(out, "鍵：moze:") != 1 || listedOpening.MatchString(out) {
+					t.Errorf("%s names more than the one transaction of the row, or lists an opening balance:\n%s", args[0], out)
 				}
 			}
 			if st := e.must("status"); !strings.Contains(st, "注意：這份匯出從 2026-01-05 開始") || !strings.Contains(st, first.IdempotencyKey) {
@@ -267,12 +301,39 @@ func TestImportRefusesAnExportThatLostItsFirstRowAndGoesOnOnceWhatWasMadeOfItIsV
 			}
 
 			// The user voids it, or discards it, as the refusal says; the import goes on.
-			if confirmed {
+			if tt.confirmed {
 				e.void(l, first.IdempotencyKey)
 			} else if err := l.DiscardDraft.DiscardDraft(context.Background(), first.ID); err != nil {
 				t.Fatal(err)
 			}
-			if out := e.must("apply"); !strings.Contains(out, "草稿：新增 0 筆，已更新 0 筆") || strings.Contains(out, "已移除") || strings.Contains(out, "匯出裡沒有對應的列") {
+
+			// A confirmed opening balance of the account has another day now, and is told as the
+			// confirmed transaction that it is, by the day and key it has in the ledger: by apply,
+			// confirm and verify, which fail, and by status, which does not.
+			if tt.confirmed && tt.moves {
+				wants := []string{
+					"，對照現在是 2026-01-04；帳本裡已確認的是：\n    2026-01-02 期初餘額 " + tt.account + " TWD +1000",
+					"\n      鍵：" + opening.IdempotencyKey + "\n",
+				}
+				told := map[string]string{"status": e.must("status")}
+				for _, args := range [][]string{{"apply"}, {"confirm", "--month", "2026-01"}, {"verify"}} {
+					out, err := e.moze(args...)
+					if err == nil {
+						t.Errorf("%s with the opening balance as it was: no error", args[0])
+					}
+					told[args[0]] = out
+				}
+				for command, out := range told {
+					for _, want := range wants {
+						if !strings.Contains(out, want) {
+							t.Errorf("%s did not print %q:\n%s", command, want, out)
+						}
+					}
+				}
+				e.void(l, opening.IdempotencyKey)
+			}
+			updated := map[bool]int{true: 1, false: 0}[tt.moves]
+			if out := e.must("apply"); !strings.Contains(out, fmt.Sprintf("草稿：新增 0 筆，已更新 %d 筆", updated)) || strings.Contains(out, "已移除") || strings.Contains(out, "匯出裡沒有對應的列") {
 				t.Errorf("apply after it printed:\n%s", out)
 			}
 			for _, month := range months {

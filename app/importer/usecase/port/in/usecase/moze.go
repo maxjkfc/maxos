@@ -163,6 +163,12 @@ type StaleUnit struct {
 	Unit model.Unit
 	// Lines are the lines of the export the unit is made of.
 	Lines []int
+	// Confirmed are the confirmed transactions of the earlier versions of the unit, as
+	// the ledger has them, oldest first: they are what the user voids, and finds by their
+	// own day and key. Their day is not always the day Unit has now: an opening balance
+	// is dated from the first row of its account, which moves when that row is deleted,
+	// and the ledger has it on the day it was.
+	Confirmed []Orphan
 }
 
 // BlockedUnit is a unit that is not recorded because a plan of instalments that the
@@ -363,6 +369,9 @@ type StatusOutput struct {
 	// Warnings are what is odd in the mapping, which the plan tells too.
 	Warnings []model.Warning
 	Months   []MonthStatus
+	// Stale are the units whose confirmed version is not what the plan says now, which
+	// Months counts: named, with the confirmed transactions the user voids.
+	Stale []StaleUnit
 	// Orphans are the transactions of the import that no unit of the plan accounts for
 	// any more, on days the export covers, drafts and confirmed ones. Uncovered is what
 	// the ledger has of the import on days it does not cover. LaterStart is set when the

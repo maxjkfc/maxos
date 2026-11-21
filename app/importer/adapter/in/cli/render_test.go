@@ -356,12 +356,15 @@ func TestTheRefusalNamesWhatToPutRight(t *testing.T) {
 // transactions of the import that are before it (twenty at most, then how many more are
 // not said), their status, and the two things that can be: an export that begins later,
 // which the user replaces; or the first rows deleted or changed in MOZE, whose
-// transactions the user voids (discards, for a draft). Status says the same as a warning.
-// Nothing was changed, which it says, and nothing of the opening balances is.
+// transactions the user voids (discards, for a draft). The line before the last says that
+// a confirmed opening balance, whose account lost its first row, changes its day and is
+// told by apply next, to void too. Status says the same as a warning. Nothing was changed,
+// which it says, and no opening balance is among the transactions.
 func TestAnExportThatBeginsLateIsRefusedWithTheTransactionsBeforeItAndTheTwoWaysOut(t *testing.T) {
 	const (
-		shorter = "這份匯出的開頭比較晚：請改用完整的匯出"
-		deleted = "你在 MOZE 刪掉或改了最前面的列：請作廢（草稿則捨棄）上面這幾筆，再執行一次"
+		shorter  = "這份匯出的開頭比較晚：請改用完整的匯出"
+		deleted  = "你在 MOZE 刪掉或改了最前面的列：請作廢（草稿則捨棄）上面這幾筆，再執行一次"
+		openings = "作廢之後，如果某個帳戶最前面的列被刪掉，它已確認的期初餘額會換日期，apply 會再列出來，那幾筆也要作廢"
 	)
 	before := func(n int) []usecase.Orphan {
 		var out []usecase.Orphan
@@ -393,7 +396,7 @@ func TestAnExportThatBeginsLateIsRefusedWithTheTransactionsBeforeItAndTheTwoWays
 			fmt.Sprintf("這份匯出從 2026-02-05 開始，帳本裡的匯入從 2026-01-03 開始，而且帳本裡有 %d 筆匯入的交易，日期早於這份匯出的第一列：\n", tt.n),
 			"  2026-01-03 支出 Cash TWD -5「Noodles」（已確認）\n    鍵：moze:row-00\n",
 			"  2026-01-03 支出 Cash TWD -5「Noodles」（草稿）\n    鍵：moze:row-01\n",
-			"有兩種可能：\n  " + shorter + "\n  " + deleted + "\n什麼都沒有動\n",
+			"有兩種可能：\n  " + shorter + "\n  " + deleted + "\n" + openings + "\n什麼都沒有動\n",
 			tt.more,
 		} {
 			if !strings.Contains(out, want) {
@@ -406,10 +409,10 @@ func TestAnExportThatBeginsLateIsRefusedWithTheTransactionsBeforeItAndTheTwoWays
 		if tt.more == "" && strings.Contains(out, "另有") {
 			t.Errorf("%d transactions: the refusal says there are more:\n%s", tt.n, out)
 		}
-		if strings.Contains(out, "期初餘額") {
-			t.Errorf("%d transactions: the refusal says opening balances:\n%s", tt.n, out)
+		if strings.Count(out, "期初餘額") != 1 || regexp.MustCompile(`(?m)^\s+\d{4}-\d{2}-\d{2} 期初餘額`).MatchString(out) {
+			t.Errorf("%d transactions: the refusal says opening balances only in the line about them, and lists none:\n%s", tt.n, out)
 		}
-		for _, sentence := range []string{shorter, deleted, strings.SplitN(out, "：\n", 2)[0]} {
+		for _, sentence := range []string{shorter, deleted, openings, strings.SplitN(out, "：\n", 2)[0]} {
 			if asciiSentence.MatchString(sentence) {
 				t.Errorf("the sentence has English words: %q", sentence)
 			}
@@ -419,6 +422,58 @@ func TestAnExportThatBeginsLateIsRefusedWithTheTransactionsBeforeItAndTheTwoWays
 		var status strings.Builder
 		if err := cli.RenderStatus(&status, usecase.StatusOutput{LaterStart: &later}); err != nil || status.String() != "注意："+out {
 			t.Errorf("%d transactions: status printed (%v):\n%s\nwant the refusal as a warning", tt.n, err, status.String())
+		}
+	}
+}
+
+// A unit whose confirmed version is not what the plan says is told by apply, by confirm, by
+// verify and by status in one way: as the plan says it now, with its day, and under it the
+// confirmed transactions that the ledger has, by their own day and key. An opening balance
+// whose account lost its first row is dated otherwise in the ledger than in the plan, and
+// the day and the key are how the user finds the one to void.
+func TestAChangedConfirmedUnitIsToldByTheDayAndKeyTheLedgerHasItUnder(t *testing.T) {
+	opening := usecase.StaleUnit{
+		Unit:  model.Unit{Kind: model.KindOpening, Date: day("2026-01-04"), Description: "期初金額"},
+		Lines: []int{13},
+		Confirmed: []usecase.Orphan{{
+			Key: "moze:row-13@abc", Status: "confirmed", Kind: "opening", Date: day("2026-01-02"),
+			Account: "Cash", Instrument: "TWD", Amount: dec("1000"), Description: "期初金額",
+		}},
+	}
+	transfer := usecase.StaleUnit{
+		Unit:  model.Unit{Kind: model.KindTransfer, Date: day("2026-01-20"), Description: "Rent"},
+		Lines: []int{40, 41},
+		Confirmed: []usecase.Orphan{
+			{Key: "moze:row-40+row-41@abc", Status: "confirmed", Kind: "transfer", Date: day("2026-01-19"), Account: "Cash", Instrument: "TWD", Amount: dec("-200")},
+			{Key: "moze:row-40+row-41@abd", Status: "confirmed", Kind: "transfer", Date: day("2026-01-19"), Account: "Bank", Instrument: "TWD", Amount: dec("200")},
+		},
+	}
+	stale := []usecase.StaleUnit{opening, transfer}
+	const block = "  期初餘額（檔案第 13 行）期初金額，對照現在是 2026-01-04；帳本裡已確認的是：\n" +
+		"    2026-01-02 期初餘額 Cash TWD +1000「期初金額」\n" +
+		"      鍵：moze:row-13@abc\n" +
+		"  轉帳（檔案第 40、41 行）Rent，對照現在是 2026-01-20；帳本裡已確認的是：\n" +
+		"    2026-01-19 轉帳 Cash TWD -200\n" +
+		"      鍵：moze:row-40+row-41@abc\n" +
+		"    2026-01-19 轉帳 Bank TWD +200\n" +
+		"      鍵：moze:row-40+row-41@abd\n"
+
+	var apply, verify, confirm, status strings.Builder
+	if err := cli.RenderApply(&apply, usecase.ApplyOutput{Stale: stale}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.RenderVerify(&verify, usecase.VerifyOutput{Stale: stale}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.RenderStatus(&status, usecase.StatusOutput{Stale: stale}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.Refusal(&confirm, &usecase.StaleError{Month: "2026-01", Units: stale}); err == nil {
+		t.Fatal("no error")
+	}
+	for name, out := range map[string]string{"apply": apply.String(), "verify": verify.String(), "confirm": confirm.String(), "status": status.String()} {
+		if !strings.Contains(out, block) {
+			t.Errorf("%s does not tell the units by the day and key the ledger has:\n%s\nwant:\n%s", name, out, block)
 		}
 	}
 }

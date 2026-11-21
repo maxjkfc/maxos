@@ -109,6 +109,19 @@ func (l lookup) stale() bool {
 	return slices.ContainsFunc(l.others, func(v versioned) bool { return v.tx.Status == "confirmed" })
 }
 
+// confirmedOthers are the transactions that the unit replaces that are confirmed, oldest
+// first: what makes the unit stale, and what the user voids.
+func (l lookup) confirmedOthers() []finance.Transaction {
+	var out []finance.Transaction
+	for _, v := range l.others {
+		if v.tx.Status == "confirmed" {
+			out = append(out, v.tx)
+		}
+	}
+	oldestFirst(out)
+	return out
+}
+
 // blocker is the key of a plan of instalments, confirmed and gone from the plan, that
 // holds the unit back; it is empty when none does. It is not the unit's own earlier
 // version, so the unit is not stale: what the user voids is the plan.
@@ -225,10 +238,16 @@ func (st *state) staleUnits(plan model.Plan, month string) []usecase.StaleUnit {
 	var out []usecase.StaleUnit
 	for _, u := range unitsOf(plan, month) {
 		if s, _ := st.of(u); s == unitStale {
-			out = append(out, usecase.StaleUnit{Unit: u, Lines: linesOf(plan, u)})
+			out = append(out, st.staleUnit(plan, u))
 		}
 	}
 	return out
+}
+
+// staleUnit is a unit that is stale, with the confirmed transactions that make it so, by
+// their own day and key.
+func (st *state) staleUnit(plan model.Plan, u model.Unit) usecase.StaleUnit {
+	return usecase.StaleUnit{Unit: u, Lines: linesOf(plan, u), Confirmed: st.viewsOf(st.look(u).confirmedOthers())}
 }
 
 // blockedUnits are the units of the month that a plan of instalments that is gone holds

@@ -10,11 +10,11 @@ import (
 
 // Status counts, for each month, the units that are drafts, confirmed, voided, stale,
 // held back by a plan that is gone, and not recorded yet, the rows that are not recorded
-// at all, and the adjustments that are still to make; names the transactions of the
-// import that no unit of the plan accounts for, on days the export covers; and says
-// what the ledger has of the import on days it does not. For an export that begins after
-// the import in the ledger does it says that, and nothing else: what the export says of
-// the ledger is not meant for it.
+// at all, and the adjustments that are still to make; names the units that are stale and
+// the transactions of the import that no unit of the plan accounts for, on days the export
+// covers; and says what the ledger has of the import on days it does not. For an export
+// that begins after the import in the ledger does it says that, and nothing else: what the
+// export says of the ledger is not meant for it.
 func (a *Importer) Status(ctx context.Context, in usecase.StatusInput) (usecase.StatusOutput, error) {
 	var out usecase.StatusOutput
 	ld, err := a.inputs.load(ctx, in.Files)
@@ -45,6 +45,7 @@ func (a *Importer) Status(ctx context.Context, in usecase.StatusInput) (usecase.
 		ms := monthStatus(plan, st, m)
 		ms.Skipped = skipped[m]
 		out.Months = append(out.Months, ms)
+		out.Stale = append(out.Stale, st.staleUnits(plan, m)...)
 	}
 	out.Orphans = st.orphanViews()
 	out.Uncovered = st.uncovered()

@@ -77,7 +77,7 @@ func (a *Importer) applyUnits(ctx context.Context, r refs, st *state, plan model
 		case err != nil:
 			out.Failed = append(out.Failed, usecase.Failure{Unit: u, Lines: linesOf(plan, u), Err: err})
 		case res == resultStale:
-			out.Stale = append(out.Stale, usecase.StaleUnit{Unit: u, Lines: linesOf(plan, u)})
+			out.Stale = append(out.Stale, st.staleUnit(plan, u))
 		case res == resultBlocked:
 			out.Blocked = append(out.Blocked, usecase.BlockedUnit{Unit: u, Lines: linesOf(plan, u), Plan: st.look(u).blocker()})
 		case res == resultVoided:

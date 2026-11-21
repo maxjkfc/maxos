@@ -146,10 +146,11 @@ func TestAnExportThatBeginsAfterTheImportInTheLedgerDoesIsRefusedAndNothingIsCha
 	}
 }
 
-// withEarlyRow is the fixture and a row of the first day, on the card, which has no opening
-// balance to be dated from it: the one row of a day that nothing else is on.
-func withEarlyRow() []model.Row {
-	early := row("2026-01-03 09:00", model.TypeExpense, "Card", "TWD", "-5", cat("Food", "Lunch"), name("First coffee"))
+// withEarlyRow is the fixture and a row two days before its first, on the account, which is
+// the first row of the account: its opening balance, when it has one, is dated from the
+// row. The card has no opening balance to be dated from it; the cash has one.
+func withEarlyRow(account string) []model.Row {
+	early := row("2026-01-03 09:00", model.TypeExpense, account, "TWD", "-5", cat("Food", "Lunch"), name("First coffee"))
 	return slices.Insert(fixture(), len(undated(fixture())), early)
 }
 
@@ -157,38 +158,60 @@ func withEarlyRow() []model.Row {
 // day, and looks like one that was cut short. What the ledger has of that row is before it,
 // and the refusal names it, with the two things it can be; the user voids it (a draft is
 // discarded), and the import goes on. It is refused while the ledger has only drafts too.
+// When the row was the first of an account with an opening balance, that opening balance is
+// dated from the row, and changes its day: a draft is updated by apply; a confirmed one is
+// stale, which apply, confirm and verify say, naming the confirmed transaction by its own
+// day and key, and the user voids it too.
 func TestAnExportThatLostItsFirstRowIsRefusedWithWhatWasMadeOfItAndGoesOnOnceThatIsVoidedOrDiscarded(t *testing.T) {
-	for _, confirmed := range []bool{true, false} {
-		name := "a ledger of drafts"
-		if confirmed {
-			name = "a ledger that is confirmed"
-		}
-		t.Run(name, func(t *testing.T) {
-			w := newWorld(t, withEarlyRow(), fixtureMapping()).reviewed()
+	for _, tt := range []struct {
+		name      string
+		confirmed bool
+		// account is the account of the row that is deleted, and ledgerFrom the first day
+		// of the import in the ledger while the row is there; moves says that the account has
+		// an opening balance, which is dated from that row.
+		account, ledgerFrom string
+		moves               bool
+	}{
+		{"a ledger that is confirmed", true, "Card", "2026-01-03", false},
+		{"a ledger of drafts", false, "Card", "2026-01-03", false},
+		{"a ledger that is confirmed, the row is the first of an account with an opening balance", true, "Cash", "2026-01-02", true},
+		{"a ledger of drafts, the row is the first of an account with an opening balance", false, "Cash", "2026-01-02", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newWorld(t, withEarlyRow(tt.account), fixtureMapping()).reviewed()
 			w.apply()
-			if confirmed {
+			if tt.confirmed {
 				for _, m := range []string{"2026-01", "2026-02", "2026-03"} {
 					w.mustConfirm(m)
 				}
 			}
-			stored := w.ledger.ofRow(w.rowKeyOf("First coffee"))
-			if len(stored) != 1 {
-				t.Fatalf("the ledger has %d transactions of the first row", len(stored))
+			made := w.ledger.ofRow(w.rowKeyOf("First coffee"))
+			if len(made) != 1 {
+				t.Fatalf("the ledger has %d transactions of the first row", len(made))
 			}
-			first := stored[0]
+			first := made[0]
+			var opening *stored
+			for _, o := range w.ledger.ofKind("opening") {
+				if tt.moves && o.OccurredOn.Equal(day(tt.ledgerFrom)) {
+					opening = o
+				}
+			}
+			if tt.moves && opening == nil {
+				t.Fatalf("the ledger has no opening balance dated %s", tt.ledgerFrom)
+			}
 			before := w.ledger.snapshot()
 			w.export(fixture())
 			ctx := context.Background()
 
 			for name, err := range refusals(w, "2026-01") {
 				var later *usecase.LaterStartError
-				if !errors.As(err, &later) || !later.From.Equal(day("2026-01-05")) || !later.LedgerFrom.Equal(day("2026-01-03")) || len(later.Before) != 1 {
+				if !errors.As(err, &later) || !later.From.Equal(day("2026-01-05")) || !later.LedgerFrom.Equal(day(tt.ledgerFrom)) || len(later.Before) != 1 {
 					t.Fatalf("%s = %v, want a refusal that names the one transaction before 5 January", name, err)
 				}
 				o := later.Before[0]
-				wantStatus := map[bool]string{true: "confirmed", false: "draft"}[confirmed]
-				if o.Key != first.IdempotencyKey || o.Status != wantStatus || !o.Date.Equal(day("2026-01-03")) || o.Account != "Card" || o.Instrument != "TWD" || !o.Amount.Equal(d("-5")) {
-					t.Errorf("%s names %+v, want the first row's %s transaction of the card: -5 on 3 January", name, o, wantStatus)
+				wantStatus := map[bool]string{true: "confirmed", false: "draft"}[tt.confirmed]
+				if o.Key != first.IdempotencyKey || o.Status != wantStatus || !o.Date.Equal(day("2026-01-03")) || o.Account != tt.account || o.Instrument != "TWD" || !o.Amount.Equal(d("-5")) {
+					t.Errorf("%s names %+v, want the first row's %s transaction of %s: -5 on 3 January", name, o, wantStatus, tt.account)
 				}
 			}
 			if got := w.ledger.snapshot(); got != before {
@@ -196,7 +219,7 @@ func TestAnExportThatLostItsFirstRowIsRefusedWithWhatWasMadeOfItAndGoesOnOnceTha
 			}
 
 			// The user voids it, or discards it, as the refusal says: the import goes on.
-			if confirmed {
+			if tt.confirmed {
 				if n := w.ledger.void(first.IdempotencyKey); n != 1 {
 					t.Fatalf("voided %d", n)
 				}
@@ -204,8 +227,17 @@ func TestAnExportThatLostItsFirstRowIsRefusedWithWhatWasMadeOfItAndGoesOnOnceTha
 				t.Fatal(err)
 			}
 			out := w.apply()
-			if sum(out.New)+sum(out.Updated)+sum(out.Revived) != 0 || len(out.Stale)+len(out.Orphans)+len(out.Removed)+len(out.Blocked)+len(out.Failed) != 0 {
-				t.Errorf("apply after it = new %v, updated %v, stale %d, orphans %d, removed %d, want nothing: the row is not in the export", out.New, out.Updated, len(out.Stale), len(out.Orphans), len(out.Removed))
+			if tt.confirmed && tt.moves {
+				w.theConfirmedOpeningIsToldByItsOwnDayAndKey(t, out, opening, tt.account)
+				if n := w.ledger.void(opening.IdempotencyKey); n != 1 {
+					t.Fatalf("voided %d", n)
+				}
+				out = w.apply()
+			}
+			wantUpdated := map[bool]int{true: 1, false: 0}[tt.moves]
+			if out.Updated[model.KindOpening] != wantUpdated || sum(out.New)+sum(out.Updated)+sum(out.Revived) != wantUpdated ||
+				len(out.Stale)+len(out.Orphans)+len(out.Removed)+len(out.Blocked)+len(out.Failed) != 0 {
+				t.Errorf("apply after it = new %v, updated %v, stale %d, orphans %d, removed %d, want only the opening balance updated, when its day changed", out.New, out.Updated, len(out.Stale), len(out.Orphans), len(out.Removed))
 			}
 			for _, m := range []string{"2026-01", "2026-02", "2026-03"} {
 				if _, err := w.confirm(m); err != nil {
@@ -217,6 +249,31 @@ func TestAnExportThatLostItsFirstRowIsRefusedWithWhatWasMadeOfItAndGoesOnOnceTha
 				t.Errorf("verify after it = %d months, %d unexplained, stale %d, orphans %d, %v, want the months to agree", len(v.Months), v.Unexplained, len(v.Stale), len(v.Orphans), err)
 			}
 		})
+	}
+}
+
+// theConfirmedOpeningIsToldByItsOwnDayAndKey checks that apply, confirm, verify and status
+// each say the one stale unit, which is the opening balance of the account that lost its
+// first row: as the plan says it now, on 4 January, and with the confirmed transaction that
+// the ledger has, by its own day, 2 January, and its key, which is what the user finds it by
+// to void.
+func (w *world) theConfirmedOpeningIsToldByItsOwnDayAndKey(t *testing.T, applied usecase.ApplyOutput, opening *stored, account string) {
+	t.Helper()
+	var stale *usecase.StaleError
+	_, confirmErr := w.confirm("2026-01")
+	v, verifyErr := w.imp.Verify(context.Background(), usecase.VerifyInput{Files: w.files})
+	st, statusErr := w.imp.Status(context.Background(), usecase.StatusInput{Files: w.files})
+	if !errors.As(confirmErr, &stale) || verifyErr != nil || statusErr != nil {
+		t.Fatalf("confirm = %v, verify = %v, status = %v, want the stale unit from confirm, and from verify and status in their output", confirmErr, verifyErr, statusErr)
+	}
+	for name, units := range map[string][]usecase.StaleUnit{"apply": applied.Stale, "confirm": stale.Units, "verify": v.Stale, "status": st.Stale} {
+		if len(units) != 1 || units[0].Unit.Kind != model.KindOpening || !units[0].Unit.Date.Equal(day("2026-01-04")) || len(units[0].Confirmed) != 1 {
+			t.Fatalf("%s says %+v, want the opening balance as the plan says it on 4 January, with the one transaction of the ledger", name, units)
+		}
+		c := units[0].Confirmed[0]
+		if c.Key != opening.IdempotencyKey || c.Status != "confirmed" || c.Kind != "opening" || !c.Date.Equal(day("2026-01-02")) || c.Account != account || !c.Amount.Equal(d("1000")) {
+			t.Errorf("%s names %+v, want the confirmed opening balance of %s that the ledger has on 2 January, under %s", name, c, account, opening.IdempotencyKey)
+		}
 	}
 }
 

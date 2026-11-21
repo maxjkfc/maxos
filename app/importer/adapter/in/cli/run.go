@@ -106,9 +106,7 @@ func writeApplied(w *strings.Builder, out usecase.ApplyOutput) {
 func writeHeldBack(w *strings.Builder, out usecase.ApplyOutput) {
 	if len(out.Stale) > 0 {
 		fmt.Fprintf(w, "已確認的內容與對照不同 %d 筆；不會動它們，也不會在旁邊再記一筆：\n", len(out.Stale))
-		for _, s := range out.Stale {
-			writeUnit(w, s.Unit, s.Lines)
-		}
+		writeStale(w, out.Stale)
 		fmt.Fprintln(w, "  把它們作廢之後再執行一次 apply，會依現在的對照重記成草稿。")
 	}
 	writeBlocked(w, out.Blocked)
@@ -177,32 +175,50 @@ func writeUnit(w *strings.Builder, u model.Unit, lines []int) {
 	fmt.Fprintf(w, "  %s %s（檔案第 %s 行）%s\n", kindText[u.Kind], u.Date.Format(time.DateOnly), lineList(lines), clip(u.Description, 24))
 }
 
+// writeStale says the units whose confirmed version is not what the plan says, which the
+// user voids: each by what the plan says of it now, with its day, and under it the
+// confirmed transactions that the ledger has, by their own day and key, which is how the
+// user finds them. Their day can be another than the one the plan says: an opening balance
+// is dated from the first row of its account, or of the file, and the ledger has it on the
+// day it was dated before that row was deleted.
+func writeStale(w *strings.Builder, units []usecase.StaleUnit) {
+	for _, s := range units {
+		head := fmt.Sprintf("  %s（檔案第 %s 行）%s，對照現在是 %s", kindText[s.Unit.Kind], lineList(s.Lines), clip(s.Unit.Description, 24), s.Unit.Date.Format(time.DateOnly))
+		if len(s.Confirmed) > 0 {
+			head += "；帳本裡已確認的是："
+		}
+		fmt.Fprintln(w, head)
+		writeTransactions(w, s.Confirmed, "    ", false)
+	}
+}
+
 // writeOrphans says transactions of the import by their day, their kind, the first
 // account they move and how much, and the key they were recorded under, which is what
 // the user finds them by.
 func writeOrphans(w *strings.Builder, orphans []usecase.Orphan) {
-	writeTransactions(w, orphans, false)
+	writeTransactions(w, orphans, "  ", false)
 }
 
 // statusText says whether a transaction of the import is a draft or confirmed.
 var statusText = map[string]string{"draft": "（草稿）", "confirmed": "（已確認）"}
 
-// writeTransactions says them so, and with whether each is a draft or confirmed when the
-// user is to do one thing with the drafts and another with the confirmed ones.
-func writeTransactions(w *strings.Builder, ts []usecase.Orphan, withStatus bool) {
+// writeTransactions says them so, each line after the indent and its key two further in,
+// and with whether each is a draft or confirmed when the user is to do one thing with the
+// drafts and another with the confirmed ones.
+func writeTransactions(w *strings.Builder, ts []usecase.Orphan, indent string, withStatus bool) {
 	for _, o := range ts {
 		kind := ledgerKindText[o.Kind]
 		if kind == "" {
 			kind = o.Kind
 		}
-		fmt.Fprintf(w, "  %s %s %s %s %s", o.Date.Format(time.DateOnly), kind, o.Account, o.Instrument, signedQuantity(o.Amount))
+		fmt.Fprintf(w, "%s%s %s %s %s %s", indent, o.Date.Format(time.DateOnly), kind, o.Account, o.Instrument, signedQuantity(o.Amount))
 		if o.Description != "" {
 			fmt.Fprintf(w, "「%s」", clip(o.Description, 24))
 		}
 		if withStatus {
 			fmt.Fprint(w, statusText[o.Status])
 		}
-		fmt.Fprintf(w, "\n    鍵：%s\n", o.Key)
+		fmt.Fprintf(w, "\n%s  鍵：%s\n", indent, o.Key)
 	}
 }
 
@@ -383,9 +399,7 @@ func verifyText(w *strings.Builder, out usecase.VerifyOutput) {
 	}
 	if len(out.Stale) > 0 {
 		fmt.Fprintf(w, "已確認的內容與對照不同 %d 筆（作廢它們，再執行 apply 依現在的對照重記）：\n", len(out.Stale))
-		for _, s := range out.Stale {
-			writeUnit(w, s.Unit, s.Lines)
-		}
+		writeStale(w, out.Stale)
 	}
 	writeBlocked(w, out.Blocked)
 	if len(out.Orphans) > 0 {
@@ -412,6 +426,10 @@ func RenderStatus(w io.Writer, out usecase.StatusOutput) error {
 		})
 	}
 	table(&b, []string{"月份", "草稿", "已確認", "略過", "待對帳", "尚未匯入", "已作廢", "已確認但與對照不同", "被已不存在的計畫擋住"}, rows)
+	if len(out.Stale) > 0 {
+		fmt.Fprintf(&b, "已確認的內容與對照不同 %d 筆（作廢它們，再執行 apply 依現在的對照重記）：\n", len(out.Stale))
+		writeStale(&b, out.Stale)
+	}
 	if len(out.Orphans) > 0 {
 		fmt.Fprintf(&b, "匯出裡沒有對應的列的交易 %d 筆（已確認的會算進餘額，作廢它們；草稿由 apply 移除）：\n", len(out.Orphans))
 		writeOrphans(&b, out.Orphans)
@@ -451,9 +469,7 @@ func Refusal(w io.Writer, err error) error {
 		out = fmt.Errorf("%s 之前的月份還沒確認完，什麼都沒有確認", order.Month)
 	case errors.As(err, &stale):
 		fmt.Fprintf(&b, "不能確認 %s：已確認的內容與對照不同 %d 筆：\n", stale.Month, len(stale.Units))
-		for _, s := range stale.Units {
-			writeUnit(&b, s.Unit, s.Lines)
-		}
+		writeStale(&b, stale.Units)
 		fmt.Fprintln(&b, "把它們作廢，執行 apply 依現在的對照重記，再確認。")
 		out = fmt.Errorf("有 %d 筆已確認的交易與對照不同，什麼都沒有確認", len(stale.Units))
 	case errors.As(err, &orphan):
@@ -485,17 +501,20 @@ const laterStartListLimit = 20
 // are before it, the first of them, and the two things it can be: the export is not the
 // whole one, which the user replaces; or the user deleted or changed its first rows in
 // MOZE, and voids (discards, for drafts) the transactions that were made of them. The
-// opening balances are not among them, and nothing was changed.
+// opening balances are not among them, and nothing was changed. A confirmed opening
+// balance whose account lost its first row is dated otherwise then, and is what apply
+// says next: the last line says so, for the user to void that one too.
 func writeLaterStart(w *strings.Builder, l usecase.LaterStart, prefix string) {
 	fmt.Fprintf(w, "%s這份匯出從 %s 開始，帳本裡的匯入從 %s 開始，而且帳本裡有 %d 筆匯入的交易，日期早於這份匯出的第一列：\n",
 		prefix, l.From.Format(time.DateOnly), l.LedgerFrom.Format(time.DateOnly), len(l.Before))
-	writeTransactions(w, l.Before[:min(len(l.Before), laterStartListLimit)], true)
+	writeTransactions(w, l.Before[:min(len(l.Before), laterStartListLimit)], "  ", true)
 	if more := len(l.Before) - laterStartListLimit; more > 0 {
 		fmt.Fprintf(w, "  …另有 %d 筆\n", more)
 	}
 	fmt.Fprintln(w, "有兩種可能：")
 	fmt.Fprintln(w, "  這份匯出的開頭比較晚：請改用完整的匯出")
 	fmt.Fprintln(w, "  你在 MOZE 刪掉或改了最前面的列：請作廢（草稿則捨棄）上面這幾筆，再執行一次")
+	fmt.Fprintln(w, "作廢之後，如果某個帳戶最前面的列被刪掉，它已確認的期初餘額會換日期，apply 會再列出來，那幾筆也要作廢")
 	fmt.Fprintln(w, "什麼都沒有動")
 }
 
