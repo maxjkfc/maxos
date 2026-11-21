@@ -160,23 +160,9 @@ func atVersion(t *testing.T, want int64) (*pgxpool.Pool, *goose.Provider) {
 	return pool, provider
 }
 
-// atVersion5 returns a database that has the migrations up to 0005 applied, which
-// is where the tests of 0005 begin.
-func atVersion5(t *testing.T) (*pgxpool.Pool, *goose.Provider) {
-	t.Helper()
-	return atVersion(t, 5)
-}
-
-// atVersion6 returns a database that has the migrations up to 0006 applied, which
-// is where the tests of 0006 begin.
-func atVersion6(t *testing.T) (*pgxpool.Pool, *goose.Provider) {
-	t.Helper()
-	return atVersion(t, 6)
-}
-
 func TestMigration0005GoesDownToTheSchemaOf0004AndUpAgain(t *testing.T) {
 	ctx := context.Background()
-	pool, provider := atVersion5(t)
+	pool, provider := atVersion(t, 5)
 	atFive := schema(t, pool)
 
 	// What the migrations up to 0004 make, on their own: taken by going all the way
@@ -350,7 +336,7 @@ func TestMigration0005RefusesToGoDownWhileTheLedgerHoldsWhatItAddedAndLeavesTheL
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pool, provider := atVersion5(t)
+			pool, provider := atVersion(t, 5)
 			seedLedger(t, pool, tt.kind, tt.postings...)
 			before := schema(t, pool)
 
@@ -388,7 +374,7 @@ func TestMigration0005RefusesToGoDownWhileTheLedgerHoldsWhatItAddedAndLeavesTheL
 
 func TestMigration0005GoesDownOverOrdinaryExpensesAndTransfers(t *testing.T) {
 	ctx := context.Background()
-	pool, provider := atVersion5(t)
+	pool, provider := atVersion(t, 5)
 	// What 0004 could hold, which the migration must not mistake for its own.
 	seedLedger(t, pool, "expense",
 		posting{book: "account", account: "cash", quantity: "-120"},
@@ -420,7 +406,7 @@ func TestMigration0005RefusesToGoDownWhileACategoryIsUnderASystemCategoryAndLeav
 		{"an income category", "income", unrecordedIncome},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			pool, provider := atVersion5(t)
+			pool, provider := atVersion(t, 5)
 			exec := func(query string, args ...any) {
 				t.Helper()
 				if _, err := pool.Exec(ctx, query, args...); err != nil {
@@ -498,7 +484,7 @@ func TestMigration0005StopsWhereATopLevelCategoryIsAlreadyCalledUnrecorded(t *te
 
 func TestMigration0006GoesDownToTheSchemaOf0005AndUpAgain(t *testing.T) {
 	ctx := context.Background()
-	pool, provider := atVersion6(t)
+	pool, provider := atVersion(t, 6)
 	atSix := schema(t, pool)
 
 	// What the migrations up to 0005 make, on their own: taken by going all the way
@@ -568,7 +554,7 @@ func TestMigration0006RefusesToGoDownWhileTheLedgerHoldsWhatItAddedAndLeavesTheL
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pool, provider := atVersion6(t)
+			pool, provider := atVersion(t, 6)
 			seedTransactions(t, pool, tt.transactions...)
 			before := schema(t, pool)
 
@@ -613,7 +599,7 @@ func TestMigration0006RefusesToGoDownWhileTheLedgerHoldsWhatItAddedAndLeavesTheL
 
 func TestMigration0006GoesDownOverWhatTheEarlierMigrationsHold(t *testing.T) {
 	ctx := context.Background()
-	pool, provider := atVersion6(t)
+	pool, provider := atVersion(t, 6)
 	// What 0005 could hold, which the migration must not mistake for its own.
 	seedTransactions(t, pool,
 		seeded{kind: "expense", postings: []posting{
@@ -705,11 +691,19 @@ func seedBudgets(t *testing.T, pool *pgxpool.Pool) {
 
 func TestMigration0007RefusesToGoDownWhileTheDatabaseHoldsBudgetsAndLeavesThemAlone(t *testing.T) {
 	ctx := context.Background()
+	// A case for each scope on its own, and one for both with an allocation: a guard
+	// that looks at one of the scopes only lets the budgets of the other go.
 	tests := []struct {
 		name string
 		seed func(t *testing.T, pool *pgxpool.Pool)
 	}{
 		{"the budgets of an area and a project, with an allocation", seedBudgets},
+		{"the budget of an area alone", func(t *testing.T, pool *pgxpool.Pool) {
+			t.Helper()
+			if _, err := pool.Exec(ctx, `INSERT INTO fin_budget (id, scope, area_id, effective_from, amount) VALUES ($1, 'area', $2, '2026-11-01', 5000)`, uuid.New(), uuid.New()); err != nil {
+				t.Fatalf("insert the budget: %v", err)
+			}
+		}},
 		{"the budget of a project alone", func(t *testing.T, pool *pgxpool.Pool) {
 			t.Helper()
 			if _, err := pool.Exec(ctx, `INSERT INTO fin_budget (id, scope, project_id, amount) VALUES ($1, 'project', $2, 0)`, uuid.New(), uuid.New()); err != nil {

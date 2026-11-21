@@ -398,7 +398,7 @@ func TestWhenTheCatalogOrTheRepoFailsTheErrorGoesOn(t *testing.T) {
 	})
 }
 
-func TestAProjectStandsAgainstItsBudgetWithAllItsExpensesWhenevertheyWereMade(t *testing.T) {
+func TestAProjectStandsAgainstItsBudgetWithAllItsExpensesWheneverTheyWereMade(t *testing.T) {
 	e := newEnv(t)
 	trip := e.project("日本旅行", false)
 	other := e.project("搬家", false)

@@ -71,10 +71,13 @@ func newBudgetWorld(t *testing.T) *budgetWorld {
 	w.rent, w.fun, w.fees, w.interest = category("Rent", nil), category("Fun", nil), category("Fees", nil), category("Interest", nil)
 	w.cash, w.bank, w.wallet, w.card = account("cash", "cash"), account("bank", "bank"), account("wallet", "wallet"), account("card", "card")
 
-	// Money to spend: opened on the first of October, confirmed.
+	// Money to spend: each account is opened with 100,000 on the first of October,
+	// before anything below happens, and confirmed.
 	for _, a := range []uuid.UUID{w.cash, w.bank, w.wallet} {
+		opening := w.details(w.key())
+		opening.OccurredOn = dateOn(2026, time.October, 1)
 		out, err := w.SetOpeningBalance.SetOpeningBalance(ctx, usecase.SetOpeningBalanceInput{
-			RecordDetails: w.details(w.key()), AccountID: a, InstrumentID: model.BaseCurrencyID, Amount: dec("100000"),
+			RecordDetails: opening, AccountID: a, InstrumentID: model.BaseCurrencyID, Amount: dec("100000"),
 		})
 		if err != nil {
 			t.Fatalf("SetOpeningBalance: %v", err)
@@ -510,4 +513,67 @@ func TestABudgetThatBreaksARuleIsRefusedAndNothingIsStoredThroughTheRealUseCases
 	w.setArea(w.work, dateOn(2026, time.November, 17), "2000", allocation(w.lunch, "50"))
 	wantStatus(t, "the budget set again", w.areas(november),
 		"Work: budget 2000, spent 0 (0 with projects), allocations [Lunch 0 of 50], unallocated 0")
+}
+
+// A budget is in force until a later one replaces it, and an area that is archived is
+// listed with the one it had: what it spent still counts. The way to end it is a budget
+// of nothing, which an archived area is given, and nothing else.
+func TestTheBudgetOfAnAreaThatIsArchivedSinceCanBeEndedAndNothingElseThroughTheRealUseCases(t *testing.T) {
+	ctx := context.Background()
+	w := newBudgetWorld(t)
+	october, november, december := dateOn(2026, time.October, 1), dateOn(2026, time.November, 1), dateOn(2026, time.December, 1)
+	june2030 := dateOn(2030, time.June, 1)
+
+	// Home has 1,000 a month from October on, 300 of it for food. It spent 90 on food in
+	// November; 22 on fun is dated in December, and confirmed already: it counts from its
+	// day. Then the area is archived.
+	w.setArea(w.home, october, "1000", allocation(w.food, "300"))
+	w.spend(dateOn(2026, time.November, 5), &w.home, nil, w.cash, w.food, "90")
+	w.spend(dateOn(2026, time.December, 3), &w.home, nil, w.cash, w.fun, "22")
+	if _, err := w.ArchiveArea.ArchiveArea(ctx, w.home); err != nil {
+		t.Fatalf("ArchiveArea: %v", err)
+	}
+
+	// The budget is in force still, and the area is listed with it, in every month after.
+	wantStatus(t, "November", w.areas(november),
+		"Home: budget 1000, spent 90 (90 with projects), allocations [Food 90 of 300], unallocated 0")
+	wantStatus(t, "December, on the 14th of November", w.areas(december),
+		"Home: budget 1000, spent 0 (0 with projects), allocations [Food 0 of 300], unallocated 0")
+	wantStatus(t, "June 2030", w.areas(june2030),
+		"Home: budget 1000, spent 0 (0 with projects), allocations [Food 0 of 300], unallocated 0")
+
+	// What is set for it other than the end is refused as for any archived area, and
+	// leaves the budget as it is: more than nothing, and nothing with an allocation.
+	isArchived := func(err error) bool {
+		var refErr *catalogusecase.ReferenceError
+		return errors.As(err, &refErr) && len(refErr.Problems) == 1 && refErr.Problems[0].ID == w.home && refErr.Problems[0].Archived
+	}
+	for name, request := range map[string]usecase.SetAreaBudgetInput{
+		"a budget of more than nothing":          {AreaID: w.home, Month: december, Amount: dec("500")},
+		"a budget of nothing with an allocation": {AreaID: w.home, Month: december, Amount: dec("0"), Allocations: []usecase.Allocation{allocation(w.food, "100")}},
+	} {
+		if _, err := w.SetAreaBudget.SetAreaBudget(ctx, request); !isArchived(err) {
+			t.Errorf("%s: err = %v, want the catalog's *ReferenceError for the area, archived", name, err)
+		}
+	}
+	wantStatus(t, "December after what was refused", w.areas(december),
+		"Home: budget 1000, spent 0 (0 with projects), allocations [Food 0 of 300], unallocated 0")
+
+	// The end of it is not refused: from December on there is no budget.
+	if _, err := w.SetAreaBudget.SetAreaBudget(ctx, usecase.SetAreaBudgetInput{AreaID: w.home, Month: december, Amount: dec("0")}); err != nil {
+		t.Fatalf("ending the budget of the archived area: %v", err)
+	}
+	w.clk.setDay(dateOn(2026, time.December, 10))
+	wantStatus(t, "December", w.areas(december),
+		"Home: budget none, spent 22 (22 with projects), allocations [], unallocated 22")
+	wantStatus(t, "November still has it", w.areas(november),
+		"Home: budget 1000, spent 90 (90 with projects), allocations [Food 90 of 300], unallocated 0")
+	wantStatus(t, "June 2030: nothing is in force, and nothing was spent", w.areas(june2030))
+
+	// And a budget of more than nothing is as refused as it was.
+	if _, err := w.SetAreaBudget.SetAreaBudget(ctx, usecase.SetAreaBudgetInput{AreaID: w.home, Month: december, Amount: dec("500")}); !isArchived(err) {
+		t.Errorf("a budget of 500 after the end: err = %v, want the catalog's *ReferenceError for the area, archived", err)
+	}
+	wantStatus(t, "December after it", w.areas(december),
+		"Home: budget none, spent 22 (22 with projects), allocations [], unallocated 22")
 }

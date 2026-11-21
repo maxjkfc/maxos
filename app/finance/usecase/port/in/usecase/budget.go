@@ -56,11 +56,17 @@ type AllocationStatus struct {
 // later one. An amount of nothing means no budget from that month on, which ends
 // an earlier one.
 //
-// The area must exist and not be archived. The amount is not negative. The
-// allocations are of categories that exist, are not archived, are expense
-// categories and are not a system category, at most one for each category, and
-// none for a category together with its parent; they add up to no more than the
-// amount. Nothing is stored when any of it is not so.
+// The area must exist and not be archived, with one exception: an amount of
+// nothing with no allocation, which ends the budget the area has, is also set for
+// an area that has been archived since, which then only has to exist. The budget in
+// force stays in force, and GetAreaBudgets lists an archived area with it, until a
+// later one replaces it, so it has to be possible to end it; ending is no new use
+// of the area. Anything else for an archived area is refused.
+//
+// The amount is not negative. The allocations are of categories that exist, are
+// not archived, are expense categories and are not a system category, at most one
+// for each category, and none for a category together with its parent; they add up
+// to no more than the amount. Nothing is stored when any of it is not so.
 type SetAreaBudget interface {
 	SetAreaBudget(ctx context.Context, in SetAreaBudgetInput) (AreaBudget, error)
 }

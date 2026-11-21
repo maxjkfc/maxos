@@ -75,8 +75,6 @@ type spendRow struct {
 // saved; what was spent is the rows a test adds, which it filters by day and by
 // area and project as the statements of the real repo do.
 type fakeBudgets struct {
-	repo.BudgetRepo
-
 	areaBudgets    []model.AreaBudget
 	projectBudgets []model.ProjectBudget
 	spending       []spendRow
@@ -349,6 +347,13 @@ func (e *env) area(name string, archived bool) uuid.UUID {
 	}
 	e.catalog.areas[id] = a
 	return id
+}
+
+// archiveArea archives an area of the catalog.
+func (e *env) archiveArea(id uuid.UUID) {
+	a := e.catalog.areas[id]
+	a.ArchivedAt = &time.Time{}
+	e.catalog.areas[id] = a
 }
 
 // project adds a project to the catalog, archived or not.

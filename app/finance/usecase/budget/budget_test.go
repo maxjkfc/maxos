@@ -126,6 +126,138 @@ func TestSetAreaBudgetRefusesAnAreaThatIsNotThereOrIsArchivedAndStoresNothing(t 
 	}
 }
 
+// A budget is in force until a later one replaces it, and an area that is archived is
+// listed with the one it had: what it spent still counts. If the budget could not be
+// ended it would be there for ever. What ends it is a budget of nothing, which is not a
+// new use of the area, so an archived area is given that, and nothing else; the catalog
+// is still asked, for the area has to be there.
+func TestTheBudgetOfAnAreaThatIsArchivedSinceCanBeEndedAndNothingElseCanBeSetForIt(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	work := e.area("工作", false)
+	food := e.category("飲食", nil)
+	e.setArea(work, day(2026, 10, 1), "1000", allocation(food, "300"))
+	e.archiveArea(work)
+
+	// It is in force still, and the area is listed with it, in any month after.
+	for _, month := range []time.Time{day(2026, 12, 1), day(2030, 6, 1)} {
+		got := e.areaOf(work, month)
+		if got.Budget == nil {
+			t.Fatalf("%s: no budget, want the one set for 2026-10: it is in force until another replaces it", month.Format("2006-01"))
+		}
+		wantMoney(t, "the budget in "+month.Format("2006-01"), *got.Budget, "1000")
+	}
+	stored := e.budgets.saves
+
+	// What is set for it other than the end is refused, as for any archived area, and
+	// nothing is stored: more than nothing, less than nothing, and nothing with an
+	// allocation, which is no end of the budget but a share of one that is not there.
+	refused := []struct {
+		name        string
+		amount      string
+		allocations []usecase.Allocation
+	}{
+		{"a budget of more than nothing", "500", nil},
+		{"a budget of less than nothing", "-1", nil},
+		{"a budget of nothing with an allocation", "0", []usecase.Allocation{allocation(food, "1")}},
+		{"a budget with its allocations", "500", []usecase.Allocation{allocation(food, "100")}},
+	}
+	for _, tt := range refused {
+		_, err := e.svc.SetAreaBudget(ctx, usecase.SetAreaBudgetInput{
+			AreaID: work, Month: day(2026, 12, 1), Amount: dec(tt.amount), Allocations: tt.allocations,
+		})
+
+		var refErr *catalogusecase.ReferenceError
+		if !errors.As(err, &refErr) || len(refErr.Problems) != 1 || refErr.Problems[0].ID != work || !refErr.Problems[0].Archived {
+			t.Errorf("%s: err = %v, want the catalog's *ReferenceError for the area, archived", tt.name, err)
+		}
+	}
+	if e.budgets.saves != stored {
+		t.Fatalf("%d budgets stored by what was refused, want none", e.budgets.saves-stored)
+	}
+
+	// The end of it is not refused, and the catalog is asked about the area all the same.
+	asked := len(e.catalog.verifies)
+	ended, err := e.svc.SetAreaBudget(ctx, usecase.SetAreaBudgetInput{AreaID: work, Month: day(2026, 12, 17), Amount: dec("0")})
+	if err != nil {
+		t.Fatalf("SetAreaBudget of nothing for the archived area: %v, want the budget ended: that is no new use of the area", err)
+	}
+	if ended.AreaID != work || !ended.From.Equal(day(2026, 12, 1)) || !ended.Amount.IsZero() || len(ended.Allocations) != 0 {
+		t.Errorf("budget = %+v, want the budget of nothing of the work area from 2026-12-01", ended)
+	}
+	if got := e.catalog.verifies[asked:]; len(got) != 1 || len(got[0].AreaIDs) != 1 || got[0].AreaIDs[0] != work {
+		t.Errorf("the catalog was asked %+v, want it asked once, about the area", got)
+	}
+
+	// From December on the area has no budget; the months before have what they had,
+	// and long after there is nothing in force and nothing spent, so no area at all.
+	e.spend(day(2026, 11, 5), &work, nil, food, "90")
+	e.spend(day(2026, 12, 3), &work, nil, food, "22")
+	e.clock.setDay(2026, time.December, 10)
+	october := e.areaOf(work, day(2026, 10, 1))
+	if october.Budget == nil {
+		t.Fatal("October has no budget, want the one it had: the end does not reach back")
+	}
+	wantMoney(t, "October: the budget", *october.Budget, "1000")
+	november := e.areaOf(work, day(2026, 11, 1))
+	if november.Budget == nil {
+		t.Fatal("November has no budget, want the one it had: the end does not reach back")
+	}
+	wantMoney(t, "November: the budget", *november.Budget, "1000")
+	wantMoney(t, "November: spent", november.Spent, "90")
+	december := e.areaOf(work, day(2026, 12, 1))
+	if december.Budget != nil {
+		t.Errorf("December: budget = %s, want none: it was ended from then", december.Budget)
+	}
+	wantMoney(t, "December: spent", december.Spent, "22")
+	if got := e.areas(day(2030, 6, 1)); len(got) != 0 {
+		t.Errorf("June 2030: %+v, want no area: no budget is in force and nothing was spent", got)
+	}
+
+	// Once it is ended, a budget of more than nothing is as refused as it was.
+	_, err = e.svc.SetAreaBudget(ctx, usecase.SetAreaBudgetInput{AreaID: work, Month: day(2026, 12, 1), Amount: dec("500")})
+	var refErr *catalogusecase.ReferenceError
+	if !errors.As(err, &refErr) || len(refErr.Problems) != 1 || !refErr.Problems[0].Archived {
+		t.Errorf("err = %v, want the catalog's *ReferenceError for the area, archived", err)
+	}
+}
+
+// Ending a budget is no way round the check that the area is there: the catalog is
+// asked, and an area it does not have is refused for a budget of nothing too, and a
+// catalog that fails does not make the area archived.
+func TestTheBudgetOfAnAreaIsEndedOnlyOnceTheCatalogHasSaidTheAreaIsThere(t *testing.T) {
+	t.Run("an area the catalog does not have", func(t *testing.T) {
+		e := newEnv(t)
+		unknown := uuid.Must(uuid.NewV7())
+
+		_, err := e.svc.SetAreaBudget(context.Background(), usecase.SetAreaBudgetInput{AreaID: unknown, Month: day(2026, 12, 1), Amount: dec("0")})
+
+		var refErr *catalogusecase.ReferenceError
+		if !errors.As(err, &refErr) || len(refErr.Problems) != 1 || refErr.Problems[0].ID != unknown || refErr.Problems[0].Archived {
+			t.Fatalf("err = %v, want the catalog's *ReferenceError for the area, not archived: it is not there", err)
+		}
+		if e.budgets.saves != 0 {
+			t.Errorf("%d budgets stored, want none", e.budgets.saves)
+		}
+	})
+	t.Run("a catalog that fails", func(t *testing.T) {
+		e := newEnv(t)
+		work := e.area("工作", false)
+		e.archiveArea(work)
+		boom := errors.New("the catalog is down")
+		e.catalog.verifyErr = boom
+
+		_, err := e.svc.SetAreaBudget(context.Background(), usecase.SetAreaBudgetInput{AreaID: work, Month: day(2026, 12, 1), Amount: dec("0")})
+
+		if !errors.Is(err, boom) {
+			t.Fatalf("err = %v, want what the catalog returned", err)
+		}
+		if e.budgets.saves != 0 {
+			t.Errorf("%d budgets stored, want none", e.budgets.saves)
+		}
+	})
+}
+
 // refusal is a budget that is refused whichever kind it is: an amount and the
 // allocations, of categories that refusals makes.
 type refusal struct {

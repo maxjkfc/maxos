@@ -47,7 +47,8 @@ var (
 
 // SetAreaBudget checks that the area can be used and the allocations are
 // allowed, and stores the budget for the month the request names, replacing the
-// budget that month had, if any.
+// budget that month had, if any. An area that is archived can be given one budget
+// only: the end of the one it has (see verifyArea).
 func (s *Service) SetAreaBudget(ctx context.Context, in usecase.SetAreaBudgetInput) (usecase.AreaBudget, error) {
 	if in.Month.IsZero() {
 		return usecase.AreaBudget{}, model.ErrMonthRequired
@@ -59,8 +60,8 @@ func (s *Service) SetAreaBudget(ctx context.Context, in usecase.SetAreaBudgetInp
 
 	var stored model.AreaBudget
 	err = s.tx.WithinTx(ctx, func(ctx context.Context) error {
-		if err := s.references.VerifyReferences(ctx, catalogusecase.VerifyReferencesInput{AreaIDs: []uuid.UUID{in.AreaID}}); err != nil {
-			return fmt.Errorf("check the area: %w", err)
+		if err := s.verifyArea(ctx, in); err != nil {
+			return err
 		}
 		base, lines, err := s.allocationLines(ctx, in.Allocations)
 		if err != nil {
@@ -91,6 +92,45 @@ func (s *Service) SetAreaBudget(ctx context.Context, in usecase.SetAreaBudgetInp
 		Amount:      stored.Amount,
 		Allocations: toAllocations(stored.Allocations),
 	}, nil
+}
+
+// verifyArea checks with the catalog that a budget can be set for the area: that
+// it exists and is not archived. The one budget an area that has been archived
+// since can be given is the end of the one it has, which is an amount of nothing
+// with no allocation. The budget of a month is the latest one set for a month that
+// is not after it, and GetAreaBudgets lists an archived area with it, for what the
+// area spent still counts, so a budget that could not be ended would stay in force
+// in every month to come. Ending a budget is no new use of the area, so the catalog
+// is only asked that the area is there: what it says of one it does not have, and
+// any other failure of its own, are what they are for every other budget.
+func (s *Service) verifyArea(ctx context.Context, in usecase.SetAreaBudgetInput) error {
+	err := s.references.VerifyReferences(ctx, catalogusecase.VerifyReferencesInput{AreaIDs: []uuid.UUID{in.AreaID}})
+	if err == nil {
+		return nil
+	}
+	var refErr *catalogusecase.ReferenceError
+	if endsBudget(in) && errors.As(err, &refErr) && allArchived(refErr.Problems) {
+		return nil
+	}
+	return fmt.Errorf("check the area: %w", err)
+}
+
+// endsBudget reports whether the request takes the budget of the area away from its
+// month on rather than setting one: an amount of nothing, with no allocation to
+// divide it (SetAreaBudgetInput.Amount).
+func endsBudget(in usecase.SetAreaBudgetInput) bool {
+	return in.Amount.IsZero() && len(in.Allocations) == 0
+}
+
+// allArchived reports whether there are problems, and each is an entry that exists
+// and is archived, as against one that does not exist.
+func allArchived(problems []catalogusecase.ReferenceProblem) bool {
+	for _, p := range problems {
+		if !p.Archived {
+			return false
+		}
+	}
+	return len(problems) > 0
 }
 
 // SetProjectBudget checks that the project can be used and the allocations are
