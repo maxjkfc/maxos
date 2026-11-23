@@ -7,7 +7,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
 	"github.com/maxjkfc/maxos/pkg/webserver"
 )
@@ -282,10 +281,10 @@ func balanceLines(r *refs, balances []usecase.PreviewBalance) []balanceLine {
 // whole of is the amount, with none of it confirmed, and without the colour of a loss,
 // for nothing is lost that was held.
 func figureLine(r *refs, label string, instrument uuid.UUID, f usecase.PreviewFigure) balanceLine {
-	switch model.PreviewBasis(f.Basis) {
-	case model.BasisDrafts:
+	switch f.Basis {
+	case usecase.PreviewBasisDrafts:
 		return balanceLine{Label: label, Amount: r.plain(instrument, f.Total), Unconfirmed: true}
-	case model.BasisBoth:
+	case usecase.PreviewBasisBoth:
 		return balanceLine{Label: label, Amount: r.money(instrument, f.Total), Confirmed: new(r.plain(instrument, f.Confirmed))}
 	default:
 		return balanceLine{Label: label, Amount: r.money(instrument, f.Total)}

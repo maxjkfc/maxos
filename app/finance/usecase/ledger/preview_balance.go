@@ -42,5 +42,18 @@ func (s *Service) GetPreviewBalances(ctx context.Context, _ usecase.GetPreviewBa
 // toPreviewFigure returns the figure as the use case gives it: with its total, and with
 // what it is made of.
 func toPreviewFigure(f model.PreviewFigure) usecase.PreviewFigure {
-	return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: string(f.Basis())}
+	return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: toPreviewBasis(f.Basis())}
+}
+
+// toPreviewBasis says what the model says a figure is made of in the words of the port. A
+// basis that it does not know is what no draft changes: nothing is said of it.
+func toPreviewBasis(b model.PreviewBasis) usecase.PreviewBasis {
+	switch b {
+	case model.BasisDrafts:
+		return usecase.PreviewBasisDrafts
+	case model.BasisBoth:
+		return usecase.PreviewBasisBoth
+	default:
+		return usecase.PreviewBasisConfirmed
+	}
 }

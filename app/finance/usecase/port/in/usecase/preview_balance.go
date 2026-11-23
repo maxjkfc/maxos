@@ -56,6 +56,21 @@ type GetPreviewBalances interface {
 // the clock of the application says, in its timezone.
 type GetPreviewBalancesInput struct{}
 
+// PreviewBasis says what a PreviewFigure is made of. The port has its own words for it and
+// does not hand out the domain's type: a context outside finance may import the in-ports of
+// finance and nothing of its domain, so what a caller of this use case compares a Basis with
+// has to be here.
+type PreviewBasis string
+
+const (
+	// PreviewBasisConfirmed is a figure that no draft changes: it is what it is, or nothing.
+	PreviewBasisConfirmed PreviewBasis = "confirmed"
+	// PreviewBasisBoth is a figure that is confirmed in part, and that drafts change.
+	PreviewBasisBoth PreviewBasis = "both"
+	// PreviewBasisDrafts is a figure none of which is confirmed: drafts make up the whole of it.
+	PreviewBasisDrafts PreviewBasis = "drafts"
+)
+
 // PreviewFigure is one figure of a balance, as it would be once the drafts are confirmed.
 type PreviewFigure struct {
 	// Total is what the figure would be with every draft confirmed: Confirmed and Drafts
@@ -66,11 +81,11 @@ type PreviewFigure struct {
 	// Drafts is what confirming the drafts would add to Confirmed, negative when it would
 	// take away: zero when no draft changes the figure today.
 	Drafts decimal.Decimal
-	// Basis says what the figure is made of, as model.PreviewBasis names it: "confirmed"
-	// when no draft changes it (it is what it is, or nothing), "drafts" when none of it is
-	// confirmed and drafts make up the whole of it, and "both" when it is confirmed in
-	// part and drafts change it.
-	Basis string
+	// Basis says what the figure is made of: PreviewBasisConfirmed when no draft changes it
+	// (it is what it is, or nothing), PreviewBasisDrafts when none of it is confirmed and
+	// drafts make up the whole of it, and PreviewBasisBoth when it is confirmed in part and
+	// drafts change it.
+	Basis PreviewBasis
 }
 
 // PreviewBalance is how much of an instrument an account would hold today if every draft

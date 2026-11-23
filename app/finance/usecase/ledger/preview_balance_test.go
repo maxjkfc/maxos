@@ -95,6 +95,32 @@ func TestGetPreviewBalancesSaysEachFigureAsWhatIsConfirmedAndWhatTheDraftsAddAnd
 	}
 }
 
+// What a figure is made of is said in the words of the port, which are typed and are its own: a caller
+// compares a Basis with usecase.PreviewBasisConfirmed, PreviewBasisBoth and PreviewBasisDrafts, and the
+// use case gives each of the three of the model the one of that name.
+func TestGetPreviewBalancesNamesWhatAFigureIsMadeOfInTheWordsOfThePort(t *testing.T) {
+	e := newEnv(t)
+	e.txns.preview = model.BalancePreview{Drafts: 2, Balances: []model.PreviewBalance{
+		previewRow(e.cash, e.twd, figure("800", "0"), figure("0", "-300")), // nothing changes it; drafts make it all
+		previewRow(e.bank, e.twd, figure("800", "-120"), figure("0", "0")), // confirmed in part and changed; nothing
+	}}
+
+	got := e.previews().Balances
+
+	want := []struct{ held, unbilled usecase.PreviewBasis }{
+		{usecase.PreviewBasisConfirmed, usecase.PreviewBasisDrafts},
+		{usecase.PreviewBasisBoth, usecase.PreviewBasisConfirmed},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%d balances, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].Held.Basis != w.held || got[i].Unbilled.Basis != w.unbilled {
+			t.Errorf("balance %d is made of %q held and %q unbilled, want %q and %q", i, got[i].Held.Basis, got[i].Unbilled.Basis, w.held, w.unbilled)
+		}
+	}
+}
+
 // Nothing is confirmed when every figure is the drafts', and that is said once, of all of them: a
 // figure the drafts cancel to nothing has what it was confirmed, and is not of drafts alone.
 func TestGetPreviewBalancesSaysWhetherAnythingIsConfirmedAtAll(t *testing.T) {

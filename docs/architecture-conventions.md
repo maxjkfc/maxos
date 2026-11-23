@@ -118,7 +118,7 @@ adapter  →  usecase  →  domain
   - 版本固定，透過 `make sqlc` 執行。
   - `make check` 會重新產生並要求無差異。
 - **手寫 SQL 的例外**：有可選篩選條件的動態查詢，可以在同一個 adapter 裡手寫，集中在 `queries.go`。
-- **交易邊界**由 use case 決定，repo 不自行開交易。唯一的例外是需要用同一份快照讀好幾條語句的唯讀 repo 方法，它可以用 `DB.WithinSnapshot` 開唯讀的 `REPEATABLE READ` 交易（目前是 finance 的 `TransactionRepo.List` 與 `TransactionRepo.Statement`）；寫入一律由 use case 決定。
+- **交易邊界**由 use case 決定，repo 不自行開交易。唯一的例外是需要用同一份快照讀好幾條語句的唯讀 repo 方法，它可以用 `DB.WithinSnapshot` 開唯讀的 `REPEATABLE READ` 交易（目前是 finance 的 `TransactionRepo.List`、`TransactionRepo.Statement` 與 `TransactionRepo.PreviewBalances`）；寫入一律由 use case 決定。
   - `pkg/postgres` 的 `DB` 是 repo 執行 SQL 的入口（`dbgen.New(postgres.NewDB(pool))`）：語句會自動加入 context 帶著的交易，沒有交易就直接走連線池，所以 repo 不需要知道交易的存在。
   - `DB.WithinTx(ctx, fn)` 開啟交易，並把交易放進傳給 `fn` 的 context；`fn` 回傳 `nil` 才提交，回傳錯誤或 panic 就回滾。**不巢狀**：`fn` 裡呼叫的任何東西都不能再開交易（`fn` 可以呼叫別的 use case，例如 finance 經 catalog 的 `VerifyReferences` 驗證參照，只要它們自己不開交易）；傳給 `WithinTx` 的 context 已帶著交易時，它回傳 `ErrNestedTx`，不執行 `fn`、不送任何語句，開著的交易照舊。呼叫它的 `fn` 把這個錯誤原樣回傳，整個交易回滾：這是寫錯程式的訊號，不是要處理的情況。
   - use case 不能 import `pkg/`：需要交易的 use case 在自己 context 的 `usecase/port/out/` 宣告只有 `WithinTx(ctx context.Context, fn func(ctx context.Context) error) error` 的介面（finance 的是 `usecase/port/out/tx` 的 `Transactor`），由 `cmd/` 把 `*postgres.DB` 注入。介面的註解寫明 `fn` 裡不能再開交易，否則 `WithinTx` 回傳 `ErrNestedTx`（use case 不 import 它，也不處理它，只把錯誤往上傳）。

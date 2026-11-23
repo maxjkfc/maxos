@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
+	"github.com/maxjkfc/maxos/app/finance/adapter/out/persistence/postgres"
 	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
 )
@@ -22,24 +24,29 @@ import (
 // too, by month and account. These tests show the rows of the query, and hold it to the summary and to
 // the balances: what GetBalances says once every draft is confirmed is what the preview said before.
 
-// previewOn reads the preview balances on the day and writes each as a line, such as
-// "cash TWD 680 = confirmed 800 + drafts -120", with " | unbilled -11000 = confirmed 0 + drafts -11000"
-// when something is unbilled, in the order the repo gives them.
-func (e *ledgerEnv) previewOn(day time.Time) []string {
-	e.t.Helper()
-	got, err := e.txns.PreviewBalances(context.Background(), day)
-	if err != nil {
-		e.t.Fatalf("PreviewBalances: %v", err)
-	}
+// previewLines writes each balance of the preview as a line, such as "cash TWD 680 = confirmed 800 +
+// drafts -120", with " | unbilled -11000 = confirmed 0 + drafts -11000" when something is unbilled, in
+// the order the repo gives them.
+func (e *ledgerEnv) previewLines(p model.BalancePreview) []string {
 	names := e.names()
-	lines := make([]string, len(got.Balances))
-	for i, b := range got.Balances {
+	lines := make([]string, len(p.Balances))
+	for i, b := range p.Balances {
 		lines[i] = fmt.Sprintf("%s %s %s = confirmed %s + drafts %s", names[b.AccountID], names[b.InstrumentID], b.Held.Total(), b.Held.Confirmed, b.Held.Drafts)
 		if !b.Unbilled.Confirmed.IsZero() || !b.Unbilled.Drafts.IsZero() {
 			lines[i] += fmt.Sprintf(" | unbilled %s = confirmed %s + drafts %s", b.Unbilled.Total(), b.Unbilled.Confirmed, b.Unbilled.Drafts)
 		}
 	}
 	return lines
+}
+
+// previewOn reads the preview balances on the day and writes each as a line (previewLines).
+func (e *ledgerEnv) previewOn(day time.Time) []string {
+	e.t.Helper()
+	got, err := e.txns.PreviewBalances(context.Background(), day)
+	if err != nil {
+		e.t.Fatalf("PreviewBalances: %v", err)
+	}
+	return e.previewLines(got)
 }
 
 // wantPreview fails the test unless the preview balances on the day are the lines wanted.
@@ -254,6 +261,86 @@ func TestPreviewBalancesHaveTheDebtOfADraftBillInstalmentInBothFiguresAndItMoves
 			t.Errorf("%s: the balance is %s and %s unbilled once the plan is confirmed, and the preview said %s and %s, want %s and %s",
 				day.Format(time.DateOnly), got[0].Quantity, got[0].UnbilledInstalment, p.Held.Total(), p.Unbilled.Total(), pair[0], pair[1])
 		}
+	}
+}
+
+// previewInterruptedBy returns what PreviewBalances returns for the day when change is made by another
+// connection after the statement that adds up the balances and before the one that counts the drafts.
+func (e *ledgerEnv) previewInterruptedBy(day time.Time, change func()) model.BalancePreview {
+	e.t.Helper()
+	tracer := &afterStatement{prefix: "-- name: ListPreviewBalances", hook: change}
+	cfg := e.pool.Config()
+	cfg.ConnConfig.Tracer = tracer
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		e.t.Fatalf("open a pool with a tracer: %v", err)
+	}
+	defer pool.Close()
+
+	got, err := postgres.NewTransactionRepo(pool).PreviewBalances(context.Background(), day)
+	if err != nil {
+		e.t.Fatalf("PreviewBalances: %v", err)
+	}
+	if !tracer.ran {
+		e.t.Fatal("the change was never made: no statement added up the balances")
+	}
+	return got
+}
+
+// The balances and the number of drafts that wait are of one moment: a draft that is confirmed, recorded
+// or discarded on another connection after the balances are added up and before the drafts are counted is
+// in the balances and in the count, or in neither, as it was when the read began. Were the two statements
+// not read in one snapshot, the count would be of a later moment than the balances, and the page would say
+// 預覽（含 N 筆草稿） of one ledger and show the numbers of another. The next read is of what the ledger is
+// then.
+func TestPreviewBalancesAreReadInOneSnapshot(t *testing.T) {
+	tests := []struct {
+		name      string
+		change    func(e *ledgerEnv, drafts []model.Transaction)
+		afterLine string
+		afterN    int
+	}{
+		{
+			"a draft is confirmed",
+			func(e *ledgerEnv, drafts []model.Transaction) { e.setStatus(drafts[0].ID, model.StatusConfirmed) },
+			"cash TWD 995 = confirmed 999 + drafts -4", 4,
+		},
+		{
+			"a draft is recorded",
+			func(e *ledgerEnv, _ []model.Transaction) { e.draftExpense("snap-new-000001", nov(11), e.cash, "1") },
+			"cash TWD 994 = confirmed 1000 + drafts -6", 6,
+		},
+		{
+			"a draft is discarded",
+			func(e *ledgerEnv, drafts []model.Transaction) {
+				if _, err := e.pool.Exec(context.Background(), "DELETE FROM fin_transaction WHERE id = $1", drafts[1].ID); err != nil {
+					e.t.Errorf("discard a draft on another connection: %v", err)
+				}
+			},
+			"cash TWD 996 = confirmed 1000 + drafts -4", 4,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newLedgerEnv(t)
+			e.storeConfirmed(e.openingOn("snap-opening-0001", nov(1), e.cash, e.twd, "1000"))
+			var drafts []model.Transaction
+			for i := range 5 {
+				drafts = append(drafts, e.draftExpense(fmt.Sprintf("snap-draft-%06d", i), nov(10), e.cash, "1"))
+			}
+
+			got := e.previewInterruptedBy(nov(14), func() { tt.change(e, drafts) })
+
+			// As it was when the read began: 1,000 confirmed, five drafts of 1, and five drafts.
+			if lines := e.previewLines(got); !slices.Equal(lines, []string{"cash TWD 995 = confirmed 1000 + drafts -5"}) || got.Drafts != 5 {
+				t.Errorf("read while %s: %q and %d drafts, want 995 = 1000 confirmed and 5 of drafts, and 5 drafts: all of the moment the read began", tt.name, lines, got.Drafts)
+			}
+			// And the next read is of what it is now.
+			e.wantPreview(nov(14), tt.afterLine)
+			if _, n := e.previews(nov(14)); n != tt.afterN {
+				t.Errorf("%d drafts wait after it, want %d", n, tt.afterN)
+			}
+		})
 	}
 }
 

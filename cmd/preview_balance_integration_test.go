@@ -277,7 +277,7 @@ func TestThePreviewBalancesOfALedgerOfDraftsOnlyHaveNothingConfirmedAndSayWhichF
 	}
 	for _, b := range out.Balances {
 		for name, f := range map[string]usecase.PreviewFigure{"held": b.Held, "unbilled": b.Unbilled} {
-			if !f.Confirmed.IsZero() || (!f.Drafts.IsZero() && f.Basis != string(model.BasisDrafts)) || (f.Drafts.IsZero() && f.Basis != string(model.BasisConfirmed)) {
+			if !f.Confirmed.IsZero() || (!f.Drafts.IsZero() && f.Basis != usecase.PreviewBasisDrafts) || (f.Drafts.IsZero() && f.Basis != usecase.PreviewBasisConfirmed) {
 				t.Errorf("%s %s: %s figure %+v, want nothing confirmed, and the basis of drafts where they change it", w.names[b.AccountID], w.names[b.InstrumentID], name, f)
 			}
 		}
@@ -313,7 +313,7 @@ func TestThePreviewBalancesOfALedgerWithNoDraftAreItsBalancesThroughTheRealUseCa
 		p := previews[k]
 		if !p.Held.Total.Equal(b.Quantity) || !p.Held.Confirmed.Equal(b.Quantity) || !p.Held.Drafts.IsZero() ||
 			!p.Unbilled.Total.Equal(b.UnbilledInstalment) || !p.Unbilled.Confirmed.Equal(b.UnbilledInstalment) || !p.Unbilled.Drafts.IsZero() ||
-			p.Held.Basis != string(model.BasisConfirmed) || p.Unbilled.Basis != string(model.BasisConfirmed) {
+			p.Held.Basis != usecase.PreviewBasisConfirmed || p.Unbilled.Basis != usecase.PreviewBasisConfirmed {
 			t.Errorf("%s %s: preview %+v, balance %+v, want the same, and no draft", w.names[k.account], w.names[k.instrument], p, b)
 		}
 	}

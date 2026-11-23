@@ -106,7 +106,7 @@ func TestTheOverviewOfLedgerWithDraftsShowsWhatTheBalancesWouldBeAndWhatIsConfir
 
 	t.Run("it says it is a preview, in the heading and over the amounts, and of how many drafts", func(t *testing.T) {
 		wantIn(t, page, `<h2>餘額 <span class="pill pill-draft">預覽（含 12 筆草稿）</span></h2>`)
-		wantIn(t, balances, `<a href="/app/drafts">查看草稿</a>`, `<th scope="col" role="columnheader" class="num">餘額（預覽）</th>`)
+		wantIn(t, balances, `href="/app/drafts">查看草稿</a>`, `<th scope="col" role="columnheader" class="num">餘額（預覽）</th>`)
 		if strings.Index(page, "預覽（含") > strings.Index(page, "<table") {
 			t.Error("the preview is not said before the first of the tables")
 		}
@@ -170,6 +170,13 @@ func TestTheOverviewOfLedgerWithDraftsShowsWhatTheBalancesWouldBeAndWhatIsConfir
 	t.Run("the table of the balances keeps its roles for the phone, where it is not a table", func(t *testing.T) {
 		wantIn(t, balances, `<table class="balances" role="table">`, `<tr role="row">`, `<th scope="row" role="rowheader">`, `<td role="cell" class="num">`)
 	})
+	// A line of a note breaks anywhere in Chinese, and a link to the drafts that is cut into 查看 and 草稿,
+	// or a term that is cut in the middle, is read as two things: they are kept whole (§8 of the design).
+	t.Run("the link to the drafts and the term of what is not yet due are kept whole where a line breaks", func(t *testing.T) {
+		wantIn(t, balances, `<a class="nowrap" href="/app/drafts">查看草稿</a>`)
+		drafts := between(page, "<h2>草稿", "</main>")
+		wantIn(t, drafts, `<a class="nowrap" href="/app/drafts">查看草稿</a>`, `<span class="nowrap">「未到期分期」</span>`)
+	})
 }
 
 // An account whose drafts make its balance nothing is not an account that holds nothing: it holds
@@ -230,7 +237,7 @@ func TestTheOverviewOfLedgerOfDraftsOnlySaysThatEveryNumberIsADraftsAndIsRedNowh
 	wantIn(t, page, `<span class="pill pill-draft">預覽（含 4 筆草稿）</span>`)
 	// The note says that none of it is confirmed, in place of the one that says what is added to
 	// what is confirmed.
-	wantIn(t, balances, "全是草稿", `<a href="/app/drafts">查看草稿</a>`)
+	wantIn(t, balances, "全是草稿", `href="/app/drafts">查看草稿</a>`)
 	wantNotIn(t, balances, "加上這些草稿今天全部確認後會有的變動")
 	wantCell(t, balanceRow(page, cash), "num", "−900.00 TWD 尚未確認")
 	wantCell(t, balanceRow(page, checking), "num", "49,000.00 TWD 尚未確認")

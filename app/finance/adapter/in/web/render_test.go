@@ -32,10 +32,11 @@ func part(role, target string) string {
 }
 
 // figure is a figure of a preview balance as the use case says it: what is confirmed of it and
-// what the drafts add, with the total and what it is made of, as the model works them out.
+// what the drafts add, with the total and what it is made of, as the model works them out. The
+// words of the port are the model's, as the tests of the use case show.
 func figure(confirmed, drafts string) usecase.PreviewFigure {
 	f := model.PreviewFigure{Confirmed: dec(confirmed), Drafts: dec(drafts)}
-	return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: string(f.Basis())}
+	return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: usecase.PreviewBasis(f.Basis())}
 }
 
 // held is a balance that no draft changes: what an account holds of an instrument, with
@@ -110,7 +111,7 @@ func TestTheOverview(t *testing.T) {
 	})
 	t.Run("the drafts that wait, and what confirming them today would change", func(t *testing.T) {
 		wantIn(t, page,
-			"有 <strong>3</strong> 筆草稿等著確認", `<a href="/app/drafts">查看草稿</a>`,
+			"有 <strong>3</strong> 筆草稿等著確認", `href="/app/drafts">查看草稿</a>`,
 			"<caption>如果這些草稿今天全部確認，帳戶的餘額今天會有這些變動</caption>",
 			amount("1,500.00", "TWD"), amount("200.00", "TWD"), amount("−1,300.00", "TWD"),
 			"還沒到期的分期各期",
