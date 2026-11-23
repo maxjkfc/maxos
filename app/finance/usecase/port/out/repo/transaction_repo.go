@@ -164,6 +164,23 @@ type TransactionRepo interface {
 	// account and instrument with a posting of either, however they add up. The
 	// filter's account and instrument limit it, each when set.
 	Balances(ctx context.Context, filter BalanceFilter) ([]model.Balance, error)
+	// PreviewBalances returns what each account would hold of each instrument on the
+	// day if every draft were confirmed: for each account and instrument, what
+	// Balances says it holds, and, apart from it, what the drafts that happened on or
+	// before the day add to it, by account name and then instrument code. The drafts
+	// are the transactions in the status draft, the periods of draft plans among them,
+	// which are drafts of their own in the store: their account postings are added
+	// up, each in its own account, and those of the account book only, which is what
+	// SummarizeDrafts adds up into the amounts of an account. So a transfer between
+	// two of my accounts is in both, a period of a draft plan is in from the day it
+	// falls due, and a draft dated after the day, and a void transaction, are not in
+	// it. UnbilledInstalment is that of Balances: of the confirmed plans only. There
+	// is a balance for each account and instrument with a confirmed posting of either
+	// book, or a draft's account posting, however they add up. It is one statement,
+	// so the confirmed part and the draft part are of one moment: a draft that is
+	// confirmed while it runs is in one of them, and never in both or in neither.
+	// day is a date as model.DateOf makes it.
+	PreviewBalances(ctx context.Context, day time.Time) ([]model.PreviewBalance, error)
 	// PendingDrafts returns how many drafts happened on or before the day and have
 	// an account posting to the account in the instrument: transactions that would
 	// change what Balances returns for them on that day once confirmed. day is a

@@ -668,6 +668,71 @@ func (q *Queries) ListPostings(ctx context.Context, transactionIds []uuid.UUID) 
 	return items, nil
 }
 
+const listPreviewBalances = `-- name: ListPreviewBalances :many
+SELECT a.id AS account_id, i.id AS instrument_id,
+       COALESCE(sum(p.quantity) FILTER (WHERE t.status = 'confirmed' AND p.book = 'account'), 0)::numeric AS confirmed,
+       COALESCE(sum(p.quantity) FILTER (WHERE t.status = 'draft' AND p.book = 'account'), 0)::numeric AS drafts,
+       COALESCE(sum(p.quantity) FILTER (WHERE t.status = 'confirmed' AND p.book = 'instalment'), 0)::numeric AS unbilled_instalment
+FROM fin_posting p
+JOIN fin_transaction t ON t.id = p.transaction_id
+JOIN fin_account a ON a.id = p.account_id
+JOIN fin_instrument i ON i.id = p.instrument_id
+WHERE t.occurred_on <= $1
+  AND ((t.status = 'confirmed' AND p.book IN ('account', 'instalment'))
+    OR (t.status = 'draft' AND p.book = 'account'))
+GROUP BY a.id, a.name, i.id, i.code
+ORDER BY a.name, a.id, i.code, i.id
+`
+
+type ListPreviewBalancesRow struct {
+	AccountID          uuid.UUID
+	InstrumentID       uuid.UUID
+	Confirmed          decimal.Decimal
+	Drafts             decimal.Decimal
+	UnbilledInstalment decimal.Decimal
+}
+
+// What each account would hold of each instrument on a day if every draft were
+// confirmed: ListBalances, with the drafts added in beside what is confirmed.
+// confirmed is its quantity, the confirmed account postings added up, and
+// unbilled_instalment is its own, of the confirmed instalment postings: a draft
+// plan is not in a balance until it is confirmed. drafts is what confirming the
+// drafts that happened on or before the day (the day itself is in) would add: the
+// account postings of the transactions in the status draft, added up. The periods
+// of a draft plan are drafts of their own in the table, so one that has fallen due
+// is in and one that has not is not, as it is dated; a draft dated after the day, a
+// void transaction and a posting of any other book are not. It is the sum that
+// SummarizeDrafts makes of the postings of ListDraftPostings in the amounts of an
+// account, of all the months, and the tests hold the two to each other. There is a
+// row for each account and instrument with a confirmed posting of either book or a
+// draft's account posting, however they add up. It is one statement, so confirmed
+// and drafts are of one snapshot.
+func (q *Queries) ListPreviewBalances(ctx context.Context, day time.Time) ([]ListPreviewBalancesRow, error) {
+	rows, err := q.db.Query(ctx, listPreviewBalances, day)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPreviewBalancesRow
+	for rows.Next() {
+		var i ListPreviewBalancesRow
+		if err := rows.Scan(
+			&i.AccountID,
+			&i.InstrumentID,
+			&i.Confirmed,
+			&i.Drafts,
+			&i.UnbilledInstalment,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStatementFigures = `-- name: ListStatementFigures :many
 WITH statements AS (
     SELECT f.idx, f.from_day, LEAST(c.closing_day, $1::date) AS counted_to

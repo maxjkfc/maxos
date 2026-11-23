@@ -30,17 +30,23 @@ func part(role, target string) string {
 	return `<th scope="row" role="rowheader">` + role + "</th>\n" + `<td role="cell" data-label="帳戶、類別或對象">` + target + `</td>`
 }
 
+// held is a balance that no draft changes: what an account holds of an instrument, with
+// nothing of it waiting to be confirmed.
+func held(account, instrument uuid.UUID, quantity string) usecase.PreviewBalance {
+	return usecase.PreviewBalance{AccountID: account, InstrumentID: instrument, Quantity: dec(quantity), Confirmed: dec(quantity)}
+}
+
 func TestTheOverview(t *testing.T) {
 	f := newFake()
-	f.balances = []usecase.Balance{
-		{AccountID: cash, InstrumentID: twd, Quantity: dec("1234567.5")},
-		{AccountID: checking, InstrumentID: twd, Quantity: dec("-120")},
-		{AccountID: checking, InstrumentID: jpy, Quantity: dec("1500")},
-		{AccountID: checking, InstrumentID: btc, Quantity: dec("0.12345678")},
-		{AccountID: card, InstrumentID: twd, Quantity: dec("0"), UnbilledInstalment: dec("-11000")},
-		{AccountID: emptyAcct, InstrumentID: twd, Quantity: dec("0")},
-		{AccountID: spareCard, InstrumentID: usd, Quantity: dec("0")},
-		{AccountID: oldSaving, InstrumentID: twd, Quantity: dec("0")},
+	f.balances = []usecase.PreviewBalance{
+		held(cash, twd, "1234567.5"),
+		held(checking, twd, "-120"),
+		held(checking, jpy, "1500"),
+		held(checking, btc, "0.12345678"),
+		{AccountID: card, InstrumentID: twd, Quantity: dec("0"), Confirmed: dec("0"), UnbilledInstalment: dec("-11000")},
+		held(emptyAcct, twd, "0"),
+		held(spareCard, usd, "0"),
+		held(oldSaving, twd, "0"),
 	}
 	f.dealings = []usecase.Dealing{
 		{PartyID: alice, InstrumentID: twd, Quantity: dec("300")},
@@ -126,7 +132,7 @@ func TestTheOverviewWhenThereIsNothing(t *testing.T) {
 
 func TestAnArchivedAccountThatHoldsSomethingIsShown(t *testing.T) {
 	f := newFake()
-	f.balances = []usecase.Balance{{AccountID: oldSaving, InstrumentID: twd, Quantity: dec("5")}}
+	f.balances = []usecase.PreviewBalance{held(oldSaving, twd, "5")}
 	page := f.site(t).page("/app/")
 	wantIn(t, page, "舊存摺", `<span class="badge">已封存</span>`, amount("5.00", "TWD"))
 }

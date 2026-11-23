@@ -284,6 +284,30 @@ func (r *TransactionRepo) Balances(ctx context.Context, filter repo.BalanceFilte
 	return balances, nil
 }
 
+// PreviewBalances adds up, for each account and instrument, the account postings of
+// the confirmed transactions that happened on or before the day, which is what
+// Balances says, beside the account postings of the drafts that happened on or before
+// it, which is what confirming them would add. One statement (ListPreviewBalances)
+// reads both, so they are of one snapshot, and nothing here needs a database
+// transaction of its own.
+func (r *TransactionRepo) PreviewBalances(ctx context.Context, day time.Time) ([]model.PreviewBalance, error) {
+	rows, err := r.q.ListPreviewBalances(ctx, day)
+	if err != nil {
+		return nil, fmt.Errorf("list the balances with the drafts: %w", err)
+	}
+	balances := make([]model.PreviewBalance, len(rows))
+	for i, row := range rows {
+		balances[i] = model.PreviewBalance{
+			AccountID:          row.AccountID,
+			InstrumentID:       row.InstrumentID,
+			Confirmed:          row.Confirmed,
+			Drafts:             row.Drafts,
+			UnbilledInstalment: row.UnbilledInstalment,
+		}
+	}
+	return balances, nil
+}
+
 // PendingDrafts counts the drafts that happened on or before the day and have a
 // posting to the account in the instrument.
 func (r *TransactionRepo) PendingDrafts(ctx context.Context, accountID, instrumentID uuid.UUID, day time.Time) (int, error) {

@@ -526,6 +526,12 @@ th.num {
   display: block;
 }
 
+/* What is confirmed of a balance is a line of its own under it, and belongs to it: the
+   next balance of the cell starts after a gap, so that each is read with its own. */
+.num .line.muted + .line {
+  margin-top: 0.4rem;
+}
+
 /* Read by a screen reader, not seen: the caption of a table whose heading says it. */
 .sr-only {
   position: absolute;

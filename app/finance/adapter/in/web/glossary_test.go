@@ -164,7 +164,7 @@ func TestOnlyGlossaryWordsAreUsed(t *testing.T) {
 		t.Fatalf("POST /app/ = %d, want 405", post.Code)
 	}
 	wantNoAvoidedWords(t, "POST /app/", post.Body)
-	f.failures["GetBalances"] = errors.New("connection refused")
+	f.failures["GetPreviewBalances"] = errors.New("connection refused")
 	failed := s.get("/app/")
 	if failed.Code != http.StatusInternalServerError {
 		t.Fatalf("GET /app/ with a failing use case = %d, want 500", failed.Code)

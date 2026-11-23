@@ -22,7 +22,7 @@ func populated() *fake {
 	t := lunchTransaction(1, date(2026, time.November, 14), cash, "120")
 	f.listed = []usecase.Transaction{t}
 	f.byID[t.ID] = t
-	f.balances = []usecase.Balance{{AccountID: cash, InstrumentID: twd, Quantity: dec("880")}}
+	f.balances = []usecase.PreviewBalance{held(cash, twd, "880")}
 	f.statement = usecase.CardStatement{
 		CardStatementSummary: usecase.CardStatementSummary{From: date(2026, time.November, 6), ClosingOn: date(2026, time.December, 5)},
 	}
@@ -292,7 +292,7 @@ func TestWhatTheUseCaseRefusesIsTheUsersToSeeAndTheRestIsNot(t *testing.T) {
 	}{
 		{"a status that is none", "ListTransactions", fmt.Errorf("list: %w", model.ErrInvalidStatus), "/app/transactions?status=nope", http.StatusBadRequest, "status 必須是"},
 		{"a kind that is none", "ListTransactions", fmt.Errorf("list: %w", model.ErrInvalidKind), "/app/transactions?kind=nope", http.StatusBadRequest, "kind 不是已知的交易種類"},
-		{"a failure of the database", "GetBalances", fmt.Errorf("get balances: connection to db-host-secret refused"), "/app/", http.StatusInternalServerError, "伺服器發生錯誤"},
+		{"a failure of the database", "GetPreviewBalances", fmt.Errorf("get preview balances: connection to db-host-secret refused"), "/app/", http.StatusInternalServerError, "伺服器發生錯誤"},
 		{"a failure in a list of names", "ListAccounts", fmt.Errorf("list accounts: connection to db-host-secret refused"), "/app/drafts", http.StatusInternalServerError, "伺服器發生錯誤"},
 		{"a failure of the catalog", "ListAreas", fmt.Errorf("list areas: connection to db-host-secret refused"), "/app/budgets", http.StatusInternalServerError, "伺服器發生錯誤"},
 		{"a failure of the spending", "GetSpending", fmt.Errorf("spending: connection to db-host-secret refused"), "/app/spending", http.StatusInternalServerError, "伺服器發生錯誤"},
@@ -338,7 +338,11 @@ func TestPagesIssueAFixedNumberOfCalls(t *testing.T) {
 			tx := lunchTransaction(1000+i, date(2026, time.November, 1+i%28), cash, "10")
 			f.listed = append(f.listed, tx)
 			f.byID[tx.ID] = tx
-			f.balances = append(f.balances, usecase.Balance{AccountID: seqID(2000 + i), InstrumentID: twd, Quantity: dec("1")})
+			// Drafts wait for every other account, and the count of them is not nil, so the
+			// overview is of the balances with the drafts counted in, as it is when any wait.
+			f.balances = append(f.balances, usecase.PreviewBalance{
+				AccountID: seqID(2000 + i), InstrumentID: twd, Quantity: dec("1"), Confirmed: dec(fmt.Sprint(i % 2)), Drafts: dec(fmt.Sprint(1 - i%2)),
+			})
 			f.dealings = append(f.dealings, usecase.Dealing{PartyID: seqID(3000 + i), InstrumentID: twd, Quantity: dec("5")})
 			f.plans = append(f.plans, usecase.InstalmentPlanSummary{PlanID: seqID(4000 + i), AccountID: card, InstrumentID: twd})
 			month := date(2026, time.Month(1+i%12), 1)
@@ -353,6 +357,7 @@ func TestPagesIssueAFixedNumberOfCalls(t *testing.T) {
 			f.spent.TopLevel = append(f.spent.TopLevel, usecase.TopLevelSpending{CategoryID: seqID(8000 + i), Total: dec("1"), Own: dec("1")})
 			f.accounts = append(f.accounts, usecase.Account{ID: seqID(2000 + i), Name: fmt.Sprintf("帳戶 %d", i), Kind: "bank"})
 		}
+		f.drafts.Count = n
 		f.statement.Transactions = append([]usecase.StatementTransaction(nil), f.statement.Transactions...)
 		return f
 	}

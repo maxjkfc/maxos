@@ -42,7 +42,7 @@ type fake struct {
 	parties      []catalogusecase.Party
 	tags         []catalogusecase.Tag
 
-	balances []usecase.Balance
+	balances []usecase.PreviewBalance
 	dealings []usecase.Dealing
 	plans    []usecase.InstalmentPlanSummary
 	drafts   usecase.GetDraftSummaryOutput
@@ -86,8 +86,8 @@ func (f *fake) total() int {
 	return n
 }
 
-func (f *fake) GetBalances(context.Context, usecase.GetBalancesInput) (usecase.GetBalancesOutput, error) {
-	return usecase.GetBalancesOutput{Balances: f.balances}, f.call("GetBalances")
+func (f *fake) GetPreviewBalances(context.Context, usecase.GetPreviewBalancesInput) (usecase.GetPreviewBalancesOutput, error) {
+	return usecase.GetPreviewBalancesOutput{Balances: f.balances}, f.call("GetPreviewBalances")
 }
 
 func (f *fake) GetDealings(context.Context, usecase.GetDealingsInput) (usecase.GetDealingsOutput, error) {
@@ -199,7 +199,7 @@ func (f *fake) ListTags(context.Context, catalogusecase.ListTagsInput) (catalogu
 func (f *fake) ports() Ports {
 	return Ports{
 		Clock:               f,
-		GetBalances:         f,
+		GetPreviewBalances:  f,
 		GetDealings:         f,
 		ListTransactions:    f,
 		GetTransaction:      f,

@@ -11,9 +11,10 @@ import (
 	"github.com/maxjkfc/maxos/pkg/webserver"
 )
 
-// overviewView is the overview page: what the accounts hold, the instalments that
-// are not yet due, what the parties owe me and I them, and the drafts that wait.
-// There is no figure for the net worth: it needs the prices of what is held.
+// overviewView is the overview page: what the accounts hold (or would, once the drafts
+// that wait are confirmed: see balanceLine), the instalments that are not yet due, what
+// the parties owe me and I them, and the drafts that wait. There is no figure for the
+// net worth: it needs the prices of what is held.
 type overviewView struct {
 	Today string
 	// Groups are the balances of the accounts by institution, the accounts that have
@@ -53,6 +54,16 @@ type balanceLine struct {
 	// Label is empty for a balance, and says what it is otherwise.
 	Label  string
 	Amount amountView
+	// Confirmed is the part of a balance that is confirmed, when drafts make up the
+	// rest of it: Amount is then what the account would hold with the drafts
+	// confirmed, and this is what it holds now. It is nil for a balance that no draft
+	// changes, whose Amount is what the account holds, for a line that is not a
+	// balance, and for a balance of which none is confirmed (Unconfirmed).
+	Confirmed *amountView
+	// Unconfirmed is true for a balance that drafts make up the whole of: none of it
+	// is confirmed, which is said in words and not as a figure of nothing, so that a
+	// list of balances that are all drafts is not a column of zeros.
+	Unconfirmed bool
 }
 
 type planRow struct {
@@ -98,11 +109,12 @@ const (
 	dealingLabel  = "往來"
 )
 
-// overview reads the balances, the plans that still have something to charge, the
-// dealings and the summary of the drafts, and the lists that name them.
+// overview reads the balances with the drafts that wait counted in, the plans that
+// still have something to charge, the dealings and the summary of the drafts, and the
+// lists that name them.
 func (h *handlers) overview(r *http.Request) (webserver.Page, error) {
 	ctx := r.Context()
-	balances, err := h.p.GetBalances.GetBalances(ctx, usecase.GetBalancesInput{})
+	balances, err := h.p.GetPreviewBalances.GetPreviewBalances(ctx, usecase.GetPreviewBalancesInput{})
 	if err != nil {
 		return webserver.Page{}, fail(err)
 	}
@@ -133,10 +145,10 @@ func (h *handlers) overview(r *http.Request) (webserver.Page, error) {
 // buildOverview lays the answers out. An account that holds nothing, of any
 // instrument and not owing any instalment, is one line in a list that is folded; an
 // archived one that holds nothing is not shown at all.
-func buildOverview(r *refs, today time.Time, balances []usecase.Balance, dealings []usecase.Dealing, plans []usecase.InstalmentPlanSummary, drafts usecase.GetDraftSummaryOutput) overviewView {
+func buildOverview(r *refs, today time.Time, balances []usecase.PreviewBalance, dealings []usecase.Dealing, plans []usecase.InstalmentPlanSummary, drafts usecase.GetDraftSummaryOutput) overviewView {
 	v := overviewView{Today: webserver.FormatDate(today), Drafts: draftsBox(r, drafts)}
 
-	byAccount := make(map[uuid.UUID][]usecase.Balance)
+	byAccount := make(map[uuid.UUID][]usecase.PreviewBalance)
 	for _, b := range balances {
 		byAccount[b.AccountID] = append(byAccount[b.AccountID], b)
 	}
@@ -201,7 +213,7 @@ func buildOverview(r *refs, today time.Time, balances []usecase.Balance, dealing
 
 // holdsAnything is whether an account holds or owes anything of any instrument: a
 // quantity that is not zero, or the principal of an instalment that is not yet due.
-func holdsAnything(balances []usecase.Balance) bool {
+func holdsAnything(balances []usecase.PreviewBalance) bool {
 	for _, b := range balances {
 		if !b.Quantity.IsZero() || !b.UnbilledInstalment.IsZero() {
 			return true
@@ -214,13 +226,21 @@ func holdsAnything(balances []usecase.Balance) bool {
 // case lists them, and one for what it owes in instalments that are not yet due,
 // which is not what it holds and is told apart by its label. An instrument whose
 // quantity is nothing and which only has instalments not yet due has just that
-// line.
-func balanceLines(r *refs, balances []usecase.Balance) []balanceLine {
+// line. A line that drafts change says what is confirmed of it beside the quantity.
+func balanceLines(r *refs, balances []usecase.PreviewBalance) []balanceLine {
 	var lines []balanceLine
 	for _, b := range balances {
 		owes := !b.UnbilledInstalment.IsZero()
 		if !b.Quantity.IsZero() || !owes {
-			lines = append(lines, balanceLine{Amount: r.money(b.InstrumentID, b.Quantity)})
+			line := balanceLine{Amount: r.money(b.InstrumentID, b.Quantity)}
+			switch {
+			case b.Drafts.IsZero():
+			case b.Confirmed.IsZero():
+				line.Unconfirmed = true
+			default:
+				line.Confirmed = new(r.plain(b.InstrumentID, b.Confirmed))
+			}
+			lines = append(lines, line)
 		}
 		if owes {
 			lines = append(lines, balanceLine{Label: unbilledLabel, Amount: r.money(b.InstrumentID, b.UnbilledInstalment)})

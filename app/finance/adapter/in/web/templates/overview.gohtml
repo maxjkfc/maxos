@@ -1,7 +1,9 @@
 {{define "content"}}{{with .Data}}
 <p class="muted">資料截至今天（{{.Today}}）。</p>
 
-<h2>餘額</h2>
+<h2>餘額{{with .Drafts}}{{if .Count}} <span class="pill pill-draft">預覽（含 {{.Count}} 筆草稿）</span>{{end}}{{end}}</h2>
+{{with .Drafts}}{{if .Count}}<p class="muted small">已確認的餘額，加上這些草稿今天全部確認後會有的變動。草稿確認之後，這裡會換成實際的餘額。<a href="{{.Href}}">查看草稿</a></p>
+{{end}}{{end}}
 {{range .Groups}}
 <div class="table-wrap">
 <table>
@@ -10,7 +12,7 @@
 <tbody>
 {{range .Accounts}}<tr>
 <th scope="row"><a href="{{.Href}}">{{.Name}}</a>{{if .Archived}} <span class="badge">已封存</span>{{end}}<span class="line muted small">{{.Kind}}</span></th>
-<td class="num">{{range .Lines}}<span class="line">{{if .Label}}<span class="muted small">{{.Label}}　</span>{{end}}{{template "amount" .Amount}}</span>{{end}}</td>
+<td class="num">{{range .Lines}}<span class="line">{{if .Label}}<span class="muted small">{{.Label}}　</span>{{end}}{{template "amount" .Amount}}</span>{{if .Confirmed}}<span class="line muted small">已確認 {{template "amount" .Confirmed}}</span>{{else if .Unconfirmed}}<span class="line muted small">尚未確認</span>{{end}}{{end}}</td>
 </tr>
 {{end}}</tbody>
 </table>
@@ -65,7 +67,7 @@
 {{end}}
 
 <h2>草稿</h2>
-{{with .Drafts}}{{if .Count}}<p class="note note-draft">有 <strong>{{.Count}}</strong> 筆草稿等著確認。草稿不影響餘額、預算和報表，確認後才生效。<a href="{{.Href}}">查看草稿</a></p>
+{{with .Drafts}}{{if .Count}}<p class="note note-draft">有 <strong>{{.Count}}</strong> 筆草稿等著確認。草稿確認後才生效：預算、報表和已確認的餘額都不含它們，上面「預覽」的餘額是把它們算進去的樣子。<a href="{{.Href}}">查看草稿</a></p>
 {{if .Amounts}}<div class="table-wrap">
 <table class="stack" role="table">
 <caption>如果這些草稿今天全部確認，帳戶的餘額今天會有這些變動</caption>
@@ -81,7 +83,7 @@
 </table>
 </div>
 {{else}}<p class="muted">如果這些草稿今天全部確認，帳戶的餘額今天不會有變動。</p>
-{{end}}<p class="muted small">還沒到期的分期各期要到扣款日才會影響餘額；日期在今天之後的草稿也是，所以它們不在上面。</p>
+{{end}}<p class="muted small">還沒到期的分期各期要到扣款日才會影響餘額；日期在今天之後的草稿也是，所以它們不在上面，預覽的餘額也不含它們。</p>
 {{if .OwnTransfers}}<p class="muted small">自己帳戶之間的轉帳：{{.OwnTransfers}} 筆。錢只是從一個帳戶移到另一個，不計入上面的流出和流入。</p>
 {{end}}{{else}}<p class="empty">沒有等著確認的草稿。</p>
 {{end}}{{end}}

@@ -24,3 +24,37 @@ type Balance struct {
 	// size that is zero or more.
 	UnbilledInstalment decimal.Decimal
 }
+
+// PreviewBalance is how much of an instrument an account would hold on a day if every
+// draft that has happened by then were confirmed: what its Balance holds, and, added to
+// it, what confirming the drafts would change. It is worked out when asked for and never
+// stored. A draft changes no balance, no budget and no report until it is confirmed, so
+// this is not a balance but the balance there would be, and it is only ever shown as
+// that.
+type PreviewBalance struct {
+	AccountID    uuid.UUID
+	InstrumentID uuid.UUID
+	// Confirmed is the Quantity of the Balance of the account and instrument: its
+	// confirmed account postings up to the day, added up.
+	Confirmed decimal.Decimal
+	// Drafts is what confirming the drafts would add to Confirmed, negative when it
+	// would take away: the account postings of the transactions in the status draft
+	// that happened on or before the day, added up. They are the postings that
+	// SummarizeDrafts adds up into the amounts of an account, of all months: those of
+	// the account book only, each in its own account, so a transfer between two of my
+	// accounts is in both of them, and a period of a draft plan from the day it falls
+	// due, not before. A draft dated after the day is not in it, nor is a void
+	// transaction.
+	Drafts decimal.Decimal
+	// UnbilledInstalment is that of the Balance: the principal of the confirmed
+	// instalment plans that is not yet due. A draft plan has none yet: it is not in
+	// the balance of an account until it is confirmed, and the periods of it that
+	// have fallen due are in Drafts, the way they will be in the Quantity of the
+	// Balance.
+	UnbilledInstalment decimal.Decimal
+}
+
+// Quantity returns what the account would hold: Confirmed and Drafts added up.
+func (b PreviewBalance) Quantity() decimal.Decimal {
+	return b.Confirmed.Add(b.Drafts)
+}
