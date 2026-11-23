@@ -17,6 +17,7 @@
   --text: #1a2027;
   --muted: #566270;
   --border: #d5dbe2;
+  --control-border: #7f8a96;
   --accent: #1d5fc2;
   --neg: #a8281f;
   --draft-bg: #fff6dc;
@@ -42,6 +43,7 @@
     --text: #e7ebf0;
     --muted: #9ca8b5;
     --border: #2e3640;
+    --control-border: #68737f;
     --accent: #7db1ff;
     --neg: #ff9189;
     --draft-bg: #2b2512;
@@ -292,7 +294,7 @@ button {
   display: inline-block;
   font: inherit;
   padding: 0.4rem 0.85rem;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   background: var(--surface);
   color: var(--text);
@@ -383,7 +385,7 @@ button:hover {
   background-position: calc(100% - 1.2rem) 52%, calc(100% - 0.9rem) 52%;
   background-size: 0.3rem 0.3rem;
   background-repeat: no-repeat;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   text-overflow: ellipsis;
   cursor: pointer;
@@ -885,13 +887,14 @@ table.wide {
 }
 
 /* The list of transactions: for each row what a brokerage app shows for a trade, what
-   it was (the title) over what it was of (the details), and the amount, big, on the
-   right, in the colour of what it did. Up to 60rem a row is a card, a grid of its own,
-   whose whole face is the link; from there on the list is a table with fixed columns.
-   Chinese is not broken into one character a line at any width: a title, which is
-   free text, wraps as Chinese does in a cell that is never narrow, and the names
-   (details, labels of amounts, chips) are kept whole by keep-all, so that a line
-   breaks between them. Only a name wider than its whole cell is broken, by
+   it was (the title) over what it was of (the details, which are a cell of their own so
+   that the title alone is the header of its row), and the amount, big, on the right.
+   A row is a grid whose cells are put in it by name: a card up to 60rem, whose whole
+   face is the link, and from there on the columns of a table, the headings of which
+   are seen. Whatever the width, Chinese is not broken into one character a line: a
+   title, which is free text, wraps as Chinese does in a cell that is never narrow, and
+   the names (details, labels of amounts, chips) are kept whole by keep-all, so that a
+   line breaks between them. Only a name wider than its whole cell is broken, by
    overflow-wrap, as the last resort. */
 
 .tx-wrap {
@@ -903,6 +906,7 @@ table.wide {
 }
 
 .tx,
+.tx thead,
 .tx tbody,
 .tx tr,
 .tx th,
@@ -928,13 +932,15 @@ table.wide {
 .tx tbody tr {
   position: relative;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) fit-content(45%);
+  grid-template-columns: minmax(0, 1fr) fit-content(45%);
+  grid-template-rows: auto auto auto;
   grid-template-areas:
-    "main main amount"
-    "main main status"
-    "date tags tags";
+    "title   amount"
+    "details details"
+    "date    status";
   align-items: start;
-  gap: 0.35rem 0.75rem;
+  column-gap: 0.75rem;
+  row-gap: 0.2rem;
   padding: 0.75rem 1rem;
   border-left: 4px solid transparent;
   border-bottom: 1px solid var(--border);
@@ -944,9 +950,24 @@ table.wide {
   border-bottom: 0;
 }
 
+.tx .tx-date {
+  grid-area: date;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 .tx .tx-main {
-  grid-area: main;
+  grid-area: title;
   min-width: 0;
+}
+
+.tx .tx-sub {
+  grid-area: details;
+  min-width: 0;
+}
+
+.tx .tx-status {
+  grid-area: status;
 }
 
 .tx .tx-amount {
@@ -954,51 +975,57 @@ table.wide {
   text-align: right;
 }
 
+/* The first line of the date, the title, the status and the amount is as high as the
+   others, so that what is in it is on one line whatever the size of the type. */
+.tx tbody .tx-date {
+  align-self: center;
+  margin-top: 0.15rem;
+  font-size: 0.8125rem;
+  line-height: 1.5rem;
+}
+
+.tx tbody .tx-status {
+  display: flex;
+  align-items: center;
+  align-self: center;
+  justify-self: end;
+  min-height: 1.5rem;
+  margin-top: 0.15rem;
+}
+
 .tx tbody .tx-amount {
   font-size: 1.0625rem;
   font-weight: 600;
-  line-height: 1.45;
+  line-height: 1.5rem;
 }
 
-.tx .tx-status {
-  grid-area: status;
-  align-self: center;
-  justify-self: end;
-}
-
-.tx .tx-date {
-  grid-area: date;
-  align-self: center;
+.tx tbody .tx-sub {
   color: var(--muted);
-  white-space: nowrap;
-}
-
-.tx tbody .tx-date {
   font-size: 0.8125rem;
+  line-height: 1.5;
 }
 
-.tx .tx-tags {
-  grid-area: tags;
-  align-self: center;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.35rem;
-  min-width: 0;
+.tx-sub > span {
+  word-break: keep-all;
 }
 
-.tx .tx-tags:empty {
-  display: none;
+.tx-sub .chip {
+  margin-right: 0.25rem;
+}
+
+.tx-sub > span:not(.chip) + .chip {
+  margin-left: 0.35rem;
 }
 
 .tx-title {
   display: block;
   font-weight: 600;
-  line-height: 1.45;
+  line-height: 1.5rem;
 }
 
 /* The link is what is cut to two lines, and not a box around it: an outline is not
-   cut by the box it is drawn around, and the ring of the focus must show. */
+   cut by the box it is drawn around, and the ring of the focus must show. Underlined
+   where there is no pointer to hover it, which is where it is a card. */
 .tx-title a {
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -1006,8 +1033,15 @@ table.wide {
   line-clamp: 2;
   overflow: hidden;
   color: var(--text);
-  text-decoration: none;
+  text-decoration: underline;
+  text-decoration-color: var(--muted);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
   text-wrap: pretty;
+}
+
+.tx-title a:focus-visible {
+  outline-offset: 0;
 }
 
 .tx-title a::after {
@@ -1017,18 +1051,6 @@ table.wide {
   right: 0;
   bottom: 0;
   left: 0;
-}
-
-.tx-sub {
-  display: block;
-  margin-top: 0.1rem;
-  color: var(--muted);
-  font-size: 0.8125rem;
-  line-height: 1.5;
-}
-
-.tx-sub > span {
-  word-break: keep-all;
 }
 
 .tx-posted {
@@ -1053,12 +1075,14 @@ table.wide {
   word-break: keep-all;
 }
 
+/* What adds is green, what takes away is the colour of the text, with its minus sign:
+   a list of what was spent is not a list of losses, so it has no red. */
 .tx-move .amt {
   color: var(--pos);
 }
 
 .tx-move .amt.neg {
-  color: var(--neg);
+  color: var(--text);
 }
 
 .tx tr.draft {
@@ -1087,13 +1111,7 @@ table.wide {
 }
 
 @media (min-width: 60rem) {
-  .tx {
-    display: table;
-    table-layout: fixed;
-  }
-
   .tx thead {
-    display: table-header-group;
     position: static;
     width: auto;
     height: auto;
@@ -1101,106 +1119,71 @@ table.wide {
     clip-path: none;
   }
 
-  .tx tbody {
-    display: table-row-group;
-  }
-
-  .tx tr,
+  .tx thead tr,
   .tx tbody tr {
-    display: table-row;
-    padding: 0;
-    border-left: 0;
-    border-bottom: 0;
-  }
-
-  .tx th,
-  .tx td {
-    display: table-cell;
-    padding: 0.8rem 0.75rem;
+    display: grid;
+    grid-template-columns: 7rem minmax(0, 1fr) 5.25rem 10.5rem;
+    column-gap: 1.25rem;
+    padding: 0.8rem 1rem;
+    border-left: 4px solid transparent;
     border-bottom: 1px solid var(--border);
-    vertical-align: baseline;
   }
 
-  .tx tbody tr:last-child > * {
-    border-bottom: 0;
+  .tx thead tr {
+    grid-template-areas: "date title status amount";
+    align-items: center;
+    padding-top: 0.65rem;
+    padding-bottom: 0.65rem;
+  }
+
+  .tx tbody tr {
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+      "date title   status amount"
+      "date details status amount";
   }
 
   .tx thead th {
-    padding: 0.65rem 0.75rem;
     color: var(--muted);
     font-size: 0.75rem;
     font-weight: 600;
     letter-spacing: 0.04em;
-    text-align: left;
-    vertical-align: middle;
     white-space: nowrap;
-    background: var(--surface);
+    background: transparent;
   }
 
-  .tx thead .tx-date {
-    width: 8rem;
-  }
-
-  .tx thead .tx-tags {
-    width: 13rem;
-  }
-
-  .tx thead .tx-status {
-    width: 5.75rem;
-  }
-
-  .tx thead .tx-amount {
-    width: 12.75rem;
-    text-align: right;
+  /* The details are seen under the title: their heading is only read. */
+  .tx thead .tx-sub {
+    position: absolute;
+    grid-area: auto;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
 
   .tx tbody .tx-date {
+    align-self: start;
+    margin-top: 0;
     font-size: 0.875rem;
   }
 
-  .tx .tx-tags,
-  .tx .tx-tags:empty {
-    display: table-cell;
+  .tx tbody .tx-status {
+    align-self: start;
+    justify-self: start;
+    margin-top: 0;
   }
 
-  .tx .tx-tags .chip {
-    margin: 0 0.35rem 0.35rem 0;
-  }
-
-  .tx-title a::after {
-    content: none;
+  .tx-title a {
+    text-decoration: none;
   }
 
   .tx-title a:hover {
     text-decoration: underline;
   }
 
-  .tx tr > :first-child {
-    border-left: 4px solid transparent;
-  }
-
-  .tx tr.draft {
-    background: none;
-    border-left: 0;
-  }
-
-  .tx tr.draft > td,
-  .tx tr.draft > th {
-    background: var(--draft-bg);
-  }
-
-  .tx tr.draft > :first-child {
-    border-left: 4px dashed var(--draft-edge);
-  }
-
-  .tx tbody tr:hover,
-  .tx tbody tr:focus-within {
-    background-image: none;
-  }
-
-  .tx tbody tr:hover > *,
-  .tx tbody tr:focus-within > * {
-    background-image: linear-gradient(var(--hover), var(--hover));
+  .tx-title a::after {
+    content: none;
   }
 }
 

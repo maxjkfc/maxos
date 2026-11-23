@@ -151,7 +151,9 @@ func TestTheTransactionsOfAMonth(t *testing.T) {
 		accountPosting(1, card, twd, "-1030"), usecase.Posting{Seq: 2, Book: "instalment", AccountID: &card, InstrumentID: twd, Quantity: dec("1000")},
 		expensePosting(3, interst, twd, "30", "30"))
 	plan.PlanSeq = new(2)
-	f.listed = []usecase.Transaction{expense, draft, voided, posted, postedOnTheDay, foreign, plan}
+	long := lunchTransaction(8, date(2026, time.November, 3), cash, "10")
+	long.Description = strings.Repeat("很長的說明", 30)
+	f.listed = []usecase.Transaction{expense, draft, voided, posted, postedOnTheDay, foreign, plan, long}
 	f.hasMore = true
 	s := f.site(t)
 	page := s.page("/app/transactions?month=2026-11")
@@ -167,46 +169,62 @@ func TestTheTransactionsOfAMonth(t *testing.T) {
 	})
 	t.Run("every row is a link to its transaction", func(t *testing.T) {
 		for _, tx := range f.listed {
-			wantIn(t, page, `<a href="/app/transactions/`+tx.ID.String()+`">`)
+			wantIn(t, page, `href="/app/transactions/`+tx.ID.String()+`"`)
 		}
 	})
-	t.Run("a row has the day, what it is called, the kind, the category, the account, the amount and the status", func(t *testing.T) {
+	t.Run("a row says what it is called, what it is of, its status and its amount, each in a cell", func(t *testing.T) {
 		row := rowOf(page, expense)
-		wantIn(t, textOf(row), "2026-11-14", "午餐 1", "巷口麵店", "午餐", "支出", "現金", "家庭", "專案：日本旅行", "已確認")
+		wantCell(t, row, "tx-date", "2026-11-14")
+		// The header of the row is what it is called and nothing else: a screen reader reads it
+		// before every cell of the row, and what the row is of is a cell of its own.
+		wantCell(t, row, "tx-main", "午餐 1")
+		// The shop, the category, the kind and the account, in this order, then the area and the
+		// project.
+		wantCell(t, row, "tx-sub", "巷口麵店 · 午餐 · 支出 · 現金 領域： 家庭 專案：日本旅行")
+		wantCell(t, row, "tx-status", "已確認")
 		wantIn(t, row, amount("−120.00", "TWD"))
 	})
-	t.Run("an amount that takes away is marked, and one that adds is not", func(t *testing.T) {
-		wantIn(t, rowOf(page, expense), `class="amt neg">−120.00`)
-		wantIn(t, rowOf(page, draft), `class="amt">&#43;50,000.00`)
+	t.Run("a title that the list cuts short is whole in its tooltip", func(t *testing.T) {
+		wantIn(t, rowOf(page, long), `title="`+long.Description+`"`)
+	})
+	t.Run("an amount that takes away has a minus sign and one that adds has a plus sign", func(t *testing.T) {
+		wantCell(t, rowOf(page, expense), "tx-amount", "−120.00 TWD")
+		wantCell(t, rowOf(page, draft), "tx-amount", "+50,000.00 TWD")
 	})
 	t.Run("the posting date is shown when it tells something", func(t *testing.T) {
-		wantIn(t, textOf(rowOf(page, posted)), "入帳日 2026-11-07")
+		wantCell(t, rowOf(page, posted), "tx-date", "2026-11-05 入帳日 2026-11-07")
 		// Neither a transaction with no posting date, nor one posted on the day it happened, has
 		// anything to say about it.
-		wantNotIn(t, textOf(rowOf(page, expense)), "入帳日")
-		wantNotIn(t, textOf(rowOf(page, postedOnTheDay)), "入帳日")
+		wantCell(t, rowOf(page, expense), "tx-date", "2026-11-14")
+		wantCell(t, rowOf(page, postedOnTheDay), "tx-date", "2026-11-09")
 	})
 	t.Run("a draft is a row of its own look, and says it is a draft", func(t *testing.T) {
 		wantIn(t, page, `<tr role="row" class="draft">`)
 		row := rowOf(page, draft)
-		wantIn(t, textOf(row), "草稿", "十一月薪水", "收入", "薪水")
+		wantCell(t, row, "tx-main", "十一月薪水")
+		wantCell(t, row, "tx-sub", "薪水 · 收入 · 活期戶頭")
+		wantCell(t, row, "tx-status", "草稿")
 		wantIn(t, row, amount("+50,000.00", "TWD"))
 	})
 	t.Run("a void transaction is marked", func(t *testing.T) {
 		wantIn(t, page, `<tr role="row" class="void">`)
-		wantIn(t, textOf(rowOf(page, voided)), "已作廢")
+		wantCell(t, rowOf(page, voided), "tx-status", "已作廢")
 	})
 	t.Run("a transfer shows what each account gained or lost", func(t *testing.T) {
 		row := rowOf(page, voided)
 		wantLabels(t, row, "活期戶頭", "現金")
 		wantIn(t, row, amount("−1,000.00", "TWD"), amount("+1,000.00", "TWD"))
-		wantIn(t, textOf(row), "轉帳")
+		// With nothing else to call it by it is called by its kind, which is not said again.
+		wantCell(t, row, "tx-main", "轉帳")
+		wantCell(t, row, "tx-sub", "活期戶頭、現金")
 	})
 	t.Run("a foreign amount is in its own instrument", func(t *testing.T) {
 		wantIn(t, rowOf(page, foreign), amount("−100.00", "USD"))
 	})
 	t.Run("a period of an instalment plan says which", func(t *testing.T) {
-		wantIn(t, textOf(rowOf(page, plan)), "分期第 2 期", "利息")
+		row := rowOf(page, plan)
+		wantCell(t, row, "tx-main", "利息")
+		wantCell(t, row, "tx-sub", "分期 · 分期第 2 期 · 信用卡")
 	})
 	t.Run("the months around it, and the next page", func(t *testing.T) {
 		wantIn(t, page,
@@ -221,7 +239,7 @@ func TestTheTransactionsOfAMonth(t *testing.T) {
 // rowOf is the row of the list that is of the transaction, from its start tag to its end
 // tag, and nothing when the list has none.
 func rowOf(page string, t usecase.Transaction) string {
-	at := strings.Index(page, `<a href="/app/transactions/`+t.ID.String()+`">`)
+	at := strings.Index(page, `href="/app/transactions/`+t.ID.String()+`"`)
 	if at < 0 {
 		return ""
 	}
@@ -240,6 +258,25 @@ var markupTag = regexp.MustCompile(`<[^>]*>`)
 func textOf(markup string) string {
 	markup = strings.ReplaceAll(markup, "<wbr>", "")
 	return strings.Join(strings.Fields(html.UnescapeString(markupTag.ReplaceAllString(markup, " "))), " ")
+}
+
+// cellText is the text of the cell of the row that has the class, as a reader reads it, and
+// nothing when the row has no such cell.
+func cellText(row, class string) string {
+	cell := regexp.MustCompile(`(?s)<(?:td|th)[^>]*class="` + regexp.QuoteMeta(class) + `"[^>]*>(.*?)</(?:td|th)>`)
+	m := cell.FindStringSubmatch(row)
+	if m == nil {
+		return ""
+	}
+	return textOf(m[1])
+}
+
+// wantCell fails unless the cell of the row that has the class says what is wanted.
+func wantCell(t *testing.T, row, class, want string) {
+	t.Helper()
+	if got := cellText(row, class); got != want {
+		t.Errorf("the cell %q of the row says %q, want %q:\n%s", class, got, want, row)
+	}
 }
 
 var whereLabel = regexp.MustCompile(`<span class="where">([^<]*)</span>`)

@@ -26,15 +26,15 @@
 <thead role="rowgroup"><tr role="row">
 <th scope="col" role="columnheader" class="tx-date">日期</th>
 <th scope="col" role="columnheader" class="tx-main">交易</th>
-<th scope="col" role="columnheader" class="tx-tags">領域／專案</th>
+<th scope="col" role="columnheader" class="tx-sub">細節</th>
 <th scope="col" role="columnheader" class="tx-status">狀態</th>
 <th scope="col" role="columnheader" class="tx-amount">金額</th>
 </tr></thead>
 <tbody role="rowgroup">
 {{range .Rows}}{{$many := gt (len .Movements) 1}}<tr role="row" class="{{.Class}}">
 <td role="cell" class="tx-date"><span class="tx-day">{{.Date}}</span>{{if .Posted}}<span class="tx-posted">入帳日 {{.Posted}}</span>{{end}}</td>
-<th scope="row" role="rowheader" class="tx-main"><span class="tx-title"><a href="{{.Href}}">{{.Title}}</a></span>{{if .Details}}<span class="tx-sub">{{range $i, $d := .Details}}{{if $i}} · {{end}}<span>{{range $j, $n := $d}}{{if $j}}、<wbr>{{end}}{{$n}}{{end}}</span>{{end}}</span>{{end}}</th>
-<td role="cell" class="tx-tags">{{if .Area}}<span class="chip">{{.Area}}</span>{{end}}{{if .Project}}<span class="chip">專案：<wbr>{{.Project}}</span>{{end}}</td>
+<th scope="row" role="rowheader" class="tx-main"><span class="tx-title"><a href="{{.Href}}" title="{{.Title}}">{{.Title}}</a></span></th>
+<td role="cell" class="tx-sub">{{range $i, $d := .Details}}{{if $i}} · {{end}}<span>{{range $j, $n := $d}}{{if $j}}、<wbr>{{end}}{{$n}}{{end}}</span>{{end}}{{if .Area}} <span class="chip"><span class="sr-only">領域：</span>{{.Area}}</span>{{end}}{{if .Project}} <span class="chip">專案：<wbr>{{.Project}}</span>{{end}}</td>
 <td role="cell" class="tx-status"><span class="pill pill-{{.StatusKey}}">{{.Status}}</span></td>
 <td role="cell" class="tx-amount">{{range .Movements}}<span class="tx-move">{{if or $many .Indirect}}<span class="where">{{.Where}}</span>{{end}}{{template "amount" .Amount}}</span>{{end}}</td>
 </tr>
