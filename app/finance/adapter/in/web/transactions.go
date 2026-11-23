@@ -57,27 +57,34 @@ type choice struct {
 	Selected bool
 }
 
-// txRow is a transaction as a row of a list: the day, the kind, what it was for and
-// where the money went.
+// txRow is a transaction as a row of a list: the day, what it was, what it moved and
+// what it belongs to.
 type txRow struct {
 	Href string
 	Date string
-	// Posted is the posting date, when the transaction has one.
-	Posted     string
-	Kind       string
-	PlanLabel  string
-	Status     string
-	StatusKey  string
-	Class      string
-	Categories string
-	// Description is the memo, and Merchant the shop, which a row shows under it.
-	Description string
-	Merchant    string
-	Accounts    string
-	Movements   []movement
-	Area        string
-	Project     string
+	// Posted is the posting date, when it tells something: the transaction has one
+	// and it is not the day it happened.
+	Posted string
+	// Title is what the row is called: the description, or what a transaction that
+	// was given none is of (see rowTitle).
+	Title string
+	// Details are what the row says under its title, each once and only when there
+	// is something to say, in this order: the shop, the categories, the kind, where
+	// it is in an instalment plan, the accounts. What the title already is, is left
+	// out.
+	Details   []detail
+	Status    string
+	StatusKey string
+	Class     string
+	Movements []movement
+	Area      string
+	Project   string
 }
+
+// detail is one thing a row says under its title: a name, or the names of what the
+// transaction is of or to (its categories, its accounts), between which a line may
+// break but not inside one.
+type detail []string
 
 // movement is what a transaction moved on one account, or in one party's dealing,
 // or in the principal of an instalment plan that is not yet due.
@@ -242,31 +249,48 @@ func choices(options []option, all, selected string) []choice {
 
 // buildRow lays a transaction out as a row of a list.
 func buildRow(r *refs, t usecase.Transaction) txRow {
+	kind := kindLabel(t.Kind)
+	categories := categoryNames(r, t)
+	title := rowTitle(t, joinNames(categories), kind)
 	row := txRow{
-		Href:        transactionLink(t.ID),
-		Date:        webserver.FormatDate(t.OccurredOn),
-		Kind:        kindLabel(t.Kind),
-		Status:      statusLabel(t.Status),
-		StatusKey:   statusKey(t.Status),
-		Class:       statusKey(t.Status),
-		Categories:  joinNames(categoryNames(r, t)),
-		Description: t.Description,
-		Merchant:    t.Merchant,
-		Movements:   movementsOf(r, t),
-		Area:        r.optionalName(t.AreaID),
-		Project:     r.optionalName(t.ProjectID),
+		Href:      transactionLink(t.ID),
+		Date:      webserver.FormatDate(t.OccurredOn),
+		Title:     title,
+		Status:    statusLabel(t.Status),
+		StatusKey: statusKey(t.Status),
+		Class:     statusKey(t.Status),
+		Movements: movementsOf(r, t),
+		Area:      r.optionalName(t.AreaID),
+		Project:   r.optionalName(t.ProjectID),
 	}
 	if t.PostedOn != nil {
-		row.Posted = webserver.FormatDate(*t.PostedOn)
+		if posted := webserver.FormatDate(*t.PostedOn); posted != row.Date {
+			row.Posted = posted
+		}
 	}
-	if row.Description == "" {
-		row.Description = firstMemo(t)
-	}
-	row.Accounts = joinNames(accountNames(r, t))
+	details := []detail{{strings.TrimSpace(t.Merchant)}, categories, {kind}}
 	if t.PlanSeq != nil {
-		row.PlanLabel = planLabel(*t.PlanSeq)
+		details = append(details, detail{planLabel(*t.PlanSeq)})
+	}
+	details = append(details, accountNames(r, t))
+	for _, d := range details {
+		if text := joinNames(d); text != "" && text != title {
+			row.Details = append(row.Details, d)
+		}
 	}
 	return row
+}
+
+// rowTitle is what a row is called: the description; when there is none, the first
+// memo of its postings; then what it is of (the categories), and last the kind,
+// which every transaction has.
+func rowTitle(t usecase.Transaction, categories, kind string) string {
+	for _, title := range []string{t.Description, firstMemo(t), categories} {
+		if title = strings.TrimSpace(title); title != "" {
+			return title
+		}
+	}
+	return kind
 }
 
 // transactionLink is the page of a transaction.

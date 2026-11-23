@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,6 +109,81 @@ func TestADiscountIsAPartOfItsOwn(t *testing.T) {
 	want := []string{"帳戶 −450.00", "主要金額 +450.00", "折扣 50.00"}
 	if fmt.Sprint(roles) != fmt.Sprint(want) {
 		t.Errorf("parts = %q, want %q: what was paid is the expense, and the discount only a record beside it", roles, want)
+	}
+}
+
+// detailsOf is what a row says under its title, as a reader reads it: the things apart by
+// a bar, and the names of one thing by the comma that a list of names has.
+func detailsOf(row txRow) string {
+	var things []string
+	for _, d := range row.Details {
+		things = append(things, joinNames(d))
+	}
+	return strings.Join(things, " | ")
+}
+
+func TestARowIsCalledByWhatItSaysAndTheRestIsUnderIt(t *testing.T) {
+	r := &refs{
+		instruments: map[uuid.UUID]usecase.Instrument{twd: {ID: twd, Code: "TWD", Decimals: 2}},
+		categories:  map[uuid.UUID]usecase.Category{lunch: {ID: lunch, Name: "午餐"}},
+		accountByID: map[uuid.UUID]usecase.Account{cash: {ID: cash, Name: "現金"}, card: {ID: card, Name: "信用卡"}},
+	}
+	tests := []struct {
+		name    string
+		change  func(*usecase.Transaction)
+		title   string
+		details string
+	}{
+		{"a description is the title, with the shop under it", func(tx *usecase.Transaction) { tx.Description, tx.Merchant = "午餐 1", "巷口麵店" },
+			"午餐 1", "巷口麵店 | 午餐 | 支出 | 現金"},
+		{"without one, the memo of a posting", func(tx *usecase.Transaction) { tx.Postings[1].Memo = "壽司" },
+			"壽司", "午餐 | 支出 | 現金"},
+		{"without either, the category, which is not said again", func(*usecase.Transaction) {},
+			"午餐", "支出 | 現金"},
+		{"a blank description is none", func(tx *usecase.Transaction) { tx.Description = " \n " },
+			"午餐", "支出 | 現金"},
+		{"what the title is is not said again", func(tx *usecase.Transaction) { tx.Description, tx.Merchant = "巷口麵店", "巷口麵店" },
+			"巷口麵店", "午餐 | 支出 | 現金"},
+		{"a period of an instalment plan says where it is", func(tx *usecase.Transaction) { tx.PlanSeq = new(2) },
+			"午餐", "支出 | 分期第 2 期 | 現金"},
+		{"with nothing to call it by, the kind, which is not said again", func(tx *usecase.Transaction) {
+			tx.Kind = "transfer"
+			tx.Postings = []usecase.Posting{accountPosting(1, cash, twd, "-10"), accountPosting(2, card, twd, "10")}
+		}, "轉帳", "現金、信用卡"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := transaction(seqID(1), "expense", "confirmed", date(2026, time.November, 1),
+				accountPosting(1, cash, twd, "-120"), expensePosting(2, lunch, twd, "120", "120"))
+			tt.change(&tx)
+			row := buildRow(r, tx)
+			if row.Title != tt.title || detailsOf(row) != tt.details {
+				t.Errorf("a row is called %q with %q under it, want %q and %q", row.Title, detailsOf(row), tt.title, tt.details)
+			}
+		})
+	}
+}
+
+func TestThePostingDateIsOnlyShownWhenItTellsSomething(t *testing.T) {
+	r := &refs{instruments: map[uuid.UUID]usecase.Instrument{twd: {ID: twd, Code: "TWD", Decimals: 2}}}
+	tests := []struct {
+		name     string
+		postedOn *time.Time
+		want     string
+	}{
+		{"none", nil, ""},
+		{"the day it happened", new(date(2026, time.November, 14)), ""},
+		{"another day", new(date(2026, time.November, 16)), "2026-11-16"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := transaction(seqID(1), "expense", "confirmed", date(2026, time.November, 14),
+				accountPosting(1, cash, twd, "-120"), expensePosting(2, lunch, twd, "120", "120"))
+			tx.PostedOn = tt.postedOn
+			if got := buildRow(r, tx).Posted; got != tt.want {
+				t.Errorf("a row shows the posting date %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

@@ -14,37 +14,29 @@
 <label>種類
 <select name="kind">{{range .Filters.Kinds}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
 </label>
-<button type="submit" class="button-primary">套用篩選</button>
-{{if .Filtered}}<a href="{{.Filters.Reset}}">清除篩選</a>{{end}}
+<div class="filter-actions"><button type="submit" class="button-primary">套用篩選</button>
+{{if .Filtered}}<a href="{{.Filters.Reset}}">清除篩選</a>{{end}}</div>
 </form>
 {{if .Filters.WithoutPeriods}}<p class="muted small">這份清單只列分期計畫的起點，各期不另外列，筆數和草稿頁一樣。<a href="{{.Filters.WithPeriods}}">連各期一起列</a></p>
 {{end}}
 
-{{if .Rows}}<div class="table-wrap">
-<table class="transactions stack wide" role="table">
+{{if .Rows}}<div class="table-wrap tx-wrap">
+<table class="tx" role="table">
 <caption class="sr-only">{{.Month}} 的交易，新的在前</caption>
 <thead role="rowgroup"><tr role="row">
-<th scope="col" role="columnheader">日期</th>
-<th scope="col" role="columnheader">入帳日</th>
-<th scope="col" role="columnheader">種類</th>
-<th scope="col" role="columnheader">類別</th>
-<th scope="col" role="columnheader">說明</th>
-<th scope="col" role="columnheader">帳戶</th>
-<th scope="col" role="columnheader" class="num">金額</th>
-<th scope="col" role="columnheader">領域／專案</th>
-<th scope="col" role="columnheader">狀態</th>
+<th scope="col" role="columnheader" class="tx-date">日期</th>
+<th scope="col" role="columnheader" class="tx-main">交易</th>
+<th scope="col" role="columnheader" class="tx-sub">細節</th>
+<th scope="col" role="columnheader" class="tx-status">狀態</th>
+<th scope="col" role="columnheader" class="tx-amount">金額</th>
 </tr></thead>
 <tbody role="rowgroup">
 {{range .Rows}}{{$many := gt (len .Movements) 1}}<tr role="row" class="{{.Class}}">
-<th scope="row" role="rowheader" class="nowrap"><a href="{{.Href}}">{{.Date}}</a></th>
-<td role="cell" data-label="入帳日" class="nowrap">{{.Posted}}</td>
-<td role="cell" data-label="種類">{{.Kind}}{{if .PlanLabel}}<span class="line muted small">{{.PlanLabel}}</span>{{end}}</td>
-<td role="cell" data-label="類別">{{.Categories}}</td>
-<td role="cell" data-label="說明" class="memo">{{.Description}}{{if .Merchant}}<span class="line muted small">{{.Merchant}}</span>{{end}}</td>
-<td role="cell" data-label="帳戶">{{.Accounts}}</td>
-<td role="cell" data-label="金額" class="num">{{range .Movements}}<span class="line">{{if or $many .Indirect}}<span class="where muted small">{{.Where}}　</span>{{end}}{{template "amount" .Amount}}</span>{{end}}</td>
-<td role="cell" data-label="領域／專案">{{if .Area}}<span class="line">{{.Area}}</span>{{end}}{{if .Project}}<span class="line muted small">專案：{{.Project}}</span>{{end}}</td>
-<td role="cell" data-label="狀態"><span class="badge badge-{{.StatusKey}}">{{.Status}}</span></td>
+<td role="cell" class="tx-date"><span class="tx-day">{{.Date}}</span>{{if .Posted}}<span class="tx-posted">入帳日 {{.Posted}}</span>{{end}}</td>
+<th scope="row" role="rowheader" class="tx-main"><span class="tx-title"><a href="{{.Href}}" title="{{.Title}}">{{.Title}}</a></span></th>
+<td role="cell" class="tx-sub">{{range $i, $d := .Details}}{{if $i}} · {{end}}<span>{{range $j, $n := $d}}{{if $j}}、<wbr>{{end}}{{$n}}{{end}}</span>{{end}}{{if .Area}} <span class="chip"><span class="sr-only">領域：</span>{{.Area}}</span>{{end}}{{if .Project}} <span class="chip">專案：<wbr>{{.Project}}</span>{{end}}</td>
+<td role="cell" class="tx-status"><span class="pill pill-{{.StatusKey}}">{{.Status}}</span></td>
+<td role="cell" class="tx-amount">{{range .Movements}}<span class="tx-move">{{if or $many .Indirect}}<span class="where">{{.Where}}</span>{{end}}{{template "amount" .Amount}}</span>{{end}}</td>
 </tr>
 {{end}}</tbody>
 </table>

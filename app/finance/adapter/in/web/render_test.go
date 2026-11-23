@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"html"
 	"net/http"
 	"regexp"
 	"strings"
@@ -142,13 +143,17 @@ func TestTheTransactionsOfAMonth(t *testing.T) {
 		accountPosting(1, checking, twd, "-1000"), accountPosting(2, cash, twd, "1000"))
 	posted := lunchTransaction(4, date(2026, time.November, 5), card, "300")
 	posted.PostedOn = new(date(2026, time.November, 7))
+	postedOnTheDay := lunchTransaction(7, date(2026, time.November, 9), card, "80")
+	postedOnTheDay.PostedOn = new(date(2026, time.November, 9))
 	foreign := transaction(seqID(5), "expense", "confirmed", date(2026, time.November, 2),
 		accountPosting(1, card, usd, "-100"), expensePosting(2, food, usd, "100", "3200"))
 	plan := transaction(seqID(6), "instalment", "confirmed", date(2026, time.November, 1),
 		accountPosting(1, card, twd, "-1030"), usecase.Posting{Seq: 2, Book: "instalment", AccountID: &card, InstrumentID: twd, Quantity: dec("1000")},
 		expensePosting(3, interst, twd, "30", "30"))
 	plan.PlanSeq = new(2)
-	f.listed = []usecase.Transaction{expense, draft, voided, posted, foreign, plan}
+	long := lunchTransaction(8, date(2026, time.November, 3), cash, "10")
+	long.Description = strings.Repeat("很長的說明", 30)
+	f.listed = []usecase.Transaction{expense, draft, voided, posted, postedOnTheDay, foreign, plan, long}
 	f.hasMore = true
 	s := f.site(t)
 	page := s.page("/app/transactions?month=2026-11")
@@ -162,32 +167,64 @@ func TestTheTransactionsOfAMonth(t *testing.T) {
 			t.Errorf("asked %+v", in)
 		}
 	})
-	t.Run("a row has the day, the kind, the category, the memo, the account and the amount", func(t *testing.T) {
-		wantIn(t, page,
-			`<a href="/app/transactions/`+expense.ID.String()+`">2026-11-14</a>`,
-			`<td role="cell" data-label="種類">支出</td>`, `<td role="cell" data-label="類別">午餐</td>`, `<td role="cell" data-label="說明" class="memo">午餐 1<span class="line muted small">巷口麵店</span></td>`, `<td role="cell" data-label="帳戶">現金</td>`,
-			amount("−120.00", "TWD"),
-			`<span class="line">家庭</span><span class="line muted small">專案：日本旅行</span>`,
-			`<span class="badge badge-confirmed">已確認</span>`,
-		)
+	t.Run("every row is a link to its transaction", func(t *testing.T) {
+		for _, tx := range f.listed {
+			wantIn(t, page, `href="/app/transactions/`+tx.ID.String()+`"`)
+		}
 	})
-	t.Run("the posting date is shown when there is one", func(t *testing.T) {
-		wantIn(t, page, `<td role="cell" data-label="入帳日" class="nowrap">2026-11-07</td>`)
+	t.Run("a row says what it is called, what it is of, its status and its amount, each in a cell", func(t *testing.T) {
+		row := rowOf(page, expense)
+		wantCell(t, row, "tx-date", "2026-11-14")
+		// The header of the row is what it is called and nothing else: a screen reader reads it
+		// before every cell of the row, and what the row is of is a cell of its own.
+		wantCell(t, row, "tx-main", "午餐 1")
+		// The shop, the category, the kind and the account, in this order, then the area and the
+		// project.
+		wantCell(t, row, "tx-sub", "巷口麵店 · 午餐 · 支出 · 現金 領域： 家庭 專案：日本旅行")
+		wantCell(t, row, "tx-status", "已確認")
+		wantIn(t, row, amount("−120.00", "TWD"))
+	})
+	t.Run("a title that the list cuts short is whole in its tooltip", func(t *testing.T) {
+		wantIn(t, rowOf(page, long), `title="`+long.Description+`"`)
+	})
+	t.Run("an amount that takes away has a minus sign and one that adds has a plus sign", func(t *testing.T) {
+		wantCell(t, rowOf(page, expense), "tx-amount", "−120.00 TWD")
+		wantCell(t, rowOf(page, draft), "tx-amount", "+50,000.00 TWD")
+	})
+	t.Run("the posting date is shown when it tells something", func(t *testing.T) {
+		wantCell(t, rowOf(page, posted), "tx-date", "2026-11-05 入帳日 2026-11-07")
+		// Neither a transaction with no posting date, nor one posted on the day it happened, has
+		// anything to say about it.
+		wantCell(t, rowOf(page, expense), "tx-date", "2026-11-14")
+		wantCell(t, rowOf(page, postedOnTheDay), "tx-date", "2026-11-09")
 	})
 	t.Run("a draft is a row of its own look, and says it is a draft", func(t *testing.T) {
-		wantIn(t, page, `<tr role="row" class="draft">`, `<span class="badge badge-draft">草稿</span>`, "十一月薪水", `<td role="cell" data-label="種類">收入</td>`, `<td role="cell" data-label="類別">薪水</td>`, amount("+50,000.00", "TWD"))
+		wantIn(t, page, `<tr role="row" class="draft">`)
+		row := rowOf(page, draft)
+		wantCell(t, row, "tx-main", "十一月薪水")
+		wantCell(t, row, "tx-sub", "薪水 · 收入 · 活期戶頭")
+		wantCell(t, row, "tx-status", "草稿")
+		wantIn(t, row, amount("+50,000.00", "TWD"))
 	})
 	t.Run("a void transaction is marked", func(t *testing.T) {
-		wantIn(t, page, `<tr role="row" class="void">`, `<span class="badge badge-void">已作廢</span>`)
+		wantIn(t, page, `<tr role="row" class="void">`)
+		wantCell(t, rowOf(page, voided), "tx-status", "已作廢")
 	})
 	t.Run("a transfer shows what each account gained or lost", func(t *testing.T) {
-		wantIn(t, page, `<span class="where muted small">活期戶頭　</span>`, `<span class="where muted small">現金　</span>`, amount("−1,000.00", "TWD"), amount("+1,000.00", "TWD"), `<td role="cell" data-label="種類">轉帳</td>`)
+		row := rowOf(page, voided)
+		wantLabels(t, row, "活期戶頭", "現金")
+		wantIn(t, row, amount("−1,000.00", "TWD"), amount("+1,000.00", "TWD"))
+		// With nothing else to call it by it is called by its kind, which is not said again.
+		wantCell(t, row, "tx-main", "轉帳")
+		wantCell(t, row, "tx-sub", "活期戶頭、現金")
 	})
 	t.Run("a foreign amount is in its own instrument", func(t *testing.T) {
-		wantIn(t, page, amount("−100.00", "USD"))
+		wantIn(t, rowOf(page, foreign), amount("−100.00", "USD"))
 	})
 	t.Run("a period of an instalment plan says which", func(t *testing.T) {
-		wantIn(t, page, "分期第 2 期", `<td role="cell" data-label="類別">利息</td>`)
+		row := rowOf(page, plan)
+		wantCell(t, row, "tx-main", "利息")
+		wantCell(t, row, "tx-sub", "分期 · 分期第 2 期 · 信用卡")
 	})
 	t.Run("the months around it, and the next page", func(t *testing.T) {
 		wantIn(t, page,
@@ -199,9 +236,62 @@ func TestTheTransactionsOfAMonth(t *testing.T) {
 	})
 }
 
-// rowOf is the row of the list that is of the transaction.
+// rowOf is the row of the list that is of the transaction, from its start tag to its end
+// tag, and nothing when the list has none.
 func rowOf(page string, t usecase.Transaction) string {
-	return between(page, `<a href="/app/transactions/`+t.ID.String()+`">`, "</tr>")
+	at := strings.Index(page, `href="/app/transactions/`+t.ID.String()+`"`)
+	if at < 0 {
+		return ""
+	}
+	start := strings.LastIndex(page[:at], "<tr ")
+	end := strings.Index(page[at:], "</tr>")
+	if start < 0 || end < 0 {
+		return ""
+	}
+	return page[start : at+end+len("</tr>")]
+}
+
+var markupTag = regexp.MustCompile(`<[^>]*>`)
+
+// textOf is what a reader of the markup reads: its text, the words of one tag apart from
+// those of the next, and a place where a line may break (<wbr>) nothing at all.
+func textOf(markup string) string {
+	markup = strings.ReplaceAll(markup, "<wbr>", "")
+	return strings.Join(strings.Fields(html.UnescapeString(markupTag.ReplaceAllString(markup, " "))), " ")
+}
+
+// cellText is the text of the cell of the row that has the class, as a reader reads it, and
+// nothing when the row has no such cell.
+func cellText(row, class string) string {
+	cell := regexp.MustCompile(`(?s)<(?:td|th)[^>]*class="` + regexp.QuoteMeta(class) + `"[^>]*>(.*?)</(?:td|th)>`)
+	m := cell.FindStringSubmatch(row)
+	if m == nil {
+		return ""
+	}
+	return textOf(m[1])
+}
+
+// wantCell fails unless the cell of the row that has the class says what is wanted.
+func wantCell(t *testing.T, row, class, want string) {
+	t.Helper()
+	if got := cellText(row, class); got != want {
+		t.Errorf("the cell %q of the row says %q, want %q:\n%s", class, got, want, row)
+	}
+}
+
+var whereLabel = regexp.MustCompile(`<span class="where">([^<]*)</span>`)
+
+// wantLabels fails unless the amounts of the row are labelled with what it says, in
+// order, and with nothing when it says nothing.
+func wantLabels(t *testing.T, row string, want ...string) {
+	t.Helper()
+	var got []string
+	for _, m := range whereLabel.FindAllStringSubmatch(row, -1) {
+		got = append(got, m[1])
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("the amounts of the row are labelled %q, want %q:\n%s", got, want, row)
+	}
 }
 
 func TestTheAmountOfARowSaysWhatItIsWhenItIsNotAnAccounts(t *testing.T) {
@@ -224,17 +314,19 @@ func TestTheAmountOfARowSaysWhatItIsWhenItIsNotAnAccounts(t *testing.T) {
 	page := f.site(t).page("/app/transactions?month=2026-11")
 
 	t.Run("principal that is not yet due", func(t *testing.T) {
-		wantIn(t, rowOf(page, origin), `<span class="where muted small">信用卡・未到期分期　</span>`, amount("−3,000.00", "TWD"))
+		wantLabels(t, rowOf(page, origin), "信用卡・未到期分期")
+		wantIn(t, rowOf(page, origin), amount("−3,000.00", "TWD"))
 	})
 	t.Run("what I owe a party", func(t *testing.T) {
-		wantIn(t, rowOf(page, paidBy), `<span class="where muted small">往來・Bob　</span>`, amount("−300.00", "TWD"))
+		wantLabels(t, rowOf(page, paidBy), "往來・Bob")
+		wantIn(t, rowOf(page, paidBy), amount("−300.00", "TWD"))
 	})
 	t.Run("an account's own amount has no label", func(t *testing.T) {
-		wantNotIn(t, rowOf(page, plain), `<span class="where muted small">現金`)
+		wantLabels(t, rowOf(page, plain))
 		wantIn(t, rowOf(page, plain), amount("−120.00", "TWD"))
 	})
 	t.Run("an amount of each account of a transfer is told apart", func(t *testing.T) {
-		wantIn(t, rowOf(page, transfer), `<span class="where muted small">活期戶頭　</span>`, `<span class="where muted small">現金　</span>`)
+		wantLabels(t, rowOf(page, transfer), "活期戶頭", "現金")
 	})
 }
 
