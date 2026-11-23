@@ -180,6 +180,14 @@ func (r *refs) signed(instrument uuid.UUID, quantity decimal.Decimal) amountView
 	return amountView{Text: webserver.FormatSigned(quantity, decimals), Unit: i.Code, Negative: quantity.IsNegative()}
 }
 
+// changed writes a quantity that moves something, with a plus sign when it adds and a minus
+// sign when it takes away, and no colour for a loss: what drafts would change of the balances
+// is no loss, since nothing of it has happened.
+func (r *refs) changed(instrument uuid.UUID, quantity decimal.Decimal) amountView {
+	i, decimals := r.instrument(instrument)
+	return amountView{Text: webserver.FormatSigned(quantity, decimals), Unit: i.Code}
+}
+
 // taken writes a quantity that is taken out of a total: with a minus sign, which says
 // what is done with it and not that it is a loss, so it has no colour for one.
 func (r *refs) taken(instrument uuid.UUID, quantity decimal.Decimal) amountView {
@@ -195,6 +203,12 @@ func (r *refs) taken(instrument uuid.UUID, quantity decimal.Decimal) amountView 
 func (r *refs) plain(instrument uuid.UUID, quantity decimal.Decimal) amountView {
 	i, decimals := r.instrument(instrument)
 	return amountView{Text: webserver.FormatAmount(quantity, decimals), Unit: i.Code}
+}
+
+// countText writes how many of something there are, with the commas between its thousands as
+// the quantity of an instrument that has no places is written.
+func countText(n int) string {
+	return webserver.FormatAmount(decimal.NewFromInt(int64(n)), 0)
 }
 
 // base writes an amount of the base currency.

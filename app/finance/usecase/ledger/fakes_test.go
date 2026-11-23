@@ -529,7 +529,7 @@ func (f *fakeTransactions) PreviewBalances(_ context.Context, day time.Time) (mo
 	return f.preview, nil
 }
 
-// fakeAccounts is an in-memory repo.AccountRepo of which only Get and Lock are
+// fakeAccounts is an in-memory repo.AccountRepo of which only Get, List and Lock are
 // used.
 type fakeAccounts struct {
 	repo.AccountRepo
@@ -540,6 +540,9 @@ type fakeAccounts struct {
 	locked  []uuid.UUID
 	log     *callLog
 	lockErr error
+	// lists counts the calls of List, and listErr, when set, is what it returns.
+	lists   int
+	listErr error
 }
 
 func newFakeAccounts() *fakeAccounts {
@@ -550,6 +553,24 @@ func (f *fakeAccounts) add(name string) model.Account {
 	a := model.Account{ID: uuid.Must(uuid.NewV7()), Name: name, Kind: model.AccountKindCash}
 	f.accounts[a.ID] = a
 	return a
+}
+
+// List returns the accounts by name, as the repo does, the archived ones too when asked.
+func (f *fakeAccounts) List(_ context.Context, includeArchived bool) ([]model.Account, error) {
+	f.lists++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	var out []model.Account
+	for _, a := range f.accounts {
+		if includeArchived || a.ArchivedAt == nil {
+			out = append(out, a)
+		}
+	}
+	slices.SortFunc(out, func(a, b model.Account) int {
+		return cmp.Or(cmp.Compare(a.Name, b.Name), bytes.Compare(a.ID[:], b.ID[:]))
+	})
+	return out, nil
 }
 
 // addCard adds a card that closes its statement on the closing day and has it paid
@@ -592,11 +613,14 @@ func (f *fakeAccounts) Lock(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// fakeInstruments is an in-memory repo.InstrumentRepo of which only Get is used.
+// fakeInstruments is an in-memory repo.InstrumentRepo of which only Get and List are used.
 type fakeInstruments struct {
 	repo.InstrumentRepo
 
 	instruments map[uuid.UUID]model.Instrument
+	// lists counts the calls of List, and listErr, when set, is what it returns.
+	lists   int
+	listErr error
 }
 
 func newFakeInstruments() *fakeInstruments {
@@ -620,6 +644,24 @@ func (f *fakeInstruments) Get(_ context.Context, id uuid.UUID) (model.Instrument
 		return model.Instrument{}, model.ErrNotFound
 	}
 	return i, nil
+}
+
+// List returns the instruments by code, as the repo does, the archived ones too when asked.
+func (f *fakeInstruments) List(_ context.Context, includeArchived bool) ([]model.Instrument, error) {
+	f.lists++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	var out []model.Instrument
+	for _, i := range f.instruments {
+		if includeArchived || i.ArchivedAt == nil {
+			out = append(out, i)
+		}
+	}
+	slices.SortFunc(out, func(a, b model.Instrument) int {
+		return cmp.Or(cmp.Compare(a.Code, b.Code), bytes.Compare(a.ID[:], b.ID[:]))
+	})
+	return out, nil
 }
 
 // fakeCategories is an in-memory repo.CategoryRepo of which only Get is used.

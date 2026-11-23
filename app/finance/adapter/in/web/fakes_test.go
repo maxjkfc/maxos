@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +67,7 @@ type fake struct {
 	budgetMonth    time.Time
 
 	spent   usecase.GetSpendingOutput
+	spentIn usecase.GetSpendingInput
 	trend   usecase.GetSpendingTrendOutput
 	trendIn usecase.GetSpendingTrendInput
 }
@@ -88,7 +91,8 @@ func (f *fake) total() int {
 
 // GetPreviewBalances says what the real use case does of the ledger the test sets up: the balances
 // it was given, how many drafts wait (as many as the summary of the drafts counts, which is the same
-// number by what the use case is) and whether any figure of any balance has something confirmed.
+// number by what the use case is), whether any figure of any balance has something confirmed, and
+// the balances added up an instrument at a time, as a whole and for each kind of account.
 func (f *fake) GetPreviewBalances(context.Context, usecase.GetPreviewBalancesInput) (usecase.GetPreviewBalancesOutput, error) {
 	out := usecase.GetPreviewBalancesOutput{Balances: f.balances, DraftCount: f.drafts.Count}
 	for _, b := range f.balances {
@@ -96,7 +100,52 @@ func (f *fake) GetPreviewBalances(context.Context, usecase.GetPreviewBalancesInp
 			out.HasConfirmed = true
 		}
 	}
+	out.Totals = f.totalsOf(f.balances)
+	byKind := map[string][]usecase.PreviewBalance{}
+	for _, b := range f.balances {
+		kind := ""
+		for _, a := range f.accounts {
+			if a.ID == b.AccountID {
+				kind = a.Kind
+			}
+		}
+		byKind[kind] = append(byKind[kind], b)
+	}
+	for _, kind := range slices.Sorted(maps.Keys(byKind)) {
+		out.Kinds = append(out.Kinds, usecase.PreviewKindTotals{Kind: kind, Totals: f.totalsOf(byKind[kind])})
+	}
 	return out, f.call("GetPreviewBalances")
+}
+
+// totalsOf adds balances up with the function of the model that the use case does, and puts the
+// instruments by code, as it does.
+func (f *fake) totalsOf(balances []usecase.PreviewBalance) []usecase.PreviewTotal {
+	rows := make([]model.PreviewBalance, len(balances))
+	for i, b := range balances {
+		rows[i] = model.PreviewBalance{
+			InstrumentID: b.InstrumentID,
+			Held:         model.PreviewFigure{Confirmed: b.Held.Confirmed, Drafts: b.Held.Drafts},
+			Unbilled:     model.PreviewFigure{Confirmed: b.Unbilled.Confirmed, Drafts: b.Unbilled.Drafts},
+		}
+	}
+	code := func(id uuid.UUID) string {
+		for _, i := range f.instruments {
+			if i.ID == id {
+				return i.Code
+			}
+		}
+		return id.String()
+	}
+	sums := model.TotalPreviewBalances(rows)
+	slices.SortFunc(sums, func(a, b model.PreviewTotal) int { return strings.Compare(code(a.InstrumentID), code(b.InstrumentID)) })
+	figure := func(f model.PreviewFigure) usecase.PreviewFigure {
+		return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: usecase.PreviewBasis(f.Basis())}
+	}
+	totals := make([]usecase.PreviewTotal, len(sums))
+	for i, s := range sums {
+		totals[i] = usecase.PreviewTotal{InstrumentID: s.InstrumentID, Held: figure(s.Held), Unbilled: figure(s.Unbilled)}
+	}
+	return totals
 }
 
 func (f *fake) GetDealings(context.Context, usecase.GetDealingsInput) (usecase.GetDealingsOutput, error) {
@@ -154,6 +203,7 @@ func (f *fake) GetProjectBudgets(context.Context, usecase.GetProjectBudgetsInput
 }
 
 func (f *fake) GetSpending(_ context.Context, in usecase.GetSpendingInput) (usecase.GetSpendingOutput, error) {
+	f.spentIn = in
 	out := f.spent
 	out.Month = model.MonthOf(in.Month)
 	return out, f.call("GetSpending")

@@ -16,8 +16,12 @@ import (
 	"github.com/maxjkfc/maxos/pkg/webserver"
 )
 
-// The months the chart of the trend shows.
-const trendMonths = 12
+// The months the chart of the trend shows, and what the chart is called when they are the
+// last twelve.
+const (
+	trendMonths      = 12
+	lastTwelveMonths = "最近十二個月每月的支出"
+)
 
 // spendingView is what was spent in a month, by category, and in each of the
 // months of the trend. Every chart has a table with the same numbers: the table is
@@ -93,7 +97,7 @@ func (h *handlers) spending(r *http.Request) (webserver.Page, error) {
 		return webserver.Page{}, fail(err)
 	}
 
-	trendTitle := "最近十二個月每月的支出"
+	trendTitle := lastTwelveMonths
 	if !to.Equal(current) {
 		trendTitle = fmt.Sprintf("%s 到 %s 每月的支出", webserver.FormatMonth(from), webserver.FormatMonth(to))
 	}
@@ -152,20 +156,30 @@ func buildSpending(r *refs, month time.Time, spent usecase.GetSpendingOutput, mo
 	}
 	v.ByCategoryChart = svgchart.HBars(svgchart.Chart{ID: "by-category", Title: "這個月的支出（依類別）"}, bars)
 
+	rows, columns := trendBars(r, months, month)
+	v.Trend = rows
+	v.TrendChart = svgchart.Columns(svgchart.Chart{ID: "trend", Title: trendTitle}, columns)
+	return v
+}
+
+// trendBars is the months of a trend as the rows of the table that has their numbers
+// and the columns that draw them, the selected month marked in both: each month links
+// to the spending of that month. The number of a month is the use case's.
+func trendBars(r *refs, months []usecase.MonthSpending, selected time.Time) ([]trendRow, []svgchart.Bar) {
+	rows := make([]trendRow, 0, len(months))
 	columns := make([]svgchart.Bar, 0, len(months))
 	for _, m := range months {
-		selected := m.Month.Equal(month)
+		chosen := m.Month.Equal(selected)
 		total := r.base(m.Total)
 		href := monthLink("/app/spending", m.Month)
-		v.Trend = append(v.Trend, trendRow{Month: webserver.FormatMonth(m.Month), Href: href, Total: total, Selected: selected})
+		rows = append(rows, trendRow{Month: webserver.FormatMonth(m.Month), Href: href, Total: total, Selected: chosen})
 		columns = append(columns, svgchart.Bar{
 			Label:     strconv.Itoa(int(m.Month.Month())) + "月",
 			Value:     m.Total,
 			Text:      total.Text + " " + total.Unit,
 			Href:      href,
-			Highlight: selected,
+			Highlight: chosen,
 		})
 	}
-	v.TrendChart = svgchart.Columns(svgchart.Chart{ID: "trend", Title: trendTitle}, columns)
-	return v
+	return rows, columns
 }
