@@ -55,9 +55,9 @@
 {{end}}{{with .Open}}<p class="due-line"><span class="due-when"><a href="{{.Href}}" aria-label="{{$name}} 本期的帳單">本期</a>　繳款日 <span class="nowrap">{{.DueOn}}</span>{{if .In}} <span class="due-in{{if .Soon}} due-soon{{end}}">{{.In}}</span>{{end}}</span><span class="row-figures">{{range .Amounts}}<span class="line">本期消費　{{template "amount" .}}</span>{{end}}</span></p>
 {{end}}</li>
 {{end}}</ul>
-{{end}}{{if .Payments.SomeLast}}<p class="stat-sub muted small">期末餘額是結帳時欠的；結帳之後已經繳了的，繳款日之前這裡仍會列出。</p>
+{{end}}{{if .Payments.SomeLast}}<p class="stat-sub muted small">期末餘額是結帳時欠的。結帳之後已經繳了的，這裡仍會列出：有繳款日的卡到繳款日，沒有的到下一次結帳。</p>
 {{end}}{{if .Payments.SomeEmpty}}<p class="stat-sub muted small">帳單只算已確認的款項：沒有金額的，是還沒有已確認的款項，草稿確認之後才會有。</p>
-{{end}}{{if .Payments.Idle}}<p class="stat-sub muted small">{{if .Payments.Cards}}另有 {{.Payments.Idle}} 張卡{{else}}{{.Payments.Idle}} 張卡{{end}}尚無帳單。</p>
+{{end}}{{if .Payments.Idle}}<p class="stat-sub muted small">{{if .Payments.Cards}}另有 {{.Payments.Idle}} 張卡{{else}}{{.Payments.Idle}} 張卡{{end}}目前沒有要繳的款項。</p>
 {{end}}</section>
 {{end}}
 

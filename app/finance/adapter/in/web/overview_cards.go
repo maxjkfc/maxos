@@ -189,8 +189,8 @@ type paymentsCard struct {
 	// first, and those with no day to pay last.
 	Cards []cardDue
 	Href  string
-	// Idle is how many cards have nothing to say: no payment due day, nothing confirmed on the
-	// statement that is open, and none that closed to be paid.
+	// Idle is how many cards have nothing to pay: no payment due day, nothing confirmed on the
+	// statement that is open, and nothing owed when the one that closed last closed.
 	Idle int
 	// SomeEmpty is whether a card that is listed has only its day, because nothing is confirmed
 	// on its open statement: the card says so once, and not on each.
@@ -215,9 +215,10 @@ func paymentsCardOf(r *refs, today time.Time, cards []cardStatements) paymentsCa
 // every statement does.
 type cardDue struct {
 	Name string
-	// Last is the statement that closed last, when its payment due day is today or after and the
-	// card owed something when it closed: what it says is what was owed then. It is there until
-	// that day, whether the card was paid since or not, which the statement does not say.
+	// Last is the statement that closed last, when the card owed something when it closed and its
+	// payment due day is today or after: what it says is what was owed then. It is there until that
+	// day, whether the card was paid since or not, which the statement does not say. A card with no
+	// such day has none to compare, and it is there until the next statement closes.
 	Last *dueStatement
 	// Open is the statement that is open: what was spent on the card so far.
 	Open *dueStatement
@@ -245,10 +246,11 @@ type dueStatement struct {
 const dueSoonDays = 3
 
 // dueCardsOf writes the statements of each card that has an open one. The statement that closed
-// last is there while its payment due day has not passed and the card owed something when it
-// closed: it is what is to be paid next; the open statement is there with what is spent on it so
-// far. A card that has no day to pay and nothing on either is not listed but counted. The cards
-// come in the order of the day that is nearest, and in the catalog's order among the same days.
+// last is there when the card owed something when it closed, until its payment due day has passed
+// or, for a card that has no such day, until the next one closes: it is what is to be paid next;
+// the open statement is there with what is spent on it so far. A card that has no day to pay,
+// owed nothing when it closed and has nothing spent is not listed but counted. The cards come in
+// the order of the day that is nearest, and in the catalog's order among the same days.
 func dueCardsOf(r *refs, today time.Time, cards []cardStatements) (listed []cardDue, idle int) {
 	for _, c := range cards {
 		shown := shownStatements(c.statements, today)
@@ -265,7 +267,7 @@ func dueCardsOf(r *refs, today time.Time, cards []cardStatements) (listed []card
 			continue
 		}
 		card := cardDue{Name: c.account.Name, Open: new(dueStatementOf(r, c.account.ID, today, *open)), next: open.DueOn}
-		if last != nil && last.DueOn != nil && !last.DueOn.Before(today) {
+		if last != nil && (last.DueOn == nil || !last.DueOn.Before(today)) {
 			if owed := dueStatementOf(r, c.account.ID, today, *last); len(owed.Amounts) > 0 {
 				card.Last = &owed
 				card.next = earlier(card.next, last.DueOn)

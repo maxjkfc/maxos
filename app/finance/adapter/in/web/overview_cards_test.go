@@ -517,7 +517,7 @@ func TestThePaymentsCardSaysWhatEachCardOwesAndWhenItIsDue(t *testing.T) {
 	// What a closing balance is is said once, as a statement that closed is listed; every open statement has something on it, so
 	// there is nothing to say of what is missing, and no card is left out.
 	wantIn(t, payments, "期末餘額是結帳時欠的")
-	wantNotIn(t, payments, "帳單只算已確認的款項", "尚無帳單")
+	wantNotIn(t, payments, "帳單只算已確認的款項", "沒有要繳的款項")
 	// The name of a card is not a link, for it would be a second link to the statement that "本期" is; the links go to the
 	// statements, the open one and the one that closed, and say whose they are, which "本期" does not.
 	wantNotIn(t, payments, `<a class="row-name"`)
@@ -539,8 +539,9 @@ func TestThePaymentsCardSaysWhatEachCardOwesAndWhenItIsDue(t *testing.T) {
 	}
 }
 
-// The statement that closed last is listed while it is still to be paid: on the day it is due, and not the day after. A
-// statement with nothing on it is nothing to pay, and so is one that closed with the card owing nothing, or being owed.
+// The statement that closed last is listed while it is still to be paid: on the day it is due, and not the day after; one that
+// has no due day has none to compare, and is listed. A statement with nothing on it is nothing to pay, and so is one that closed
+// with the card owing nothing, or being owed.
 func TestThePaymentsCardListsTheLastStatementUntilTheDayAfterItIsDue(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -550,7 +551,7 @@ func TestThePaymentsCardListsTheLastStatementUntilTheDayAfterItIsDue(t *testing.
 	}{
 		{"due today", statement(date(2026, 10, 6), date(2026, 11, 5), new(date(2026, 11, 21)), true, "100", "-100"), true, "本期消費 3,650.00 TWD"},
 		{"due yesterday", statement(date(2026, 10, 6), date(2026, 11, 5), new(date(2026, 11, 20)), true, "100", "-100"), false, "本期消費 3,650.00 TWD"},
-		{"with no due day", statement(date(2026, 10, 6), date(2026, 11, 5), nil, true, "100", "-100"), false, "本期消費 3,650.00 TWD"},
+		{"with no due day", statement(date(2026, 10, 6), date(2026, 11, 5), nil, true, "100", "-100"), true, "本期消費 3,650.00 TWD"},
 		{"due, with nothing on it", statement(date(2026, 10, 6), date(2026, 11, 5), new(date(2026, 11, 28)), true, "", ""), false, "本期消費 3,650.00 TWD"},
 		{"due, and the card was owed", statement(date(2026, 10, 6), date(2026, 11, 5), new(date(2026, 11, 28)), true, "100", "50"), false, "本期消費 3,650.00 TWD"},
 		{"due, and the card owed nothing", statement(date(2026, 10, 6), date(2026, 11, 5), new(date(2026, 11, 28)), true, "100", "0"), false, "本期消費 3,650.00 TWD"},
@@ -601,14 +602,14 @@ func TestThePaymentsCardOfAStatementWithNothingConfirmedOnIt(t *testing.T) {
 	if len(rows) != 2 || textOf(rows[0][1]) != "信用卡 本期 繳款日 2026-12-28 37 天後" || textOf(rows[1][1]) != "第二張卡 本期 繳款日 2026-12-28 37 天後" {
 		t.Errorf("the rows say %q, want each card with when it is due and nothing else", rows)
 	}
-	wantNotIn(t, payments, `class="amt`, "尚無帳單")
+	wantNotIn(t, payments, `class="amt`, "沒有要繳的款項")
 	if n := strings.Count(payments, `<p class="stat-sub`); n != 1 {
 		t.Errorf("%d notes under the cards, want 1 for all of them", n)
 	}
 }
 
-// A card that has no day to pay and nothing confirmed on its statement has nothing to say: it is counted, once, and is not a
-// tile of nothing. With others that have something, it is "another"; with none, the card says how many there are.
+// A card that has no day to pay, nothing confirmed on its open statement and nothing owed when it closed has nothing to pay: it is
+// counted, once, and is not a tile of nothing. With others that have something, it is "another"; with none, the card says how many.
 func TestThePaymentsCardCountsTheCardsThatHaveNothingToSayAndDoesNotListThem(t *testing.T) {
 	f := newFake()
 	second := usecase.Account{ID: seqID(310), Name: "第二張卡", Kind: "card", ClosingDay: new(12)}
@@ -616,7 +617,7 @@ func TestThePaymentsCardCountsTheCardsThatHaveNothingToSayAndDoesNotListThem(t *
 	f.statements = []usecase.CardStatementSummary{statement(date(2026, 11, 6), date(2026, 12, 5), nil, false, "", "")}
 	payments := cardOf(t, f.site(t).page("/app/"), "payments-title")
 
-	wantIn(t, payments, "2 張卡尚無帳單。", `href="/app/cards"`)
+	wantIn(t, payments, "2 張卡目前沒有要繳的款項。", `href="/app/cards"`)
 	wantNotIn(t, payments, "<li>", `class="due-name"`, "另有", "帳單只算已確認的款項")
 
 	// One of them has a day to pay.
@@ -627,7 +628,7 @@ func TestThePaymentsCardCountsTheCardsThatHaveNothingToSayAndDoesNotListThem(t *
 	if n := strings.Count(payments, "<li>"); n != 1 {
 		t.Errorf("%d cards listed, want the one that has a day to pay", n)
 	}
-	wantIn(t, payments, `<p class="due-name">信用卡</p>`, "另有 1 張卡尚無帳單。")
+	wantIn(t, payments, `<p class="due-name">信用卡</p>`, "另有 1 張卡目前沒有要繳的款項。")
 	wantNotIn(t, payments, "第二張卡")
 
 	// A card that has something on its statement, and no day to pay, has something to say.
@@ -636,7 +637,36 @@ func TestThePaymentsCardCountsTheCardsThatHaveNothingToSayAndDoesNotListThem(t *
 		second.ID: {statement(date(2026, 11, 6), date(2026, 12, 5), nil, false, "", "")},
 	}
 	payments = cardOf(t, f.site(t).page("/app/"), "payments-title")
-	wantIn(t, textOf(payments), "信用卡 本期 繳款日 — 本期消費 50.00 TWD", "另有 1 張卡尚無帳單。")
+	wantIn(t, textOf(payments), "信用卡 本期 繳款日 — 本期消費 50.00 TWD", "另有 1 張卡目前沒有要繳的款項。")
+}
+
+// A card that has no day to pay and nothing spent in the period that is open is not one with nothing to pay when it owed at its
+// last closing: that statement is listed, with what the card owed then and a dash for the day, for nothing says when it was due.
+// The line that counts the cards with nothing to pay counts only those that owed nothing when they closed, whether that
+// statement had a credit on it or no figure at all.
+func TestACardThatOwedWhenItClosedIsListedWhateverItsDayToPayAndIsNotOneWithNothingToPay(t *testing.T) {
+	f := newFake()
+	second := usecase.Account{ID: seqID(310), Name: "第二張卡", Kind: "card", ClosingDay: new(12)}
+	third := usecase.Account{ID: seqID(311), Name: "第三張卡", Kind: "card", ClosingDay: new(12)}
+	f.accounts = append(f.accounts, second, third)
+	nothingYet := statement(date(2026, 11, 6), date(2026, 12, 5), nil, false, "", "")
+	f.statementsOf = map[uuid.UUID][]usecase.CardStatementSummary{
+		// It owed 50 when it closed.
+		card: {nothingYet, statement(date(2026, 10, 6), date(2026, 11, 5), nil, true, "50", "-50")},
+		// It closed with a credit, which is nothing to pay.
+		second.ID: {nothingYet, statement(date(2026, 10, 6), date(2026, 11, 5), nil, true, "100", "120")},
+		// It has no figure at all.
+		third.ID: {nothingYet},
+	}
+	payments := cardOf(t, f.site(t).page("/app/"), "payments-title")
+
+	rows := regexp.MustCompile(`(?s)<li>(.*?)</li>`).FindAllStringSubmatch(payments, -1)
+	if len(rows) != 1 || textOf(rows[0][1]) != "信用卡 上一期 繳款日 — 期末餘額 −50.00 TWD 本期 繳款日 —" {
+		t.Fatalf("the cards listed say %q, want the one that owed, with what it owed and no day to pay", rows)
+	}
+	wantAmounts(t, payments, "−50.00 TWD")
+	wantIn(t, payments, "另有 2 張卡目前沒有要繳的款項。", "期末餘額是結帳時欠的")
+	wantNotIn(t, payments, "第二張卡", "第三張卡", "尚無帳單")
 }
 
 // The cards come in the order of the day each is to be paid on, the nearest first: the statement that closed last counts
