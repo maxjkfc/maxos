@@ -3,6 +3,7 @@ package svgchart
 import (
 	"html"
 	"html/template"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -36,7 +37,23 @@ const (
 	ClassFillOver = "chart-fill-over"
 	// ClassLimit is on the <line> that marks the limit of a Progress meter.
 	ClassLimit = "chart-limit"
+	// ClassNarrow is added to the root <svg> of a chart whose canvas is narrower than the
+	// default: it is drawn for a phone, and the stylesheet shows it there in place of the
+	// chart of the default width.
+	ClassNarrow = "chart-narrow"
+	// ClassAxis is on the <line> that marks zero under the columns.
+	ClassAxis = "chart-axis"
+	// ClassGrid is on the <line> across the height the largest column reaches.
+	ClassGrid = "chart-grid"
+	// ClassScale is on the <text> that says what the largest column is.
+	ClassScale = "chart-scale"
+	// ClassSub is on the <text> under the label of a column, such as its year.
+	ClassSub = "chart-sub"
 )
+
+// DefaultWidth is the width of the canvas of a chart, in viewBox units, when its Width is
+// not set.
+const DefaultWidth = 360
 
 // Geometry, in viewBox units.
 const (
@@ -44,21 +61,23 @@ const (
 	// next to a huge one.
 	minLength = 2
 
-	hbarsWidth     = 360
 	hbarsRowHeight = 36
 	hbarsPad       = 4
-	hbarsTrack     = 240 // the bar track: about 2/3 of the width
+	hbarsTrack     = 240 // the bar track at the default width: about 2/3 of it
 	hbarsBarHeight = 10
 	hbarsLabelY    = 12 // label baseline, from the top of the row
 	hbarsBarY      = 18 // bar top, from the top of the row
 	hbarsValueY    = 27 // value baseline, from the top of the row
+	hbarsValueGap  = 8  // between the end of the track and the widest value, on any other width
+	hbarsMinTrack  = 48
 
-	columnsWidth     = 360
 	columnsHeight    = 170
 	columnsPad       = 4
 	columnsBaseline  = 140 // bottom of every column
 	columnsMaxHeight = 104 // height of the tallest column
 	columnsLabelY    = 160
+	columnsSubY      = 173 // baseline of the second line under a label
+	columnsSubExtra  = 14  // what that line adds to the height
 	columnsMaxWidth  = 48
 	columnsValueGap  = 4 // between a highlighted column's text baseline and the tallest bar under the text
 
@@ -79,7 +98,7 @@ const (
 // divScale is the number of decimal places kept by the divisions of the layout.
 const divScale = 8
 
-// Chart names a chart for assistive technology.
+// Chart names a chart for assistive technology, and says how wide it is drawn.
 type Chart struct {
 	// ID is unique within the page; it prefixes the ids of <title>/<desc>.
 	// Only ASCII letters, digits, '-' and '_' are kept; every other rune becomes
@@ -87,6 +106,28 @@ type Chart struct {
 	ID string
 	// Title is plain text (escaped by the package), shown as <title>.
 	Title string
+	// Width is the width of the canvas in viewBox units, DefaultWidth when zero. A canvas
+	// is shown as wide as the room it has, so its 12 units of text are as big on a phone
+	// as the canvas is narrow: on a 320 pixel screen the text of a chart drawn 240 wide is
+	// a third bigger than that of one drawn 360 wide. A canvas narrower than the default is
+	// marked ClassNarrow, and the caller draws the chart of the default width beside it,
+	// for the screens that have the room.
+	Width int
+	// MarkMax (Columns) writes the Text of the largest column over a dashed line across the
+	// height it reaches, as the figure the other columns are read against.
+	MarkMax bool
+	// NumbersApart (Columns) leaves out the value that a highlighted column shows over
+	// itself: the caller writes the numbers next to the chart, where they cannot be taken
+	// for those of another column.
+	NumbersApart bool
+}
+
+// width is the width of the canvas.
+func (c Chart) width() int {
+	if c.Width > 0 {
+		return c.Width
+	}
+	return DefaultWidth
 }
 
 // Bar is one bar of HBars or one column of Columns.
@@ -104,50 +145,77 @@ type Bar struct {
 	Href string
 	// Highlight marks the selected bar.
 	Highlight bool
+	// Sub (Columns) is a second, smaller line under the Label, such as the year the month
+	// is of; plain text, escaped; empty for none.
+	Sub string
 }
 
 // HBars draws one horizontal bar per entry, in the caller's order: the label on
 // its own line and, under it, the bar with its Text right-aligned at the far
-// right of the same line. It returns the empty string for no bars.
+// right of the same line. A label wider than the canvas is fitted to it. It
+// returns the empty string for no bars.
 func HBars(c Chart, bars []Bar) template.HTML {
 	if len(bars) == 0 {
 		return ""
 	}
+	width := c.width()
+	track := hbarsTrackOf(width, bars)
 	maxValue := maxOf(bars)
-	full := decimal.NewFromInt(hbarsTrack)
+	full := decimal.NewFromInt(int64(track))
 
 	var s svg
-	s.begin(c, ClassHBars, hbarsWidth, len(bars)*hbarsRowHeight+2*hbarsPad, describe(bars))
+	s.begin(c, kindOf(ClassHBars, width), width, len(bars)*hbarsRowHeight+2*hbarsPad, describe(bars))
 	for i, b := range bars {
 		y0 := hbarsPad + i*hbarsRowHeight
 		s.openLink(b.Href)
-		s.text(ClassLabel, "0", itoa(y0+hbarsLabelY), "start", b.Label)
-		s.rect(ClassTrack, "0", itoa(y0+hbarsBarY), itoa(hbarsTrack), itoa(hbarsBarHeight))
+		s.fitText(ClassLabel, "0", itoa(y0+hbarsLabelY), "start", b.Label, width)
+		s.rect(ClassTrack, "0", itoa(y0+hbarsBarY), itoa(track), itoa(hbarsBarHeight))
 		if w := length(b.Value, maxValue, full); w.Sign() > 0 {
 			s.rect(barClass(b), "0", itoa(y0+hbarsBarY), num(w), itoa(hbarsBarHeight))
 		}
 		if b.Text != "" {
-			s.text(ClassValue, itoa(hbarsWidth), itoa(y0+hbarsValueY), "end", b.Text)
+			s.text(ClassValue, itoa(width), itoa(y0+hbarsValueY), "end", b.Text)
 		}
 		s.closeLink(b.Href)
 	}
 	return s.finish()
 }
 
+// hbarsTrackOf is the length of the track a bar is drawn on. At the default width it is
+// the same whatever is written beside it, as it always was; on any other canvas it is
+// what the widest value leaves of the width, so that a value never runs over its bar.
+func hbarsTrackOf(width int, bars []Bar) int {
+	if width == DefaultWidth {
+		return hbarsTrack
+	}
+	widest := 0
+	for _, b := range bars {
+		widest = max(widest, valueWidth(b.Text))
+	}
+	return max(width-widest-hbarsValueGap, hbarsMinTrack)
+}
+
 // Columns draws the bars as columns side by side, in the caller's order, with a
-// label under every column. Only the highlighted columns show their Text above
+// label under every column (and under it the Sub of the column, when it has
+// one) and a line along zero. Only the highlighted columns show their Text above
 // them, on the baseline of the tallest column the text spans so that it never
 // runs over a taller neighbour; the other numbers belong in the table next to
 // the chart. The text is centred on its column, or anchored to the nearer side
-// of the chart when the centred text would leave it. It returns the empty
-// string for no bars.
+// of the chart when the centred text would leave it. NumbersApart leaves that
+// text out, and MarkMax writes the Text of the largest column over a line at its
+// height. It returns the empty string for no bars.
 func Columns(c Chart, bars []Bar) template.HTML {
 	if len(bars) == 0 {
 		return ""
 	}
+	width := c.width()
+	height := columnsHeight
+	if slices.ContainsFunc(bars, func(b Bar) bool { return b.Sub != "" }) {
+		height += columnsSubExtra
+	}
 	maxValue := maxOf(bars)
 	full := decimal.NewFromInt(columnsMaxHeight)
-	slot := decimal.NewFromInt(columnsWidth-2*columnsPad).DivRound(decimal.NewFromInt(int64(len(bars))), divScale)
+	slot := decimal.NewFromInt(int64(width-2*columnsPad)).DivRound(decimal.NewFromInt(int64(len(bars))), divScale)
 	barWidth := decimal.Min(
 		slot.Mul(decimal.NewFromInt(3)).DivRound(decimal.NewFromInt(5), divScale),
 		decimal.NewFromInt(columnsMaxWidth),
@@ -167,15 +235,21 @@ func Columns(c Chart, bars []Bar) template.HTML {
 	}
 
 	var s svg
-	s.begin(c, ClassColumns, columnsWidth, columnsHeight, describe(bars))
+	s.begin(c, kindOf(ClassColumns, width), width, height, describe(bars))
+	if c.MarkMax && maxValue.Sign() > 0 {
+		s.markMax(bars, maxValue, width)
+	}
 	for i, b := range bars {
 		s.openLink(b.Href)
 		if h := baseline.Sub(tops[i]); h.Sign() > 0 {
 			s.rect(barClass(b), num(lefts[i]), num(tops[i]), num(barWidth), num(h))
 		}
 		s.text(ClassLabel, num(centres[i]), itoa(columnsLabelY), "middle", b.Label)
-		if b.Highlight && b.Text != "" {
-			anchor, ax, from, to := valueSpan(b.Text, centres[i], lefts[i], barWidth)
+		if b.Sub != "" {
+			s.text(ClassSub, num(centres[i]), itoa(columnsSubY), "middle", b.Sub)
+		}
+		if b.Highlight && b.Text != "" && !c.NumbersApart {
+			anchor, ax, from, to := valueSpan(b.Text, centres[i], lefts[i], barWidth, decimal.NewFromInt(int64(width)))
 			top := tops[i]
 			for j := range bars {
 				if lefts[j].LessThan(to) && lefts[j].Add(barWidth).GreaterThan(from) {
@@ -186,21 +260,22 @@ func Columns(c Chart, bars []Bar) template.HTML {
 		}
 		s.closeLink(b.Href)
 	}
+	s.line(ClassAxis, itoa(columnsPad), itoa(columnsBaseline), itoa(width-columnsPad), itoa(columnsBaseline))
 	return s.finish()
 }
 
-// valueSpan places the text of the column with the given centre and left edge:
-// centred when that stays inside the chart, else anchored to the column's left
-// edge (text running right) or right edge (text running left). It returns the
+// valueSpan places the text of the column with the given centre and left edge on a canvas of
+// the given width: centred when that stays inside the chart, else anchored to the column's
+// left edge (text running right) or right edge (text running left). It returns the
 // anchor, the x of the anchor and the horizontal extent [from, to] the text is
 // estimated to cover.
-func valueSpan(text string, centre, left, barWidth decimal.Decimal) (anchor string, x, from, to decimal.Decimal) {
+func valueSpan(text string, centre, left, barWidth, width decimal.Decimal) (anchor string, x, from, to decimal.Decimal) {
 	w := decimal.NewFromInt(int64(valueWidth(text)))
 	half := w.DivRound(decimal.NewFromInt(2), divScale)
 	switch {
 	case centre.Sub(half).Sign() < 0:
 		return "start", left, left, left.Add(w)
-	case centre.Add(half).GreaterThan(decimal.NewFromInt(columnsWidth)):
+	case centre.Add(half).GreaterThan(width):
 		right := left.Add(barWidth)
 		return "end", right, right.Sub(w), right
 	default:
@@ -297,6 +372,42 @@ func (s *svg) text(class, x, y, anchor, content string) {
 	s.write(`<text class="`, class, `" x="`, x, `" y="`, y, `" text-anchor="`, anchor, `">`, esc(content), `</text>`)
 }
 
+// fitText writes a <text> like text does, and fits it to limit units when its content is
+// estimated to be wider than that: the glyphs are squeezed together so that the end of a
+// long name is not cut off by the edge of the canvas.
+func (s *svg) fitText(class, x, y, anchor, content string, limit int) {
+	if valueWidth(content) <= limit {
+		s.text(class, x, y, anchor, content)
+		return
+	}
+	s.write(`<text class="`, class, `" x="`, x, `" y="`, y, `" text-anchor="`, anchor,
+		`" textLength="`, itoa(limit), `" lengthAdjust="spacingAndGlyphs">`, esc(content), `</text>`)
+}
+
+// markMax writes what the largest column is over a dashed line across the height it
+// reaches: the Text of the first of the columns that is as large as the largest.
+func (s *svg) markMax(bars []Bar, maxValue decimal.Decimal, width int) {
+	top := columnsBaseline - columnsMaxHeight
+	s.line(ClassGrid, itoa(columnsPad), itoa(top), itoa(width-columnsPad), itoa(top))
+	for _, b := range bars {
+		if b.Value.Equal(maxValue) {
+			if b.Text != "" {
+				s.text(ClassScale, itoa(columnsPad), itoa(top-columnsValueGap), "start", b.Text)
+			}
+			return
+		}
+	}
+}
+
+// kindOf is the class of the root <svg> of a chart of the given kind, which says that its
+// canvas is narrower than the default when it is.
+func kindOf(kind string, width int) string {
+	if width < DefaultWidth {
+		return kind + " " + ClassNarrow
+	}
+	return kind
+}
+
 // openLink starts an <a> when href is a safe site-relative path.
 func (s *svg) openLink(href string) {
 	if safeHref(href) {
@@ -336,15 +447,20 @@ func barClass(b Bar) string {
 }
 
 // describe lists every bar as "label: text" joined by "; ", so assistive
-// technology gets the same numbers as the table beside the chart.
+// technology gets the same numbers as the table beside the chart. The Sub of a
+// bar is part of its label.
 func describe(bars []Bar) string {
 	parts := make([]string, len(bars))
 	for i, b := range bars {
+		label := b.Label
+		if b.Sub != "" {
+			label += " " + b.Sub
+		}
 		if b.Text == "" {
-			parts[i] = b.Label
+			parts[i] = label
 			continue
 		}
-		parts[i] = b.Label + ": " + b.Text
+		parts[i] = label + ": " + b.Text
 	}
 	return strings.Join(parts, "; ")
 }

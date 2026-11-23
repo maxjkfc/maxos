@@ -28,8 +28,7 @@
 <caption>每月的支出合計</caption>
 <thead><tr><th scope="col">月份</th><th scope="col" class="num">支出合計</th></tr></thead>
 <tbody>
-{{range .Trend}}<tr{{if .Selected}} class="current" aria-current="true"{{end}}><th scope="row"><a href="{{.Href}}">{{.Month}}</a></th><td class="num">{{template "amount" .Total}}</td></tr>
-{{end}}</tbody>
+{{template "trend-rows" .Trend}}</tbody>
 </table>
 </div>
 </div>

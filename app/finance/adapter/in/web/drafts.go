@@ -109,3 +109,29 @@ func draftsOf(month time.Time, account string) string {
 	}
 	return link("/app/transactions", q)
 }
+
+// draftAmount is what the drafts would move of one instrument.
+type draftAmount struct {
+	Outflow amountView
+	Inflow  amountView
+	Net     amountView
+}
+
+func draftAmountOf(r *refs, a usecase.DraftAmount) draftAmount {
+	return draftAmount{
+		Outflow: r.money(a.InstrumentID, a.Outflow),
+		Inflow:  r.money(a.InstrumentID, a.Inflow),
+		Net:     r.signed(a.InstrumentID, a.Net),
+	}
+}
+
+// takenOutOf is what the drafts would move of one instrument, as it is taken out of a
+// total: each amount with a minus sign and without the colour of a loss, for it is
+// no loss but money that the rows of the accounts have twice.
+func takenOutOf(r *refs, a usecase.DraftAmount) draftAmount {
+	return draftAmount{
+		Outflow: r.taken(a.InstrumentID, a.Outflow),
+		Inflow:  r.taken(a.InstrumentID, a.Inflow),
+		Net:     r.signed(a.InstrumentID, a.Net),
+	}
+}

@@ -1,33 +1,120 @@
 {{define "content"}}{{with .Data}}
 <p class="muted">資料截至今天（{{.Today}}）。</p>
 
-{{$preview := .Preview.Count}}<h2>餘額{{if $preview}} <span class="pill pill-draft">預覽（含 {{$preview}} 筆草稿）</span>{{end}}</h2>
-{{if and $preview .Groups}}<p class="muted small">{{if .Preview.AllDrafts}}還沒有已確認的餘額，這些數字全是草稿。{{else}}已確認的餘額，加上這些草稿今天全部確認後會有的變動。{{end}}草稿確認之後，這裡會換成實際的餘額。<a class="nowrap" href="{{.Preview.Href}}">查看草稿</a></p>
+{{$preview := .Preview.Count}}
+<section class="card hero{{with .Hero.Size}} {{.}}{{end}}" aria-labelledby="hero-title">
+<h2 class="card-title" id="hero-title">帳戶餘額{{if $preview}} <span class="pill pill-draft">預覽（含 {{.Preview.Text}} 筆草稿）</span>{{end}}</h2>
+{{if .Hero.Main}}<p class="hero-figure">{{template "amount" .Hero.Main.Amount}}</p>
+{{if .Hero.Main.Confirmed}}<p class="hero-sub muted">已確認 {{template "amount" .Hero.Main.Confirmed}}</p>
+{{else if .Hero.Main.Unconfirmed}}<p class="hero-sub muted">尚未確認</p>
+{{end}}{{with .Hero.Unbilled}}<p class="hero-sub muted">{{.Label}}　{{template "amount" .Amount}}{{if .Confirmed}}　已確認 {{template "amount" .Confirmed}}{{else if .Unconfirmed}}　尚未確認{{end}}</p>
+{{end}}{{if .Hero.Others}}<ul class="tiles" aria-label="其他標的的餘額">
+{{range .Hero.Others}}<li class="tile">{{template "balance-lines" .Lines}}</li>
+{{end}}</ul>
+{{end}}<p class="hero-note muted small">各帳戶的餘額，每個標的分開加起來，不換算幣別。{{if $preview}}{{if .Preview.AllDrafts}}還沒有已確認的餘額，這些數字全是草稿。{{else}}已確認的餘額，加上這些草稿今天全部確認後會有的變動。{{end}}草稿確認之後，這裡會換成實際的餘額。<a class="nowrap" href="{{.Preview.Href}}">查看草稿</a>{{end}}</p>
+{{else}}<p class="muted">還沒有已確認的餘額。草稿確認之後，餘額會出現在這裡。</p>
+{{end}}</section>
+
+<div class="cards">
+{{with .Spending}}<section class="card" aria-labelledby="spending-title">
+<div class="card-head"><h2 class="card-title" id="spending-title">本月支出 <span class="muted">{{.Month}}</span></h2><a class="card-link" href="{{.Href}}">查看支出</a></div>
+{{if .Spent}}<p class="stat-figure">{{template "amount" .Total}}</p>
+{{else}}<p class="stat-empty">這個月還沒有已確認的支出。</p>
+{{end}}{{if .Last}}<p class="stat-sub muted small">上個月　{{template "amount" .Last}}</p>
+{{end}}{{if .Spent}}<p class="stat-sub muted small">已確認的支出，算到今天為止。</p>
+{{else if .Drafts}}<p class="stat-sub muted small">有 {{.DraftsText}} 筆草稿等著確認，確認之後才會算進來。<a class="nowrap" href="{{.DraftsHref}}">查看草稿</a></p>
+{{end}}</section>
+{{end}}{{with .Drafts}}<section class="card" aria-labelledby="drafts-title">
+<div class="card-head"><h2 class="card-title" id="drafts-title">草稿等待確認</h2>{{if .Count}}<a class="card-link" href="{{.Href}}">查看草稿</a>{{end}}</div>
+{{if .Count}}<p class="stat-figure">{{.Text}}<span class="stat-unit"> 筆</span></p>
+{{if .Nets}}<p class="stat-sub muted small">全部確認後，帳戶的餘額今天會有這些變動：</p>
+<ul class="stat-nets">
+{{range .Nets}}<li>{{template "amount" .}}</li>
+{{end}}</ul>
+{{else}}<p class="stat-sub muted small">全部確認後，帳戶的餘額今天不會有變動。</p>
+{{end}}<p class="stat-sub muted small">還沒到期的分期各期、日期在今天之後的草稿與分期計畫的本金不在其中；預覽把本金另列成<span class="nowrap">「未到期分期」</span>。</p>
+{{else}}<p class="stat-empty">沒有等著確認的草稿。</p>
+{{end}}</section>
+{{end}}{{if .Dealings.Rows}}<section class="card" aria-labelledby="dealings-title">
+<div class="card-head"><h2 class="card-title" id="dealings-title">往來</h2></div>
+<ul class="stat-rows">
+{{range .Dealings.Rows}}<li><span class="row-name">{{.Party}}</span><span class="row-figures">{{range .Lines}}<span class="line">{{template "amount" .Amount}} <span class="muted small">{{.Meaning}}</span></span>{{end}}</span></li>
+{{end}}</ul>
+{{if .Dealings.Zero}}<details>
+<summary>往來金額為零的對象（{{len .Dealings.Zero}}）</summary>
+<ul>{{range .Dealings.Zero}}<li>{{.}}</li>{{end}}</ul>
+</details>
+{{end}}</section>
+{{end}}</div>
+{{if or .Payments.Cards .Payments.Idle}}<section class="card payments" aria-labelledby="payments-title">
+<div class="card-head"><h2 class="card-title" id="payments-title">信用卡</h2><a class="card-link" href="{{.Payments.Href}}">查看帳單</a></div>
+{{if .Payments.Cards}}<ul class="due-list">
+{{range .Payments.Cards}}{{$name := .Name}}<li>
+<p class="due-name">{{.Name}}</p>
+{{with .Last}}<p class="due-line"><span class="due-when"><a href="{{.Href}}" aria-label="{{$name}} 上一期的帳單">上一期</a>　繳款日 <span class="nowrap">{{.DueOn}}</span>{{if .In}} <span class="due-in{{if .Soon}} due-soon{{end}}">{{.In}}</span>{{end}}</span><span class="row-figures">{{range .Amounts}}<span class="line">期末餘額　{{template "amount" .}}</span>{{end}}</span></p>
+{{end}}{{with .Open}}<p class="due-line"><span class="due-when"><a href="{{.Href}}" aria-label="{{$name}} 本期的帳單">本期</a>　繳款日 <span class="nowrap">{{.DueOn}}</span>{{if .In}} <span class="due-in{{if .Soon}} due-soon{{end}}">{{.In}}</span>{{end}}</span><span class="row-figures">{{range .Amounts}}<span class="line">本期消費　{{template "amount" .}}</span>{{end}}</span></p>
+{{end}}</li>
+{{end}}</ul>
+{{end}}{{if .Payments.SomeLast}}<p class="stat-sub muted small">期末餘額是結帳時欠的。結帳之後已經繳了的，這裡仍會列出：有繳款日的卡到繳款日，沒有的到下一次結帳。</p>
+{{end}}{{if .Payments.SomeEmpty}}<p class="stat-sub muted small">帳單只算已確認的款項：沒有金額的，是還沒有已確認的款項，草稿確認之後才會有。</p>
+{{end}}{{if .Payments.Idle}}<p class="stat-sub muted small">{{if .Payments.Cards}}另有 {{.Payments.Idle}} 張卡{{else}}{{.Payments.Idle}} 張卡{{end}}目前沒有要繳的款項。</p>
+{{end}}</section>
 {{end}}
-{{range .Groups}}
-<div class="table-wrap">
+
+<div class="charts">
+<section class="card" aria-labelledby="trend-title">
+<div class="card-head"><h2 class="card-title" id="trend-title">{{.Trend.Title}}</h2><a class="card-link" href="{{.Trend.Href}}">查看支出</a></div>
+{{if .Trend.Chart}}<p class="chart-key"><span class="key-swatch" aria-hidden="true"></span>本月（未滿）{{with .Trend.Current}}<strong>{{template "amount" .}}</strong>{{else}}<span class="muted">還沒有已確認的支出</span>{{end}}</p>
+<div class="chart-pair">{{.Trend.Chart}}{{.Trend.Narrow}}</div>
+<details class="card-details">
+<summary>每月的數字</summary>
+<table>
+<caption class="sr-only">每月的支出合計</caption>
+<thead><tr><th scope="col">月份</th><th scope="col" class="num">支出合計</th></tr></thead>
+<tbody>
+{{template "trend-rows" .Trend.Rows}}</tbody>
+</table>
+</details>
+{{else}}<p class="stat-empty">還沒有已確認的支出。草稿確認之後，每個月的支出會出現在這裡。</p>
+{{end}}</section>
+<section class="card" aria-labelledby="top-title">
+<div class="card-head"><h2 class="card-title" id="top-title">本月支出最多的類別</h2><a class="card-link" href="{{.Top.Href}}">{{if .Top.More}}查看全部類別{{else}}查看支出{{end}}</a></div>
+{{if .Top.Chart}}<div class="chart-pair">{{.Top.Chart}}{{.Top.Narrow}}</div>
+{{else}}<p class="stat-empty">這個月還沒有已確認的支出。</p>
+{{end}}</section>
+</div>
+
+{{if or .Groups .ZeroAccounts}}<h2>帳戶</h2>
+{{end}}{{if .Groups}}<div class="groups">
+{{range .Groups}}<div class="slot"><section class="card group">
+<div class="group-head">
+<h3 class="group-name">{{.Name}} <span class="muted small">{{len .Accounts}} 個帳戶</span></h3>
+{{if .Totals}}<ul class="tiles" aria-label="{{.Name}}的小計">
+{{range .Totals}}<li class="tile">{{template "balance-lines" .Lines}}</li>
+{{end}}</ul>
+{{end}}</div>
+<div class="table-wrap in-card">
 <table class="balances" role="table">
-<caption>{{.Name}}</caption>
+<caption class="sr-only">{{.Name}}</caption>
 <thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">帳戶</th><th scope="col" role="columnheader" class="num">餘額{{if $preview}}（預覽）{{end}}</th></tr></thead>
 <tbody role="rowgroup">
 {{range .Accounts}}<tr role="row">
-<th scope="row" role="rowheader"><a href="{{.Href}}">{{.Name}}</a>{{if .Archived}} <span class="badge">已封存</span>{{end}}<span class="line muted small">{{.Kind}}</span></th>
-<td role="cell" class="num">{{range .Lines}}<span class="line">{{if .Label}}<span class="muted small">{{.Label}}　</span>{{end}}{{template "amount" .Amount}}</span>{{if .Confirmed}}<span class="line muted small">已確認 {{template "amount" .Confirmed}}</span>{{else if .Unconfirmed}}<span class="line muted small">尚未確認</span>{{end}}{{end}}</td>
+<th scope="row" role="rowheader"><a href="{{.Href}}">{{.Name}}</a>{{if .Archived}} <span class="badge">已封存</span>{{end}}{{if .Institution}}<span class="line muted small">{{.Institution}}</span>{{end}}</th>
+<td role="cell" class="num">{{template "balance-lines" .Lines}}</td>
 </tr>
 {{end}}</tbody>
 </table>
 </div>
-{{else}}
-<p class="empty">還沒有已確認的餘額。草稿確認之後，餘額會出現在這裡。</p>
-{{end}}
-{{if .ZeroAccounts}}<details>
+</section></div>
+{{end}}</div>
+{{end}}{{if .ZeroAccounts}}<details class="zero-accounts">
 <summary>餘額皆為零的帳戶（{{len .ZeroAccounts}}）</summary>
 <ul>{{range .ZeroAccounts}}<li><a href="{{.Href}}">{{.Name}}</a></li>{{end}}</ul>
 </details>
 {{end}}
 
 {{if .Plans}}<h2>未到期分期</h2>
-<p class="muted small">未到期分期是還沒到扣款日的本金，是欠機構的錢：在上面的餘額裡另外列出，是負數，餘額不含它。下表的金額是這幾筆分期的本金，所以是正數。{{if $preview}}下表只列已確認的分期；還是草稿的分期計畫，確認之後才會列在這裡，它們還沒到期的本金已經算在上面預覽的<span class="nowrap">「未到期分期」</span>裡。{{end}}</p>
+<p class="muted small">未到期分期是還沒到扣款日的本金，是欠機構的錢：在上面帳戶的餘額裡另外列出，是負數，餘額不含它。下表的金額是這幾筆分期的本金，所以是正數。{{if $preview}}下表只列已確認的分期；還是草稿的分期計畫，確認之後才會列在這裡，它們還沒到期的本金已經算在上面預覽的<span class="nowrap">「未到期分期」</span>裡。{{end}}</p>
 <div class="table-wrap">
 <table class="stack" role="table">
 <caption class="sr-only">還有款項沒到扣款日的分期計畫</caption>
@@ -44,47 +131,4 @@
 </table>
 </div>
 {{end}}
-
-<h2>往來</h2>
-{{if .Dealings}}<div class="table-wrap">
-<table>
-<thead><tr><th scope="col">對象</th><th scope="col" class="num">金額</th><th scope="col">誰欠誰</th></tr></thead>
-<tbody>
-{{range .Dealings}}<tr>
-<th scope="row">{{.Party}}</th>
-<td class="num">{{range .Lines}}<span class="line">{{template "amount" .Amount}}</span>{{end}}</td>
-<td>{{range .Lines}}<span class="line">{{.Meaning}}</span>{{end}}</td>
-</tr>
-{{end}}</tbody>
-</table>
-</div>
-{{else}}<p class="empty">沒有往來。</p>
-{{end}}
-{{if .ZeroParties}}<details>
-<summary>往來金額為零的對象（{{len .ZeroParties}}）</summary>
-<ul>{{range .ZeroParties}}<li>{{.}}</li>{{end}}</ul>
-</details>
-{{end}}
-
-<h2>草稿</h2>
-{{with .Drafts}}{{if .Count}}<p class="note note-draft">有 <strong>{{.Count}}</strong> 筆草稿等著確認。草稿確認後才生效：預算、報表和已確認的餘額都不含它們，上面「預覽」的餘額是把它們算進去的樣子。<a class="nowrap" href="{{.Href}}">查看草稿</a></p>
-{{if .Amounts}}<div class="table-wrap">
-<table class="stack" role="table">
-<caption>如果這些草稿今天全部確認，帳戶的餘額今天會有這些變動</caption>
-<thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">標的</th><th scope="col" role="columnheader" class="num">流出</th><th scope="col" role="columnheader" class="num">流入</th><th scope="col" role="columnheader" class="num">淨額</th></tr></thead>
-<tbody role="rowgroup">
-{{range .Amounts}}<tr role="row">
-<th scope="row" role="rowheader">{{.Net.Unit}}</th>
-<td role="cell" data-label="流出" class="num">{{template "amount" .Outflow}}</td>
-<td role="cell" data-label="流入" class="num">{{template "amount" .Inflow}}</td>
-<td role="cell" data-label="淨額" class="num">{{template "amount" .Net}}</td>
-</tr>
-{{end}}</tbody>
-</table>
-</div>
-{{else}}<p class="muted">如果這些草稿今天全部確認，帳戶的餘額今天不會有變動。</p>
-{{end}}<p class="muted small">還沒到期的分期各期，和日期在今天之後的草稿，要到那一天才會影響餘額，所以不在上表，預覽的餘額也不含它們。分期計畫的本金不是帳戶的收支，也不在上表，預覽把它另外列成<span class="nowrap">「未到期分期」</span>。</p>
-{{if .OwnTransfers}}<p class="muted small">自己帳戶之間的轉帳：{{.OwnTransfers}} 筆。錢只是從一個帳戶移到另一個，不計入上面的流出和流入。</p>
-{{end}}{{else}}<p class="empty">沒有等著確認的草稿。</p>
-{{end}}{{end}}
 {{end}}{{end}}

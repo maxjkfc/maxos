@@ -215,3 +215,168 @@ func TestWhenTheRepoCannotReadThePreviewBalancesTheErrorGoesOn(t *testing.T) {
 		t.Errorf("err = %v, want what the repo returned, with what was being done", err)
 	}
 }
+
+// totalLines writes the totals as "TWD held 880 = confirmed 1000 + drafts -120 (both) | unbilled ...",
+// one to a line, in the order they come.
+func (e *env) totalLines(totals []usecase.PreviewTotal) []string {
+	names := e.names()
+	lines := make([]string, len(totals))
+	for i, t := range totals {
+		lines[i] = fmt.Sprintf("%s held %s | unbilled %s", names[t.InstrumentID], figureText(t.Held), figureText(t.Unbilled))
+	}
+	return lines
+}
+
+// setKind makes the account of the kind: the fake repo makes them all cash.
+func (e *env) setKind(a model.Account, kind model.AccountKind) {
+	a.Kind = kind
+	e.accounts.accounts[a.ID] = a
+}
+
+// A page that writes one figure of many accounts does not add them up, so the use case does, an
+// instrument at a time: for all the accounts and for those of each kind. A total is the sums of
+// what is confirmed and of what the drafts add, and says what it is made of as any figure does.
+func TestGetPreviewBalancesAddsTheBalancesUpForAllTheAccountsAndForEachKindAnInstrumentAtATime(t *testing.T) {
+	e := newEnv(t)
+	e.setKind(e.bank, model.AccountKindBank)
+	// The instruments first appear as TWD, USD and BTC, and the totals are by code, as the balances
+	// of an account are. The card owes in dollars that only drafts make, and in TWD both what is
+	// confirmed and what drafts add, with instalments that are not yet due.
+	e.txns.preview = model.BalancePreview{
+		Drafts: 5,
+		Balances: []model.PreviewBalance{
+			previewRow(e.bank, e.twd, figure("1000", "-120"), figure("0", "0")),
+			previewRow(e.bank, e.usd, figure("25.5", "0"), figure("0", "0")),
+			previewRow(e.card, e.twd, figure("-500", "-2000"), figure("-11000", "-6000")),
+			previewRow(e.card, e.usd, figure("0", "-30"), figure("0", "0")),
+			previewRow(e.cash, e.btc, figure("0.5", "0"), figure("0", "0")),
+			previewRow(e.cash, e.twd, figure("300", "0"), figure("0", "0")),
+		},
+	}
+
+	got := e.previews()
+
+	wantLines(t, e.totalLines(got.Totals),
+		"BTC held 0.5 = confirmed 0.5 + drafts 0 (confirmed) | unbilled 0 = confirmed 0 + drafts 0 (confirmed)",
+		"TWD held -1320 = confirmed 800 + drafts -2120 (both) | unbilled -17000 = confirmed -11000 + drafts -6000 (both)",
+		"USD held -4.5 = confirmed 25.5 + drafts -30 (both) | unbilled 0 = confirmed 0 + drafts 0 (confirmed)",
+	)
+	// By kind, in the order of the kinds, and by code in each.
+	if len(got.Kinds) != 3 {
+		t.Fatalf("%d kinds %v, want bank, card and cash", len(got.Kinds), got.Kinds)
+	}
+	for i, want := range []struct {
+		kind  string
+		lines []string
+	}{
+		{"bank", []string{
+			"TWD held 880 = confirmed 1000 + drafts -120 (both) | unbilled 0 = confirmed 0 + drafts 0 (confirmed)",
+			"USD held 25.5 = confirmed 25.5 + drafts 0 (confirmed) | unbilled 0 = confirmed 0 + drafts 0 (confirmed)",
+		}},
+		{"card", []string{
+			"TWD held -2500 = confirmed -500 + drafts -2000 (both) | unbilled -17000 = confirmed -11000 + drafts -6000 (both)",
+			"USD held -30 = confirmed 0 + drafts -30 (drafts) | unbilled 0 = confirmed 0 + drafts 0 (confirmed)",
+		}},
+		{"cash", []string{
+			"BTC held 0.5 = confirmed 0.5 + drafts 0 (confirmed) | unbilled 0 = confirmed 0 + drafts 0 (confirmed)",
+			"TWD held 300 = confirmed 300 + drafts 0 (confirmed) | unbilled 0 = confirmed 0 + drafts 0 (confirmed)",
+		}},
+	} {
+		if got.Kinds[i].Kind != want.kind {
+			t.Errorf("kind %d is %q, want %q", i, got.Kinds[i].Kind, want.kind)
+			continue
+		}
+		wantLines(t, e.totalLines(got.Kinds[i].Totals), want.lines...)
+	}
+	// The kinds are a division of the accounts: of each instrument, they add up to its total.
+	for _, total := range got.Totals {
+		held, unbilled := dec("0"), dec("0")
+		for _, kind := range got.Kinds {
+			for _, k := range kind.Totals {
+				if k.InstrumentID == total.InstrumentID {
+					held, unbilled = held.Add(k.Held.Total), unbilled.Add(k.Unbilled.Total)
+				}
+			}
+		}
+		if !held.Equal(total.Held.Total) || !unbilled.Equal(total.Unbilled.Total) {
+			t.Errorf("%s: the kinds add up to %s held and %s unbilled, and the total says %s and %s",
+				e.names()[total.InstrumentID], held, unbilled, total.Held.Total, total.Unbilled.Total)
+		}
+	}
+	// The balances themselves are what they were.
+	if len(got.Balances) != 6 || got.DraftCount != 5 || !got.HasConfirmed {
+		t.Errorf("%d balances, DraftCount %d, HasConfirmed %v, want 6, 5 and true", len(got.Balances), got.DraftCount, got.HasConfirmed)
+	}
+	// Each list is read once, however many balances there are.
+	if e.accounts.lists != 1 || e.instruments.lists != 1 {
+		t.Errorf("the accounts were listed %d times and the instruments %d times, want once each", e.accounts.lists, e.instruments.lists)
+	}
+}
+
+// An archived account that holds something is in the totals, as it is in the balances: the sums are
+// of every balance, and a total that left it out would not add up the balances under it. It is of
+// its kind, and an archived instrument is in the order of the codes where its code puts it, not
+// after the others as one the catalog did not have would be.
+func TestGetPreviewBalancesCountsTheAccountsThatAreArchivedAndTheInstrumentsToo(t *testing.T) {
+	e := newEnv(t)
+	e.setKind(e.bank, model.AccountKindBank)
+	e.accounts.archive(e.cash.ID)
+	e.instruments.archive(e.btc.ID)
+	e.txns.preview = model.BalancePreview{Balances: []model.PreviewBalance{
+		previewRow(e.bank, e.twd, figure("1", "0"), figure("0", "0")),
+		previewRow(e.bank, e.usd, figure("10", "0"), figure("0", "0")),
+		previewRow(e.cash, e.btc, figure("0.5", "0"), figure("0", "0")),
+		previewRow(e.cash, e.usd, figure("5", "0"), figure("0", "0")),
+	}}
+
+	got := e.previews()
+
+	wantLines(t, e.totalLines(got.Totals),
+		"BTC held 0.5 = confirmed 0.5 + drafts 0 (confirmed) | unbilled 0 = confirmed 0 + drafts 0 (confirmed)",
+		"TWD held 1 = confirmed 1 + drafts 0 (confirmed) | unbilled 0 = confirmed 0 + drafts 0 (confirmed)",
+		"USD held 15 = confirmed 15 + drafts 0 (confirmed) | unbilled 0 = confirmed 0 + drafts 0 (confirmed)",
+	)
+	if len(got.Kinds) != 2 || got.Kinds[0].Kind != "bank" || got.Kinds[1].Kind != "cash" {
+		t.Fatalf("kinds %v, want bank and cash, of which the cash account is archived", got.Kinds)
+	}
+	wantLines(t, e.totalLines(got.Kinds[1].Totals),
+		"BTC held 0.5 = confirmed 0.5 + drafts 0 (confirmed) | unbilled 0 = confirmed 0 + drafts 0 (confirmed)",
+		"USD held 5 = confirmed 5 + drafts 0 (confirmed) | unbilled 0 = confirmed 0 + drafts 0 (confirmed)",
+	)
+}
+
+// With no balance there is nothing to add up and nothing to look up: the lists are not read.
+func TestGetPreviewBalancesWithNoBalanceHasNoTotalsAndReadsNoList(t *testing.T) {
+	e := newEnv(t)
+	e.txns.preview = model.BalancePreview{Drafts: 2}
+
+	got := e.previews()
+
+	if len(got.Totals) != 0 || len(got.Kinds) != 0 || e.accounts.lists != 0 || e.instruments.lists != 0 {
+		t.Errorf("totals %v and kinds %v with %d and %d lists read, want none of them", got.Totals, got.Kinds, e.accounts.lists, e.instruments.lists)
+	}
+}
+
+func TestWhenTheListsThatTheTotalsNeedCannotBeReadTheErrorGoesOn(t *testing.T) {
+	boom := errors.New("the database is down")
+	tests := []struct {
+		name string
+		fail func(e *env)
+	}{
+		{"the accounts", func(e *env) { e.accounts.listErr = boom }},
+		{"the instruments", func(e *env) { e.instruments.listErr = boom }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.txns.preview = model.BalancePreview{Balances: []model.PreviewBalance{previewRow(e.cash, e.twd, figure("1", "0"), figure("0", "0"))}}
+			tt.fail(e)
+
+			_, err := e.svc.GetPreviewBalances(context.Background(), usecase.GetPreviewBalancesInput{})
+
+			if !errors.Is(err, boom) || !strings.Contains(err.Error(), "preview balances") {
+				t.Errorf("err = %v, want what the list returned, with what was being done", err)
+			}
+		})
+	}
+}

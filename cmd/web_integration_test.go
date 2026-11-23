@@ -271,7 +271,6 @@ func TestThePagesShowTheLedgerThroughTheRealWiring(t *testing.T) {
 		wantIn("the overview", body,
 			"<strong>max@example.com</strong>",
 			"資料截至今天（2026-11-14）",
-			"<caption>好銀行</caption>", "<caption>沒有機構</caption>",
 			// 5,000 less the lunch and what was lent: 3,880; the bank: 100,000 and the salary
 			// less the rent; and the purchase in dollars on the same account, in its own line.
 			money("3,880.00", "TWD"), money("145,000.00", "TWD"), money("−10.00", "USD"),
@@ -279,17 +278,72 @@ func TestThePagesShowTheLedgerThroughTheRealWiring(t *testing.T) {
 			// listed apart from it.
 			money("−3,300.00", "TWD"), `未到期分期　</span><span class="amt neg">−6,000.00`,
 			"2026-12-08", money("6,000.00", "TWD"),
-			// Alice owes me what I lent.
-			">Alice</th>", money("1,000.00", "TWD"), "對方欠我",
-			// Two drafts wait: a lunch of 450, and a withdrawal that moves 3,000 from one of my
-			// accounts to another: it changes no total, so only the lunch is in what confirming
-			// them would change, and the withdrawal is a line of its own.
-			"有 <strong>2</strong> 筆草稿等著確認", money("450.00", "TWD"), money("−450.00", "TWD"),
-			"自己帳戶之間的轉帳：1 筆",
 		)
 		if strings.Contains(body, "淨資產") {
 			t.Error("the overview shows a net worth")
 		}
+		// The headline is what the accounts would hold if the two drafts were confirmed, in the
+		// base currency: the cash 6,430 (3,880, the lunch of 450 out and the 3,000 of the
+		// withdrawal in), the bank 142,000 (145,000 less the withdrawal) and the card -3,300. What
+		// is confirmed of it is 145,580, and the drafts add the lunch: the withdrawal moves money
+		// between two of the accounts, which changes no total. The dollars are a figure of their
+		// own, and are not added to it; the instalments not due yet are a line of their own.
+		wantIn("the headline", body,
+			`預覽（含 2 筆草稿）`,
+			`<p class="hero-figure"><span class="amt">`+money("145,130.00", "TWD")+`</span></p>`,
+			`<p class="hero-sub muted">已確認 <span class="amt">`+money("145,580.00", "TWD")+`</span></p>`,
+			`<p class="hero-sub muted">未到期分期　<span class="amt neg">`+money("−6,000.00", "TWD"),
+			`<li class="tile"><span class="line"><span class="amt neg">`+money("−10.00", "USD"),
+		)
+		// The accounts are of a kind each, in the order of the kinds, with the institution that
+		// an account is at under its name, and none under the cash, which is at none.
+		kinds := []string{`<h3 class="group-name">銀行戶頭 `, `<h3 class="group-name">信用卡 `, `<h3 class="group-name">現金 `}
+		wantIn("the groups", body, kinds...)
+		wantIn("the institution", body, `>好銀行活期</a><span class="line muted small">好銀行</span></th>`, `>現金</a></th>`)
+		at := -1
+		for _, kind := range kinds {
+			i := strings.Index(body, kind)
+			if i < at {
+				t.Errorf("%q is before the kind that comes before it", kind)
+			}
+			at = i
+		}
+		// What was spent this month, with the month before, the months of the year and the
+		// categories this month went to, by the amount: the rent, the shopping and the food.
+		wantIn("the spending", body,
+			`<p class="stat-figure"><span class="amt">`+money("23,940.00", "TWD")+`</span></p>`,
+			`上個月　<span class="amt">`+money("800.00", "TWD")+`</span>`,
+			`class="chart chart-columns"`, `class="chart chart-hbars"`,
+		)
+		top := body[strings.Index(body, `aria-labelledby="top-title"`):]
+		top = top[:strings.Index(top, "</section>")]
+		if rent, shopping, food := strings.Index(top, "房租"), strings.Index(top, "購物"), strings.Index(top, "飲食"); rent < 0 || rent > shopping || shopping > food {
+			t.Errorf("the categories of the month are not the rent, the shopping and the food, in that order:\n%s", top)
+		}
+		// Alice owes me what I lent.
+		wantIn("the dealings", body, `<span class="row-name">Alice</span>`, money("1,000.00", "TWD"), "對方欠我")
+		// Two drafts wait: a lunch of 450, and a withdrawal that moves 3,000 from one of my
+		// accounts to another: it changes no total, so only the lunch is in what confirming
+		// them would change.
+		wantIn("the drafts", body,
+			`<p class="stat-figure">2<span class="stat-unit"> 筆</span></p>`,
+			"<ul class=\"stat-nets\">\n<li><span class=\"amt\">"+money("−450.00", "TWD")+"</span></li>\n</ul>",
+		)
+		// The statement of the card that closed on the 5th is to be paid on the 20th, six days from the 14th, and the one that is
+		// open, which the link of "本期" goes to, is to be paid in December. The name is not a link, for there is one to each
+		// statement, that says whose it is.
+		wantIn("the card", body,
+			`<p class="due-name">好銀行信用卡</p>`,
+			`<a href="/app/cards/`+card.String()+`?closing=2026-12-05" aria-label="好銀行信用卡 本期的帳單">本期</a>`,
+			`<a href="/app/cards/`+card.String()+`?closing=2026-11-05" aria-label="好銀行信用卡 上一期的帳單">上一期</a>`,
+			`繳款日 <span class="nowrap">2026-11-20</span> <span class="due-in">6 天後</span>`, `期末餘額　<span class="amt">`+money("−3,300.00", "TWD"),
+			`繳款日 <span class="nowrap">2026-12-20</span> <span class="due-in">36 天後</span>`,
+		)
+		// What has been spent so far this month, which is not over, is beside the chart of the months, whose largest month is this one.
+		wantIn("the trend", body,
+			`本月（未滿）<strong><span class="amt">`+money("23,940.00", "TWD"),
+			`<text class="chart-scale" x="4" y="32" text-anchor="start">23,940.00 TWD</text>`,
+		)
 	})
 
 	t.Run("the transactions of the month", func(t *testing.T) {

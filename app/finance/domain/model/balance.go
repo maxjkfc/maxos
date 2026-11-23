@@ -122,3 +122,40 @@ func (p BalancePreview) HasConfirmed() bool {
 	}
 	return false
 }
+
+// PreviewTotal is the preview balances of some accounts added up, of one instrument: what
+// they would hold of it together, and what they would owe of it in instalments that are not
+// yet due, once the drafts are confirmed. Each figure is the sum of the figures of the
+// balances it is made of, so it is what it is made of and not a figure of its own: its
+// Confirmed is the confirmed figures added up, its Drafts what the drafts would add to all
+// of them, and its Basis is said of those two as for any figure.
+type PreviewTotal struct {
+	InstrumentID uuid.UUID
+	Held         PreviewFigure
+	Unbilled     PreviewFigure
+}
+
+// add is the figure with the other figure's two parts added to its own.
+func (f PreviewFigure) add(other PreviewFigure) PreviewFigure {
+	return PreviewFigure{Confirmed: f.Confirmed.Add(other.Confirmed), Drafts: f.Drafts.Add(other.Drafts)}
+}
+
+// TotalPreviewBalances adds the balances up, an instrument at a time and never across
+// instruments: a sum of dollars and yen is a sum of nothing, and no rate is known here.
+// The totals come in the order the instruments first appear in the balances. An
+// instrument whose figures add up to nothing is there, as a balance that does is.
+func TotalPreviewBalances(balances []PreviewBalance) []PreviewTotal {
+	var totals []PreviewTotal
+	at := make(map[uuid.UUID]int)
+	for _, b := range balances {
+		i, found := at[b.InstrumentID]
+		if !found {
+			i = len(totals)
+			at[b.InstrumentID] = i
+			totals = append(totals, PreviewTotal{InstrumentID: b.InstrumentID})
+		}
+		totals[i].Held = totals[i].Held.add(b.Held)
+		totals[i].Unbilled = totals[i].Unbilled.add(b.Unbilled)
+	}
+	return totals
+}

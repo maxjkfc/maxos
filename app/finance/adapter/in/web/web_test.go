@@ -27,6 +27,9 @@ func populated() *fake {
 		CardStatementSummary: usecase.CardStatementSummary{From: date(2026, time.November, 6), ClosingOn: date(2026, time.December, 5)},
 	}
 	f.statements = []usecase.CardStatementSummary{f.statement.CardStatementSummary}
+	// What was spent, so that the charts of the overview are on the page that every test over the routes reads.
+	f.spent = spentThisMonth()
+	f.trend = monthsEndingNow(aYear...)
 	return f
 }
 
@@ -367,8 +370,9 @@ func TestPagesIssueAFixedNumberOfCalls(t *testing.T) {
 	for name, target := range targets {
 		t.Run(name, func(t *testing.T) {
 			small, large := world(1), world(400)
-			// The cards of the large world have a closing day too: each gets a call, which is
-			// the number of cards and is the same in both.
+			// The four hundred accounts of the large world are banks, which have no statements to
+			// ask for: the cards that are asked about are those of populated(), the same in both,
+			// and a call for each of them is the same number of calls.
 			small.site(t).page(target)
 			large.site(t).page(target)
 			if fmt.Sprint(small.calls) != fmt.Sprint(large.calls) {
@@ -400,6 +404,13 @@ func TestTodayIsWhatTheClockSays(t *testing.T) {
 	}
 	wantIn(t, s.page("/app/spending"), "<strong>2026-12</strong>")
 	wantIn(t, s.page("/app/"), "資料截至今天（2026-12-01）")
+	// The month of the overview is the month it is for the user, and not the one it is in UTC.
+	if !f.spentIn.Month.Equal(date(2026, time.December, 1)) {
+		t.Errorf("the overview asked for the spending of %v, want December", f.spentIn.Month)
+	}
+	if !f.trendIn.To.Equal(date(2026, time.December, 1)) {
+		t.Errorf("the overview asked for the trend up to %v, want December", f.trendIn.To)
+	}
 
 	// A later day moves it.
 	f.now = time.Date(2027, time.January, 3, 23, 59, 0, 0, userZone)

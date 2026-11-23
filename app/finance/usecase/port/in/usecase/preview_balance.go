@@ -48,6 +48,13 @@ import (
 // and not in both. So what a page says of the balances as a whole (that they are a preview,
 // of how many drafts, that none of them is confirmed) comes from the same answer as the
 // balances.
+//
+// The balances are added up too, because a page that writes one figure of many accounts does
+// not add: Totals for all of them, and Kinds for the accounts of each kind, an instrument at a
+// time (PreviewTotal). The sums are of the balances of the same read, so a total and the
+// balances under it say one thing; the instruments are put in order by their codes, and the
+// kind of each account is its own, both of which the catalog has, and neither changes what
+// a balance is.
 type GetPreviewBalances interface {
 	GetPreviewBalances(ctx context.Context, in GetPreviewBalancesInput) (GetPreviewBalancesOutput, error)
 }
@@ -70,6 +77,20 @@ const (
 	// PreviewBasisDrafts is a figure none of which is confirmed: drafts make up the whole of it.
 	PreviewBasisDrafts PreviewBasis = "drafts"
 )
+
+// PreviewBasisOf is the basis that a name says, the names being those that the domain gives to
+// what a figure is made of: "confirmed", "both" and "drafts". A name that is not one of them is
+// what no draft changes, of which nothing is said. It is the one mapping from the names of the
+// domain to the words of this port, which the use case and whoever stands in for it use alike,
+// so that the port says nothing of the domain's own type.
+func PreviewBasisOf(name string) PreviewBasis {
+	switch basis := PreviewBasis(name); basis {
+	case PreviewBasisBoth, PreviewBasisDrafts:
+		return basis
+	default:
+		return PreviewBasisConfirmed
+	}
+}
 
 // PreviewFigure is one figure of a balance, as it would be once the drafts are confirmed.
 type PreviewFigure struct {
@@ -104,6 +125,29 @@ type PreviewBalance struct {
 	Unbilled PreviewFigure
 }
 
+// PreviewTotal is the preview balances of some accounts added up, of one instrument: what they
+// would hold of it together (Held) and what they would owe of it in instalments that are not yet
+// due (Unbilled), once the drafts are confirmed. Each figure is the sum of the figures of the
+// balances: its Confirmed is theirs added up, its Drafts what the drafts would add to all of them,
+// its Total the two added, and its Basis is said of those two sums as for any figure (so the
+// confirmed parts of two accounts that cancel one another are nothing confirmed of the total).
+// Instruments are never added to one another: no rate is known here, and the sum of dollars and
+// yen is none.
+type PreviewTotal struct {
+	InstrumentID uuid.UUID
+	Held         PreviewFigure
+	Unbilled     PreviewFigure
+}
+
+// PreviewKindTotals is the totals of the accounts of one kind, for each instrument they have a
+// balance of.
+type PreviewKindTotals struct {
+	// Kind is the kind of account: "cash", "bank", "card", "exchange", "brokerage", "wallet" or
+	// "loan".
+	Kind   string
+	Totals []PreviewTotal
+}
+
 // GetPreviewBalancesOutput holds one preview balance for each account and instrument
 // that has a posting of either book of a confirmed transaction or of a draft by today, by
 // account name and then instrument code. A figure can be zero, when the postings cancel
@@ -111,6 +155,15 @@ type PreviewBalance struct {
 // those of GetBalances, and those that only the drafts move.
 type GetPreviewBalancesOutput struct {
 	Balances []PreviewBalance
+	// Totals are all the balances added up, for each instrument that has one, by instrument
+	// code: archived accounts that still hold something are in them, as they are in Balances; the
+	// balance of a card or of a loan is negative, and takes away from what the rest hold. The
+	// dealings with parties are not in them, nor is anything converted from one instrument to
+	// another.
+	Totals []PreviewTotal
+	// Kinds are the same sums for the accounts of each kind that has a balance, by kind: each
+	// instrument's Totals is the sum of the same instrument's total of every kind.
+	Kinds []PreviewKindTotals
 	// DraftCount is how many drafts wait, as GetDraftSummary counts them (Count): each once,
 	// whatever day it happened on and whatever it moves, a plan being one, by its origin. It
 	// is not how many of them are in the figures: one that is dated after today, or that is

@@ -1242,6 +1242,497 @@ table.wide {
   }
 }
 
+/* The overview is a home screen of cards: a headline of what the accounts hold, a card for
+   each thing worth a look, two charts, then the accounts by kind. A card is the surface one
+   level above the page, with a hairline and round corners and nothing else: no shadow, no
+   gradient. What a card is about is a small muted title, the figure under it is large and
+   in tabular figures, and what is only a note is small and muted. */
+
+.card {
+  min-width: 0;
+  padding: 1rem 1.1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+/* The head of a card: what it is about on the left, where it goes on to on the right. */
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+  margin: 0 0 0.5rem;
+}
+
+.card-head .card-title {
+  margin: 0;
+}
+
+.card-link {
+  flex: none;
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.card-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.card-title .muted {
+  font-weight: 400;
+}
+
+.card-title .pill {
+  letter-spacing: 0;
+}
+
+/* The headline: the figure of the base currency is the largest thing on the page, and the
+   other instruments are a row under it, each with its own code. A number is never broken in
+   the middle: it is the code of the instrument that may go to the next line. */
+.hero {
+  margin: 0.5rem 0 1rem;
+  padding: 1.25rem 1.4rem 1.1rem;
+}
+
+.hero-figure {
+  margin: 0.2rem 0 0.15rem;
+  font-size: clamp(1.75rem, 8vw, 2.75rem);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.015em;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.hero-figure .amt {
+  white-space: normal;
+}
+
+.hero-figure .unit {
+  margin-left: 0.1em;
+  font-size: 0.4em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* A figure of more characters is written smaller, by how many it has (the page says which): at
+   the 28px that the figure of most has on a 320px screen, one of twenty characters is wider than
+   the card. The largest is set so that even twenty-four, the figure of a number of fourteen
+   digits with its sign, is inside it. */
+.hero-m .hero-figure {
+  font-size: clamp(1.375rem, 6vw, 2.25rem);
+}
+
+.hero-l .hero-figure {
+  font-size: clamp(1.0625rem, 4.5vw, 1.75rem);
+}
+
+.hero-sub {
+  margin: 0.15rem 0 0;
+  font-size: 0.9375rem;
+}
+
+.hero-sub .unit {
+  font-size: 0.85em;
+}
+
+.hero-note {
+  margin: 0.9rem 0 0;
+}
+
+/* A row of figures, each with its code: under the headline, and in the head of a group. A
+   figure and what is confirmed of it are one, as in the balances of an account. */
+.tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 2rem;
+  margin: 1rem 0 0;
+  padding: 0.9rem 0 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+
+.tile {
+  min-width: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.tile .line.muted.small {
+  font-weight: 400;
+}
+
+.tile .line.muted + .line {
+  margin-top: 0.4rem;
+}
+
+/* The cards are a row that wraps, each as wide as the row has room for: what is left over on the
+   last row is shared by the cards on it, so there is no gap beside them. */
+.cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 0 0 1rem;
+}
+
+.cards > .card {
+  flex: 1 1 15rem;
+  min-width: 0;
+}
+
+.charts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  margin: 0 0 1rem;
+}
+
+.cards > .card,
+.charts > .card {
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-figure {
+  margin: 0.1rem 0 0.2rem;
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-figure .unit {
+  margin-left: 0.1em;
+  font-size: 0.5em;
+  font-weight: 600;
+}
+
+.stat-unit {
+  font-size: 0.55em;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.stat-empty {
+  margin: 0.15rem 0 0.4rem;
+  color: var(--muted);
+}
+
+.stat-sub {
+  margin: 0.2rem 0;
+}
+
+.stat-nets {
+  margin: 0.1rem 0 0.3rem;
+  padding: 0;
+  list-style: none;
+  font-size: 1.0625rem;
+  font-weight: 600;
+}
+
+.stat-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stat-rows > li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.1rem 1rem;
+  padding: 0.55rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.stat-rows > li:first-child {
+  padding-top: 0.15rem;
+  border-top: 0;
+}
+
+.row-name {
+  min-width: 0;
+  font-weight: 600;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.row-figures {
+  min-width: 0;
+  margin-left: auto;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The cards that are to be paid are a card of their own under the row of the others, as wide as
+   the page: there is one for each card, and with a few of them in a column the row would be as
+   tall as the list. Each is a tile, with its name, a line for the statement that is to be paid
+   and one for the one that is open, what each is on the left and the figure on the right, in as
+   many columns as fit. */
+.payments {
+  margin: 0 0 1rem;
+}
+
+.due-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(24rem, 100%), 1fr));
+  gap: 0.75rem;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.due-list > li {
+  min-width: 0;
+  padding: 0.65rem 0.85rem;
+  background: var(--surface-2);
+  border-radius: 10px;
+}
+
+.due-name {
+  margin: 0 0 0.1rem;
+  font-weight: 600;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.due-line {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0 1rem;
+  margin: 0.15rem 0 0;
+  font-size: 0.9rem;
+}
+
+.due-when {
+  color: var(--muted);
+}
+
+/* How far off the day is: a day that is near is said with weight and a pill, and not with the
+   colour of a loss, for a card that is to be paid is no loss. */
+.due-in {
+  white-space: nowrap;
+}
+
+.due-soon {
+  padding: 0 0.5em;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+/* A chart is drawn on a canvas of 360 units, with text of 12: wider than 30rem it is blown up
+   to text that is too large for a card, so it stops there. */
+.card .chart {
+  max-width: 30rem;
+  margin: 0.25rem 0 0.5rem;
+}
+
+/* What is told apart on the chart of the months, and what it is: the key is the colour of the month
+   that is not over, with what has been spent in it, said in words beside the chart. The line along
+   zero is seen, and the dashed one is the height that the largest month reaches. */
+.chart-key {
+  margin: 0 0 0.25rem;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.chart-key strong {
+  margin-left: 0.4rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.key-swatch {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-right: 0.4rem;
+  border-radius: 2px;
+  background: var(--bar-hl);
+  vertical-align: -0.05em;
+}
+
+.chart .chart-axis {
+  stroke: var(--muted);
+  stroke-width: 1;
+}
+
+.chart .chart-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.chart text.chart-scale,
+.chart text.chart-sub {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+/* A chart is drawn twice, for a wide screen and, on a canvas of 240 units, for a phone, where the
+   text of 12 units is a third bigger: one is shown and the other is not, so that a reader of the
+   page has one chart. Neither is wider than the room a phone has. */
+.chart-pair .chart-narrow {
+  display: none;
+}
+
+@media (max-width: 30rem) {
+  .chart-pair .chart {
+    display: none;
+  }
+
+  .chart-pair .chart-narrow {
+    display: block;
+    max-width: 20rem;
+  }
+}
+
+/* A link is at least 24px high to be touched, by a padding that a negative margin takes back, so
+   that the line it is in is as high as the text. */
+.card-link,
+.due-line a,
+.hero-note a,
+.stat-sub a,
+.card-details th a,
+.zero-accounts li a,
+.in-card .balances th a {
+  display: inline-block;
+  padding: 0.3rem 0.35rem;
+  margin: -0.3rem -0.35rem;
+}
+
+/* The name of an account is free text. A name that cannot be broken would widen the table and
+   push the amounts out of the card: it is broken anywhere when there is no other place to. */
+.in-card .balances th {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.card-details {
+  margin: 0.25rem 0;
+}
+
+.card-details table {
+  font-size: 0.875rem;
+}
+
+.card-details th,
+.card-details td {
+  padding: 0.25rem 0.5rem;
+}
+
+/* The accounts, a card for each kind: the name of the kind with what its accounts add up to,
+   and under it the rows. Two columns from 60rem, the cards falling where there is room. */
+.groups {
+  margin: 0.5rem 0 1rem;
+  column-gap: 1rem;
+}
+
+/* The space under a card is the padding of the box that holds it, and not a margin: a margin
+   that is left at the foot of a column is carried to the top of the next one by WebKit. */
+.slot {
+  break-inside: avoid;
+  padding: 0 0 1rem;
+}
+
+.group {
+  padding: 0.9rem 0 0.2rem;
+}
+
+.group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.4rem 1rem;
+  padding: 0 1.1rem 0.6rem;
+}
+
+.group-name {
+  margin: 0;
+  font-size: 1.0625rem;
+}
+
+.group-head .tiles {
+  gap: 0.25rem 1.25rem;
+  margin: 0;
+  padding: 0;
+  border-top: 0;
+}
+
+.group-head .tile {
+  font-size: 1rem;
+}
+
+.in-card {
+  margin: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.in-card th:first-child,
+.in-card td:first-child {
+  padding-left: 1.1rem;
+}
+
+.in-card th:last-child,
+.in-card td:last-child {
+  padding-right: 1.1rem;
+}
+
+/* On a phone the rows of the balances are blocks (see the balances above), and the card's own
+   padding is the row's: the cells have none of their own. */
+@media (max-width: 30rem) {
+  .in-card .balances tr {
+    padding-right: 1.1rem;
+    padding-left: 1.1rem;
+  }
+
+  .in-card .balances th,
+  .in-card .balances td {
+    padding-right: 0;
+    padding-left: 0;
+  }
+}
+
+/* The figures of a group's head are read from the left on a phone, under the name of the kind;
+   from 40rem they are at the right, as the figures of the rows are, beside the name or, when
+   they do not fit there, under it, above the column of the figures of the rows. */
+@media (min-width: 40rem) {
+  .group-head .tiles {
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+
+  .group-head .tile {
+    text-align: right;
+  }
+}
+
+@media (min-width: 52rem) {
+  .charts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 60rem) {
+  .groups {
+    columns: 2;
+  }
+}
+
 @media (min-width: 52rem) {
   main {
     padding-top: 1rem;

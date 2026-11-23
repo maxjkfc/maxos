@@ -183,6 +183,7 @@ func TestThePreviewBalancesAreTheBalancesOnceEveryDraftIsConfirmedAndTheNetOfThe
 		held := w.heldBalances()
 		byAccount, together := netOfTheSummary(w.summary())
 		day := d.Format(time.DateOnly)
+		w.wantTotalsToBeTheSums(day, w.previewOut())
 
 		for k, p := range previews[i] {
 			name := w.names[k.account] + " " + w.names[k.instrument]
@@ -271,6 +272,7 @@ func TestThePreviewBalancesOfALedgerOfDraftsOnlyHaveNothingConfirmedAndSayWhichF
 	w.clk.setDay(dateOn(2026, time.December, 5))
 
 	out := w.previewOut()
+	w.wantTotalsToBeTheSums("a ledger of drafts only", out)
 
 	if out.HasConfirmed || out.DraftCount != 2 || len(out.Balances) != 2 {
 		t.Fatalf("HasConfirmed = %v, DraftCount = %d, %d balances, want nothing confirmed, 2 drafts and the 2 accounts the drafts move", out.HasConfirmed, out.DraftCount, len(out.Balances))
@@ -303,6 +305,7 @@ func TestThePreviewBalancesOfALedgerWithNoDraftAreItsBalancesThroughTheRealUseCa
 	w.clk.setDay(dateOn(2026, time.December, 5))
 
 	held, out := w.heldBalances(), w.previewOut()
+	w.wantTotalsToBeTheSums("a ledger with no draft", out)
 	previews := w.previewBalances()
 
 	if w.summary().Count != 0 || len(held) == 0 || len(previews) != len(held) || out.DraftCount != 0 || !out.HasConfirmed {
@@ -320,5 +323,63 @@ func TestThePreviewBalancesOfALedgerWithNoDraftAreItsBalancesThroughTheRealUseCa
 	// The card owes the principal that is due and what is not.
 	if got := previews[balanceKey{w.card, model.BaseCurrencyID}]; !got.Held.Total.Equal(dec("-2000")) || !got.Unbilled.Total.Equal(dec("-4000")) {
 		t.Errorf("the card = %+v, want -2000 held and -4000 unbilled", got)
+	}
+}
+
+// wantTotalsToBeTheSums fails unless the totals of the preview are what its balances add up to, a figure
+// and an instrument at a time, for all the accounts and for the accounts of each kind, in the order the
+// use case promises: the instruments by code and the kinds by name. The accounts of this world are named
+// after their kinds, so that the balances can be divided by kind without asking the catalog the totals
+// were made from.
+func (w *draftsWorld) wantTotalsToBeTheSums(when string, out usecase.GetPreviewBalancesOutput) {
+	w.t.Helper()
+	type key struct {
+		kind       string // empty for all the accounts
+		instrument uuid.UUID
+		unbilled   bool
+	}
+	type sum struct{ confirmed, drafts decimal.Decimal }
+	want := map[key]sum{}
+	for _, b := range out.Balances {
+		for _, kind := range []string{"", w.names[b.AccountID]} {
+			for unbilled, f := range map[bool]usecase.PreviewFigure{false: b.Held, true: b.Unbilled} {
+				k := key{kind, b.InstrumentID, unbilled}
+				want[k] = sum{want[k].confirmed.Add(f.Confirmed), want[k].drafts.Add(f.Drafts)}
+			}
+		}
+	}
+
+	got := map[key]sum{}
+	read := func(kind string, totals []usecase.PreviewTotal) {
+		w.t.Helper()
+		for i, total := range totals {
+			if i > 0 && w.names[totals[i-1].InstrumentID] >= w.names[total.InstrumentID] {
+				w.t.Errorf("%s: the totals of %q are not by code: %s then %s", when, kind, w.names[totals[i-1].InstrumentID], w.names[total.InstrumentID])
+			}
+			for unbilled, f := range map[bool]usecase.PreviewFigure{false: total.Held, true: total.Unbilled} {
+				got[key{kind, total.InstrumentID, unbilled}] = sum{f.Confirmed, f.Drafts}
+				if !f.Total.Equal(f.Confirmed.Add(f.Drafts)) {
+					w.t.Errorf("%s: the total of %q in %s is %s, and what is confirmed of it and what the drafts add is %s and %s", when, kind, w.names[total.InstrumentID], f.Total, f.Confirmed, f.Drafts)
+				}
+			}
+		}
+	}
+	read("", out.Totals)
+	for i, kind := range out.Kinds {
+		if i > 0 && out.Kinds[i-1].Kind >= kind.Kind {
+			w.t.Errorf("%s: the kinds are not by name: %s then %s", when, out.Kinds[i-1].Kind, kind.Kind)
+		}
+		read(kind.Kind, kind.Totals)
+	}
+	for k, s := range want {
+		g, found := got[k]
+		if !found || !g.confirmed.Equal(s.confirmed) || !g.drafts.Equal(s.drafts) {
+			w.t.Errorf("%s: %q %s (unbilled %v): the balances add up to %s confirmed and %s from drafts, and the totals say %v (found %v)", when, k.kind, w.names[k.instrument], k.unbilled, s.confirmed, s.drafts, g, found)
+		}
+	}
+	for k := range got {
+		if _, found := want[k]; !found {
+			w.t.Errorf("%s: the totals have %q %s (unbilled %v), which no balance has", when, k.kind, w.names[k.instrument], k.unbilled)
+		}
 	}
 }

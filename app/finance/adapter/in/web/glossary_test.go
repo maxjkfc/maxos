@@ -116,17 +116,21 @@ func TestTheAvoidedWordsAreReadFromTheGlossary(t *testing.T) {
 	words := readGlossary(t).avoided
 
 	// Words that CONTEXT.md avoids, and that the pages must not use.
-	for _, want := range []string{"科目", "餘額調整", "歸帳日", "紅利回饋", "待處理", "未入帳", "往來餘額", "代付支出", "幣種", "聯絡人", "記錄", "分類", "分期餘額", "存款"} {
+	for _, want := range []string{"科目", "餘額調整", "歸帳日", "紅利回饋", "待處理", "未入帳", "往來餘額", "代付支出", "幣種", "聯絡人", "記錄", "分類", "分期餘額", "存款", "預估餘額"} {
 		if !slices.Contains(words, want) {
 			t.Errorf("%q is not among the avoided words %q", want, words)
 		}
 	}
 	// The name of an entry, or of a kind of transaction, is not avoided, though another
 	// entry avoids it.
-	for _, word := range []string{"專案", "帳戶", "領域", "手續費", "折扣", "轉帳", "收入"} {
+	for _, word := range []string{"專案", "帳戶", "領域", "手續費", "折扣", "轉帳", "收入", "預覽餘額"} {
 		if slices.Contains(words, word) {
 			t.Errorf("%q is a word of the glossary and is among the avoided words", word)
 		}
+	}
+	// The entry of the preview balance is read: its name is a term, which the pages may use, and its words to avoid are not.
+	if !slices.Contains(readGlossary(t).terms, "預覽餘額") {
+		t.Errorf("預覽餘額 is not among the terms %q", readGlossary(t).terms)
 	}
 
 	// A word that is inside the name of an entry is not found there: 未記錄 is an entry,

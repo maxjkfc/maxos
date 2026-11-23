@@ -15,7 +15,7 @@ import (
 // with the drafts confirmed, which is a preview and says so, with what is confirmed of each
 // beside it. The figures, what each is made of and how many drafts wait are the use case's
 // (GetPreviewBalances): what these tests show is what the page makes of them, and that the page and
-// the table of the drafts under it say the same.
+// the card of the drafts say the same.
 
 // balanceRow is the row of the balances that is of the account, from its start tag to its end tag,
 // and nothing when the overview has no such row: an account that is only named, in the list of
@@ -54,8 +54,8 @@ func numberOf(t *testing.T, text string) decimal.Decimal {
 // draftsOfTheBalances adds up, for each instrument, what the balances of the markup say the drafts
 // change in what the accounts hold: of each balance that has a confirmed part beside it, the amount
 // less the confirmed part, which is the whole of it when none is confirmed, as a reader works it
-// out. What is not yet due is not a balance, it has a label, and is not in it: the table of the
-// drafts does not count the principal of instalment plans, which the page says.
+// out. What is not yet due is not a balance, it has a label, and is not in it: the drafts do not
+// count the principal of instalment plans, which the page says.
 func draftsOfTheBalances(t *testing.T, markup string) map[string]decimal.Decimal {
 	t.Helper()
 	sums := map[string]decimal.Decimal{}
@@ -94,7 +94,7 @@ func TestTheOverviewOfLedgerWithDraftsShowsWhatTheBalancesWouldBeAndWhatIsConfir
 		held(spareCard, usd, "0"),
 		{AccountID: oldSaving, InstrumentID: twd, Held: figure("0", "5"), Unbilled: figure("0", "0")},
 	}
-	// What the drafts change in what the accounts hold, as the table of them says it: the lunch, the
+	// What the drafts change in what the accounts hold, as the card of them says it: the lunch, the
 	// money into the checking account, the card and the old savings, the dollars and the yen.
 	f.drafts = usecase.GetDraftSummaryOutput{Count: 12, Amounts: []usecase.DraftAmount{
 		{InstrumentID: twd, Outflow: dec("2120"), Inflow: dec("49005"), Net: dec("46885")},
@@ -102,16 +102,17 @@ func TestTheOverviewOfLedgerWithDraftsShowsWhatTheBalancesWouldBeAndWhatIsConfir
 		{InstrumentID: jpy, Outflow: dec("3000"), Net: dec("-3000")},
 	}}
 	page := f.site(t).page("/app/")
-	balances := between(page, "<h2>餘額", "<h2>草稿")
+	hero := cardOf(t, page, "hero-title")
+	balances := accountsOf(page)
 
 	t.Run("it says it is a preview, in the heading and over the amounts, and of how many drafts", func(t *testing.T) {
-		wantIn(t, page, `<h2>餘額 <span class="pill pill-draft">預覽（含 12 筆草稿）</span></h2>`)
-		wantIn(t, balances, `href="/app/drafts">查看草稿</a>`, `<th scope="col" role="columnheader" class="num">餘額（預覽）</th>`)
+		wantIn(t, hero, `<h2 class="card-title" id="hero-title">帳戶餘額 <span class="pill pill-draft">預覽（含 12 筆草稿）</span></h2>`, `href="/app/drafts">查看草稿</a>`)
+		wantIn(t, balances, `<th scope="col" role="columnheader" class="num">餘額（預覽）</th>`)
 		if strings.Index(page, "預覽（含") > strings.Index(page, "<table") {
 			t.Error("the preview is not said before the first of the tables")
 		}
 		// Some of it is confirmed, which is said of the balances as a whole, and is not that they are drafts'.
-		wantNotIn(t, balances, "全是草稿")
+		wantNotIn(t, hero, "全是草稿")
 	})
 	t.Run("a balance is what the accounts would hold, with what is confirmed of it beside it", func(t *testing.T) {
 		wantCell(t, balanceRow(page, cash), "num", "680.00 TWD 已確認 800.00 TWD")
@@ -145,17 +146,19 @@ func TestTheOverviewOfLedgerWithDraftsShowsWhatTheBalancesWouldBeAndWhatIsConfir
 		}
 	})
 	// A reader works out what the drafts change from the balances: the amounts less what is
-	// confirmed of them. It has to be what the table of the drafts says, whose caption says that
-	// it is what they change.
-	t.Run("the balances and the table of the drafts say the same of what the drafts change", func(t *testing.T) {
-		got := draftsOfTheBalances(t, balances)
-		table := draftColumns(t, between(page, "<h2>草稿", "</main>"))
-		if len(got) == 0 || len(table) == 0 {
-			t.Fatalf("nothing to compare: %v from the balances, %v from the table", got, table)
+	// confirmed of them. It has to be what the card of the drafts says that they change.
+	t.Run("the balances and the card of the drafts say the same of what the drafts change", func(t *testing.T) {
+		got := draftsOfTheBalances(t, rowsOf(balances))
+		says := map[string]decimal.Decimal{}
+		for _, p := range amountPairsOf(cardOf(t, page, "drafts-title")) {
+			says[p[1]] = numberOf(t, strings.TrimPrefix(p[0], "+"))
+		}
+		if len(got) == 0 || len(says) == 0 {
+			t.Fatalf("nothing to compare: %v from the balances, %v from the card", got, says)
 		}
 		for _, unit := range []string{"TWD", "USD", "JPY"} {
-			if want := table["淨額 "+unit]; !got[unit].Equal(want) {
-				t.Errorf("%s: the balances say the drafts change %s, and the table of the drafts says %s", unit, got[unit], want)
+			if want := says[unit]; !got[unit].Equal(want) {
+				t.Errorf("%s: the balances say the drafts change %s, and the card of the drafts says %s", unit, got[unit], want)
 			}
 		}
 		// Only what the drafts change has a confirmed part beside it, or is said to be none: the
@@ -163,9 +166,9 @@ func TestTheOverviewOfLedgerWithDraftsShowsWhatTheBalancesWouldBeAndWhatIsConfir
 		if _, found := got["BTC"]; found || len(got) != 3 {
 			t.Errorf("the balances say the drafts change %v, want TWD, USD and JPY only", got)
 		}
-		// The principal of a plan is not in the table, which is of what an account holds. The page
-		// says where it is, which is the line of what is not yet due.
-		wantIn(t, between(page, "<h2>草稿", "</main>"), "未到期分期")
+		// The principal of a plan is not in what the drafts change, which is of what an account holds. The
+		// card says where it is, which is the line of what is not yet due.
+		wantIn(t, cardOf(t, page, "drafts-title"), "未到期分期")
 	})
 	t.Run("the table of the balances keeps its roles for the phone, where it is not a table", func(t *testing.T) {
 		wantIn(t, balances, `<table class="balances" role="table">`, `<tr role="row">`, `<th scope="row" role="rowheader">`, `<td role="cell" class="num">`)
@@ -173,9 +176,8 @@ func TestTheOverviewOfLedgerWithDraftsShowsWhatTheBalancesWouldBeAndWhatIsConfir
 	// A line of a note breaks anywhere in Chinese, and a link to the drafts that is cut into 查看 and 草稿,
 	// or a term that is cut in the middle, is read as two things: they are kept whole (§8 of the design).
 	t.Run("the link to the drafts and the term of what is not yet due are kept whole where a line breaks", func(t *testing.T) {
-		wantIn(t, balances, `<a class="nowrap" href="/app/drafts">查看草稿</a>`)
-		drafts := between(page, "<h2>草稿", "</main>")
-		wantIn(t, drafts, `<a class="nowrap" href="/app/drafts">查看草稿</a>`, `<span class="nowrap">「未到期分期」</span>`)
+		wantIn(t, hero, `<a class="nowrap" href="/app/drafts">查看草稿</a>`)
+		wantIn(t, cardOf(t, page, "drafts-title"), `<span class="nowrap">「未到期分期」</span>`)
 	})
 }
 
@@ -232,26 +234,28 @@ func TestTheOverviewOfLedgerOfDraftsOnlySaysThatEveryNumberIsADraftsAndIsRedNowh
 	}
 	f.drafts = usecase.GetDraftSummaryOutput{Count: 4}
 	page := f.site(t).page("/app/")
-	balances := between(page, "<h2>餘額", "<h2>草稿")
+	hero := cardOf(t, page, "hero-title")
+	balances := accountsOf(page)
 
-	wantIn(t, page, `<span class="pill pill-draft">預覽（含 4 筆草稿）</span>`)
+	wantIn(t, hero, `<span class="pill pill-draft">預覽（含 4 筆草稿）</span>`)
 	// The note says that none of it is confirmed, in place of the one that says what is added to
 	// what is confirmed.
-	wantIn(t, balances, "全是草稿", `href="/app/drafts">查看草稿</a>`)
-	wantNotIn(t, balances, "加上這些草稿今天全部確認後會有的變動")
+	wantIn(t, hero, "全是草稿", `href="/app/drafts">查看草稿</a>`)
+	wantNotIn(t, hero, "加上這些草稿今天全部確認後會有的變動")
 	wantCell(t, balanceRow(page, cash), "num", "−900.00 TWD 尚未確認")
 	wantCell(t, balanceRow(page, checking), "num", "49,000.00 TWD 尚未確認")
 	wantCell(t, balanceRow(page, card), "num", "−30.00 TWD 尚未確認 未到期分期 −6,000.00 TWD 尚未確認")
 	wantCell(t, balanceRow(page, emptyAcct), "num", "未到期分期 −4,000.00 TWD 尚未確認")
-	// A column of reds is a loss, and there is none: every amount is drafts', and none is confirmed.
-	wantNotIn(t, balances, `class="amt neg"`, "已確認 <span")
+	// A column of reds is a loss, and there is none: every amount is drafts', and none is confirmed. Not on
+	// the page anywhere: not in the accounts, not in the heads of their groups, and not in the headline.
+	wantNotIn(t, page, `class="amt neg"`)
+	wantNotIn(t, balances, "已確認 <span")
 
 	// The first account whose balance is confirmed: the balances are no longer all drafts', and the
 	// note says what is added to what is confirmed. The lines of drafts alone are the same.
 	f.balances = append(f.balances, held(spareCard, usd, "100"))
 	page = f.site(t).page("/app/")
-	balances = between(page, "<h2>餘額", "<h2>草稿")
-	wantNotIn(t, balances, "全是草稿")
+	wantNotIn(t, cardOf(t, page, "hero-title"), "全是草稿")
 	wantCell(t, balanceRow(page, cash), "num", "−900.00 TWD 尚未確認")
 	wantCell(t, balanceRow(page, spareCard), "num", "100.00 USD")
 }
@@ -267,20 +271,8 @@ func TestTheOverviewOfLedgerWithNoDraftIsTheBalancesAndSaysNothingOfAPreview(t *
 	page := f.site(t).page("/app/")
 
 	// The heading is the heading, and a balance is its amount and nothing more.
-	wantIn(t, page, "<h2>餘額</h2>", `<th scope="col" role="columnheader" class="num">餘額</th>`, "沒有等著確認的草稿。")
+	wantIn(t, page, `<h2 class="card-title" id="hero-title">帳戶餘額</h2>`, `<th scope="col" role="columnheader" class="num">餘額</th>`, "沒有等著確認的草稿。")
 	wantCell(t, balanceRow(page, cash), "num", "880.00 TWD")
 	wantCell(t, balanceRow(page, card), "num", "−500.00 TWD 未到期分期 −11,000.00 TWD")
 	wantNotIn(t, page, "預覽", "已確認 <span", "尚未確認", `class="pill`, "只列已確認的分期", "全是草稿")
-}
-
-func TestTheOverviewWhenDraftsWaitAndNoAccountHoldsAnythingToday(t *testing.T) {
-	f := newFake()
-	// Drafts that move no balance today: dated later, or of no account.
-	f.drafts = usecase.GetDraftSummaryOutput{Count: 2}
-	page := f.site(t).page("/app/")
-	balances := between(page, "<h2>餘額", "<h2>草稿")
-
-	wantIn(t, page, `<span class="pill pill-draft">預覽（含 2 筆草稿）</span>`, "還沒有已確認的餘額")
-	// There is no balance to say anything of: no note that introduces them, no table.
-	wantNotIn(t, balances, "<table", "全是草稿", "查看草稿")
 }

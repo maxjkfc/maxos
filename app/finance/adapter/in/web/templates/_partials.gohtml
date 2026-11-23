@@ -8,3 +8,10 @@
 <a class="button" href="{{.Next}}" rel="next">下個月 →</a>
 <a href="{{.Current}}">回到本月</a>
 </nav>{{end}}
+
+{{/* The lines of the balance of an account, or of a total of many: for each figure the amount, and under it, small, what is confirmed of it (when drafts change it) or that none of it is (when drafts make it up). Their markup has no space between the parts, as the tests read it. */}}
+{{define "balance-lines"}}{{range .}}<span class="line">{{if .Label}}<span class="muted small">{{.Label}}　</span>{{end}}{{template "amount" .Amount}}</span>{{if .Confirmed}}<span class="line muted small">已確認 {{template "amount" .Confirmed}}</span>{{else if .Unconfirmed}}<span class="line muted small">尚未確認</span>{{end}}{{end}}{{end}}
+
+{{/* The rows of the table that has the numbers of the months of a trend: each month a link to its spending page, the selected one marked. */}}
+{{define "trend-rows"}}{{range .}}<tr{{if .Selected}} class="current" aria-current="true"{{end}}><th scope="row"><a href="{{.Href}}">{{.Month}}</a></th><td class="num">{{template "amount" .Total}}</td></tr>
+{{end}}{{end}}
