@@ -370,8 +370,9 @@ func TestPagesIssueAFixedNumberOfCalls(t *testing.T) {
 	for name, target := range targets {
 		t.Run(name, func(t *testing.T) {
 			small, large := world(1), world(400)
-			// The cards of the large world have a closing day too: each gets a call, which is
-			// the number of cards and is the same in both.
+			// The four hundred accounts of the large world are banks, which have no statements to
+			// ask for: the cards that are asked about are those of populated(), the same in both,
+			// and a call for each of them is the same number of calls.
 			small.site(t).page(target)
 			large.site(t).page(target)
 			if fmt.Sprint(small.calls) != fmt.Sprint(large.calls) {

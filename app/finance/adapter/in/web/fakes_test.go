@@ -57,10 +57,13 @@ type fake struct {
 	byID     map[uuid.UUID]usecase.Transaction
 	plan     usecase.InstalmentPlan
 
-	statements  []usecase.CardStatementSummary
-	statementIn []usecase.ListCardStatementsInput
-	statement   usecase.CardStatement
-	cardIn      usecase.GetCardStatementInput
+	// statements are the statements every card has, unless the card has statementsOf its own;
+	// statementIn is what ListCardStatements was asked, in order.
+	statements   []usecase.CardStatementSummary
+	statementsOf map[uuid.UUID][]usecase.CardStatementSummary
+	statementIn  []usecase.ListCardStatementsInput
+	statement    usecase.CardStatement
+	cardIn       usecase.GetCardStatementInput
 
 	areaBudgets    usecase.GetAreaBudgetsOutput
 	projectBudgets usecase.GetProjectBudgetsOutput
@@ -139,7 +142,7 @@ func (f *fake) totalsOf(balances []usecase.PreviewBalance) []usecase.PreviewTota
 	sums := model.TotalPreviewBalances(rows)
 	slices.SortFunc(sums, func(a, b model.PreviewTotal) int { return strings.Compare(code(a.InstrumentID), code(b.InstrumentID)) })
 	figure := func(f model.PreviewFigure) usecase.PreviewFigure {
-		return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: usecase.PreviewBasis(f.Basis())}
+		return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: usecase.PreviewBasisOf(string(f.Basis()))}
 	}
 	totals := make([]usecase.PreviewTotal, len(sums))
 	for i, s := range sums {
@@ -182,7 +185,11 @@ func (f *fake) GetInstalmentPlan(context.Context, uuid.UUID) (usecase.Instalment
 
 func (f *fake) ListCardStatements(_ context.Context, in usecase.ListCardStatementsInput) (usecase.ListCardStatementsOutput, error) {
 	f.statementIn = append(f.statementIn, in)
-	return usecase.ListCardStatementsOutput{Statements: f.statements}, f.call("ListCardStatements")
+	statements := f.statements
+	if own, ok := f.statementsOf[in.AccountID]; ok {
+		statements = own
+	}
+	return usecase.ListCardStatementsOutput{Statements: statements}, f.call("ListCardStatements")
 }
 
 func (f *fake) GetCardStatement(_ context.Context, in usecase.GetCardStatementInput) (usecase.CardStatement, error) {

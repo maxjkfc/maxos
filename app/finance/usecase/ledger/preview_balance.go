@@ -105,20 +105,9 @@ func toPreviewTotals(balances []model.PreviewBalance, rank map[uuid.UUID]int) []
 }
 
 // toPreviewFigure returns the figure as the use case gives it: with its total, and with
-// what it is made of.
+// what it is made of, in the words of the port (usecase.PreviewBasisOf, the one mapping
+// from the names of the model's basis, which the tests of this use case hold to the
+// three words of the port).
 func toPreviewFigure(f model.PreviewFigure) usecase.PreviewFigure {
-	return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: toPreviewBasis(f.Basis())}
-}
-
-// toPreviewBasis says what the model says a figure is made of in the words of the port. A
-// basis that it does not know is what no draft changes: nothing is said of it.
-func toPreviewBasis(b model.PreviewBasis) usecase.PreviewBasis {
-	switch b {
-	case model.BasisDrafts:
-		return usecase.PreviewBasisDrafts
-	case model.BasisBoth:
-		return usecase.PreviewBasisBoth
-	default:
-		return usecase.PreviewBasisConfirmed
-	}
+	return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: usecase.PreviewBasisOf(string(f.Basis()))}
 }

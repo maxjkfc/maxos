@@ -329,13 +329,20 @@ func TestThePagesShowTheLedgerThroughTheRealWiring(t *testing.T) {
 			`<p class="stat-figure">2<span class="stat-unit"> 筆</span></p>`,
 			"<ul class=\"stat-nets\">\n<li><span class=\"amt\">"+money("−450.00", "TWD")+"</span></li>\n</ul>",
 		)
-		// The statement of the card that closed on the 5th is to be paid on the 20th, and the one
-		// that is open, which the card links to, is to be paid in December.
+		// The statement of the card that closed on the 5th is to be paid on the 20th, six days from the 14th, and the one that is
+		// open, which the link of "本期" goes to, is to be paid in December. The name is not a link, for there is one to each
+		// statement, that says whose it is.
 		wantIn("the card", body,
-			`<a class="row-name" href="/app/cards/`+card.String()+`?closing=2026-12-05">好銀行信用卡</a>`,
-			`<a href="/app/cards/`+card.String()+`?closing=2026-11-05">上一期</a>`,
-			`繳款日 <span class="nowrap">2026-11-20</span>`, `期末餘額　<span class="amt">`+money("−3,300.00", "TWD"),
-			`繳款日 <span class="nowrap">2026-12-20</span>`,
+			`<p class="due-name">好銀行信用卡</p>`,
+			`<a href="/app/cards/`+card.String()+`?closing=2026-12-05" aria-label="好銀行信用卡 本期的帳單">本期</a>`,
+			`<a href="/app/cards/`+card.String()+`?closing=2026-11-05" aria-label="好銀行信用卡 上一期的帳單">上一期</a>`,
+			`繳款日 <span class="nowrap">2026-11-20</span> <span class="due-in">6 天後</span>`, `期末餘額　<span class="amt">`+money("−3,300.00", "TWD"),
+			`繳款日 <span class="nowrap">2026-12-20</span> <span class="due-in">36 天後</span>`,
+		)
+		// What has been spent so far this month, which is not over, is beside the chart of the months, whose largest month is this one.
+		wantIn("the trend", body,
+			`本月（未滿）<strong><span class="amt">`+money("23,940.00", "TWD"),
+			`<text class="chart-scale" x="4" y="32" text-anchor="start">23,940.00 TWD</text>`,
 		)
 	})
 

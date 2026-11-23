@@ -2,7 +2,7 @@
 <p class="muted">資料截至今天（{{.Today}}）。</p>
 
 {{$preview := .Preview.Count}}
-<section class="card hero" aria-labelledby="hero-title">
+<section class="card hero{{with .Hero.Size}} {{.}}{{end}}" aria-labelledby="hero-title">
 <h2 class="card-title" id="hero-title">帳戶餘額{{if $preview}} <span class="pill pill-draft">預覽（含 {{.Preview.Text}} 筆草稿）</span>{{end}}</h2>
 {{if .Hero.Main}}<p class="hero-figure">{{template "amount" .Hero.Main.Amount}}</p>
 {{if .Hero.Main.Confirmed}}<p class="hero-sub muted">已確認 {{template "amount" .Hero.Main.Confirmed}}</p>
@@ -46,23 +46,26 @@
 </details>
 {{end}}</section>
 {{end}}</div>
-{{if .Payments.Cards}}<section class="card payments" aria-labelledby="payments-title">
+{{if or .Payments.Cards .Payments.Idle}}<section class="card payments" aria-labelledby="payments-title">
 <div class="card-head"><h2 class="card-title" id="payments-title">信用卡</h2><a class="card-link" href="{{.Payments.Href}}">查看帳單</a></div>
-<ul class="stat-rows due-list">
-{{range .Payments.Cards}}<li>
-<a class="row-name" href="{{.Href}}">{{.Name}}</a>
-{{with .Last}}<p class="due-line"><span class="due-when"><a href="{{.Href}}">上一期</a>　繳款日 <span class="nowrap">{{.DueOn}}</span></span><span class="row-figures">{{range .Amounts}}<span class="line">期末餘額　{{template "amount" .}}</span>{{end}}</span></p>
-{{end}}{{with .Open}}<p class="due-line"><span class="due-when"><a href="{{.Href}}">本期</a>　繳款日 <span class="nowrap">{{.DueOn}}</span></span><span class="row-figures">{{range .Amounts}}<span class="line">本期消費　{{template "amount" .}}</span>{{end}}</span></p>
+{{if .Payments.Cards}}<ul class="due-list">
+{{range .Payments.Cards}}{{$name := .Name}}<li>
+<p class="due-name">{{.Name}}</p>
+{{with .Last}}<p class="due-line"><span class="due-when"><a href="{{.Href}}" aria-label="{{$name}} 上一期的帳單">上一期</a>　繳款日 <span class="nowrap">{{.DueOn}}</span>{{if .In}} <span class="due-in{{if .Soon}} due-soon{{end}}">{{.In}}</span>{{end}}</span><span class="row-figures">{{range .Amounts}}<span class="line">期末餘額　{{template "amount" .}}</span>{{end}}</span></p>
+{{end}}{{with .Open}}<p class="due-line"><span class="due-when"><a href="{{.Href}}" aria-label="{{$name}} 本期的帳單">本期</a>　繳款日 <span class="nowrap">{{.DueOn}}</span>{{if .In}} <span class="due-in{{if .Soon}} due-soon{{end}}">{{.In}}</span>{{end}}</span><span class="row-figures">{{range .Amounts}}<span class="line">本期消費　{{template "amount" .}}</span>{{end}}</span></p>
 {{end}}</li>
 {{end}}</ul>
-{{if .Payments.SomeEmpty}}<p class="stat-sub muted small">帳單只算已確認的款項：沒有金額的，是還沒有已確認的款項，草稿確認之後才會有。</p>
+{{end}}{{if .Payments.SomeLast}}<p class="stat-sub muted small">期末餘額是結帳時欠的；結帳之後已經繳了的，繳款日之前這裡仍會列出。</p>
+{{end}}{{if .Payments.SomeEmpty}}<p class="stat-sub muted small">帳單只算已確認的款項：沒有金額的，是還沒有已確認的款項，草稿確認之後才會有。</p>
+{{end}}{{if .Payments.Idle}}<p class="stat-sub muted small">{{if .Payments.Cards}}另有 {{.Payments.Idle}} 張卡{{else}}{{.Payments.Idle}} 張卡{{end}}尚無帳單。</p>
 {{end}}</section>
 {{end}}
 
 <div class="charts">
 <section class="card" aria-labelledby="trend-title">
 <div class="card-head"><h2 class="card-title" id="trend-title">{{.Trend.Title}}</h2><a class="card-link" href="{{.Trend.Href}}">查看支出</a></div>
-{{if .Trend.Chart}}{{.Trend.Chart}}
+{{if .Trend.Chart}}<p class="chart-key"><span class="key-swatch" aria-hidden="true"></span>本月（未滿）{{with .Trend.Current}}<strong>{{template "amount" .}}</strong>{{else}}<span class="muted">還沒有已確認的支出</span>{{end}}</p>
+<div class="chart-pair">{{.Trend.Chart}}{{.Trend.Narrow}}</div>
 <details class="card-details">
 <summary>每月的數字</summary>
 <table>
@@ -76,7 +79,7 @@
 {{end}}</section>
 <section class="card" aria-labelledby="top-title">
 <div class="card-head"><h2 class="card-title" id="top-title">本月支出最多的類別</h2><a class="card-link" href="{{.Top.Href}}">{{if .Top.More}}查看全部類別{{else}}查看支出{{end}}</a></div>
-{{if .Top.Chart}}{{.Top.Chart}}
+{{if .Top.Chart}}<div class="chart-pair">{{.Top.Chart}}{{.Top.Narrow}}</div>
 {{else}}<p class="stat-empty">這個月還沒有已確認的支出。</p>
 {{end}}</section>
 </div>
@@ -104,7 +107,7 @@
 </div>
 </section></div>
 {{end}}</div>
-{{end}}{{if .ZeroAccounts}}<details>
+{{end}}{{if .ZeroAccounts}}<details class="zero-accounts">
 <summary>餘額皆為零的帳戶（{{len .ZeroAccounts}}）</summary>
 <ul>{{range .ZeroAccounts}}<li><a href="{{.Href}}">{{.Name}}</a></li>{{end}}</ul>
 </details>

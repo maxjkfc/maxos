@@ -305,3 +305,31 @@ func TestTheHeadOfAGroupFollowsTheRuleOfTheRedOfItsRows(t *testing.T) {
 		t.Errorf("the head of the group of cards says %q, want %q", got, want)
 	}
 }
+
+// A figure that is negative only because the drafts would make it so, of an account that holds something confirmed, is a figure
+// with its sign and not a loss: the row, the head of its group and the headline are not red. The one of an account that owes of
+// what is confirmed is, and what the drafts add to it does not change that.
+func TestAFigureThatOnlyTheDraftsMakeNegativeIsNotTheColourOfALoss(t *testing.T) {
+	f := newFake()
+	f.drafts = usecase.GetDraftSummaryOutput{Count: 3}
+	f.balances = []usecase.PreviewBalance{
+		{AccountID: checking, InstrumentID: twd, Held: figure("1000", "-5000"), Unbilled: figure("0", "0")},
+		{AccountID: emptyAcct, InstrumentID: twd, Held: figure("-200", "-300"), Unbilled: figure("0", "0")},
+	}
+	page := f.site(t).page("/app/")
+
+	row := balanceRow(page, checking)
+	wantIn(t, row, `<span class="amt">−4,000.00`)
+	wantIn(t, textOf(row), "已確認 1,000.00 TWD")
+	wantNotIn(t, row, `class="amt neg"`)
+	wantIn(t, balanceRow(page, emptyAcct), `<span class="amt neg">−500.00`)
+	wantIn(t, textOf(balanceRow(page, emptyAcct)), "已確認 −200.00 TWD")
+	// Between them they hold 800 of what is confirmed and the drafts take 5,300: the headline and the head say what the
+	// accounts add up to, which is −4,500 and is not a loss of what is confirmed.
+	head := between(groupOf(page, "銀行戶頭"), "<ul", "</ul>")
+	if got, want := tilesOf(head), []string{"−4,500.00 TWD 已確認 800.00 TWD"}; !slices.Equal(got, want) {
+		t.Errorf("the head of the group of banks says %q, want %q", got, want)
+	}
+	wantNotIn(t, head, `class="amt neg"`)
+	wantNotIn(t, cardOf(t, page, "hero-title"), `class="amt neg"`)
+}

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"slices"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -68,15 +69,20 @@ type linkView struct {
 // case adds them), the instrument of the base currency large and the others beside
 // each other under it, each with its own code. Nothing is converted.
 type heroView struct {
-	// Main is the base currency's total, which is there whenever any balance is: it is
-	// a total of nothing (and says so) when only other instruments are held. Nil when
-	// there is no balance to write.
+	// Main is the total that is large: the base currency's, or, when that is nothing and
+	// other instruments are held, the first of those (by code), which is not shown a second
+	// time among Others. It is a total of nothing in the base currency when every total
+	// adds up to nothing. Nil when there is no balance to write.
 	Main *balanceLine
-	// Unbilled is what the base currency owes in instalments that are not yet due, a
+	// Unbilled is what the instrument of Main owes in instalments that are not yet due, a
 	// line of its own, when it owes any.
 	Unbilled *balanceLine
 	// Others are the totals of the other instruments that are not nothing.
 	Others []totalTile
+	// Size is the class that sizes the figure by how long it is written: a figure of
+	// twenty characters is not as big as one of seven, so that it stays inside its card on
+	// a phone. Empty for the size of most.
+	Size string
 }
 
 // totalTile is the lines of the total of one instrument: what is held of it and, apart,
@@ -281,39 +287,62 @@ func buildOverview(r *refs, a overviewAnswers) overviewView {
 	return v
 }
 
-// heroOf writes the totals of the instruments: the base currency's is the headline, and
-// the others, which are not nothing, come after it in the order the use case gives (by
-// code). When only other instruments are held the headline is a total of nothing of
-// the base currency, as it is: no instrument stands in for another.
+// heroOf writes the totals of the instruments. The headline is the total of the base
+// currency when that is not nothing, else the first instrument that has any, in the order
+// the use case gives (by code): a headline of nothing over the figures of what is held is
+// not what a reader looks for, and nothing is converted to make it. The others that are
+// not nothing come after it, each with its own code. When every total adds up to nothing
+// the headline is the base currency's, which says so: there is no headline only when
+// there is no balance at all.
 func heroOf(r *refs, totals []usecase.PreviewTotal) heroView {
-	var (
-		hero     heroView
-		anything bool
-	)
+	if len(totals) == 0 {
+		return heroView{}
+	}
+	var held []usecase.PreviewTotal
 	for _, t := range totals {
-		if !hasAnything(t.Held) && !hasAnything(t.Unbilled) {
-			continue
+		if hasAnything(t.Held) || hasAnything(t.Unbilled) {
+			held = append(held, t)
 		}
-		anything = true
-		if t.InstrumentID != model.BaseCurrencyID {
+	}
+	main := usecase.PreviewTotal{InstrumentID: model.BaseCurrencyID}
+	if i := slices.IndexFunc(held, func(t usecase.PreviewTotal) bool { return t.InstrumentID == model.BaseCurrencyID }); i >= 0 {
+		main = held[i]
+	} else if len(held) > 0 {
+		main = held[0]
+	}
+
+	var hero heroView
+	for _, t := range held {
+		if t.InstrumentID != main.InstrumentID {
 			hero.Others = append(hero.Others, totalTileOf(r, t))
 		}
 	}
-	if !anything {
-		return heroView{}
-	}
-	main := usecase.PreviewTotal{InstrumentID: model.BaseCurrencyID}
-	for _, t := range totals {
-		if t.InstrumentID == model.BaseCurrencyID {
-			main = t
-		}
-	}
-	held := figureLine(r, "", main.InstrumentID, main.Held)
-	hero.Main = &held
+	line := figureLine(r, "", main.InstrumentID, main.Held)
+	hero.Main = &line
+	hero.Size = heroSize(line.Amount.Text)
 	if shows(main.Unbilled) {
 		hero.Unbilled = new(figureLine(r, unbilledLabel, main.InstrumentID, main.Unbilled))
 	}
 	return hero
+}
+
+// How many characters a headline has before it is written smaller: the figure of most
+// balances is shorter than the first, and what is longer than the second is that of a
+// very large one. The sizes are in the stylesheet, which fits them to the width of a phone.
+const (
+	heroMediumFrom = 16
+	heroLargeFrom  = 20
+)
+
+// heroSize is the class of the headline of a figure written with the given text.
+func heroSize(amount string) string {
+	switch n := utf8.RuneCountInString(amount); {
+	case n >= heroLargeFrom:
+		return "hero-l"
+	case n >= heroMediumFrom:
+		return "hero-m"
+	}
+	return ""
 }
 
 // totalTileOf is a total as the lines of the balance of an account are: what is held,
@@ -431,16 +460,37 @@ func balanceLines(r *refs, balances []usecase.PreviewBalance) []balanceLine {
 // figureLine writes a figure as what it is made of says: what no draft changes is the
 // amount, as it always was; what is confirmed in part and changed by drafts is the
 // amount it would be, with what is confirmed of it beside; and what drafts make the
-// whole of is the amount, with none of it confirmed, and without the colour of a loss,
-// for nothing is lost that was held.
+// whole of is the amount, with none of it confirmed. Only a loss that is confirmed has the
+// colour of one: a figure that is negative only because the drafts would make it so is a
+// plain figure with its sign, and so is one that is all drafts, for nothing that was held
+// is lost, and a reader has no alarm to take from it.
 func figureLine(r *refs, label string, instrument uuid.UUID, f usecase.PreviewFigure) balanceLine {
+	amount := r.plain(instrument, f.Total)
+	if confirmedBasis(f) {
+		amount = r.money(instrument, f.Total)
+	}
 	switch f.Basis {
 	case usecase.PreviewBasisDrafts:
-		return balanceLine{Label: label, Amount: r.plain(instrument, f.Total), Unconfirmed: true}
+		return balanceLine{Label: label, Amount: amount, Unconfirmed: true}
 	case usecase.PreviewBasisBoth:
-		return balanceLine{Label: label, Amount: r.money(instrument, f.Total), Confirmed: new(r.plain(instrument, f.Confirmed))}
+		return balanceLine{Label: label, Amount: amount, Confirmed: new(r.plain(instrument, f.Confirmed))}
 	default:
-		return balanceLine{Label: label, Amount: r.money(instrument, f.Total)}
+		return balanceLine{Label: label, Amount: amount}
+	}
+}
+
+// confirmedBasis is whether what a figure is, when it is a loss, is a loss that is confirmed:
+// no draft changes a figure of the basis confirmed, so what it is is all confirmed; one that
+// drafts change is confirmed in the part that is not theirs, and is a loss that is confirmed
+// when that part is negative too; one that is all drafts has none.
+func confirmedBasis(f usecase.PreviewFigure) bool {
+	switch f.Basis {
+	case usecase.PreviewBasisDrafts:
+		return false
+	case usecase.PreviewBasisBoth:
+		return f.Confirmed.IsNegative()
+	default:
+		return true
 	}
 }
 

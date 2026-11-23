@@ -1302,11 +1302,12 @@ table.wide {
 
 .hero-figure {
   margin: 0.2rem 0 0.15rem;
-  font-size: clamp(1.75rem, 8vw, 3rem);
+  font-size: clamp(1.75rem, 8vw, 2.75rem);
   font-weight: 700;
   line-height: 1.1;
   letter-spacing: -0.015em;
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .hero-figure .amt {
@@ -1318,6 +1319,18 @@ table.wide {
   font-size: 0.4em;
   font-weight: 600;
   letter-spacing: 0.02em;
+}
+
+/* A figure of more characters is written smaller, by how many it has (the page says which): at
+   the 28px that the figure of most has on a 320px screen, one of twenty characters is wider than
+   the card. The largest is set so that even twenty-four, the figure of a number of fourteen
+   digits with its sign, is inside it. */
+.hero-m .hero-figure {
+  font-size: clamp(1.375rem, 6vw, 2.25rem);
+}
+
+.hero-l .hero-figure {
+  font-size: clamp(1.0625rem, 4.5vw, 1.75rem);
 }
 
 .hero-sub {
@@ -1458,10 +1471,11 @@ table.wide {
   font-variant-numeric: tabular-nums;
 }
 
-/* The cards to be paid are a card of their own under the row of the others, as wide as the page:
-   there is one for each card, and with a few of them in a column the row would be as tall as the
-   list. Each is its name, then a line for the statement that is to be paid and one for the one
-   that is open, what each is on the left and the figure on the right, in as many columns as fit. */
+/* The cards that are to be paid are a card of their own under the row of the others, as wide as
+   the page: there is one for each card, and with a few of them in a column the row would be as
+   tall as the list. Each is a tile, with its name, a line for the statement that is to be paid
+   and one for the one that is open, what each is on the left and the figure on the right, in as
+   many columns as fit. */
 .payments {
   margin: 0 0 1rem;
 }
@@ -1469,15 +1483,24 @@ table.wide {
 .due-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(24rem, 100%), 1fr));
-  gap: 0 2rem;
-  margin-top: 0.25rem;
+  gap: 0.75rem;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
 }
 
-.due-list > li,
-.due-list > li:first-child {
-  display: block;
-  padding-top: 0.55rem;
-  border-top: 1px solid var(--border);
+.due-list > li {
+  min-width: 0;
+  padding: 0.65rem 0.85rem;
+  background: var(--surface-2);
+  border-radius: 10px;
+}
+
+.due-name {
+  margin: 0 0 0.1rem;
+  font-weight: 600;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 
 .due-line {
@@ -1493,11 +1516,107 @@ table.wide {
   color: var(--muted);
 }
 
+/* How far off the day is: a day that is near is said with weight and a pill, and not with the
+   colour of a loss, for a card that is to be paid is no loss. */
+.due-in {
+  white-space: nowrap;
+}
+
+.due-soon {
+  padding: 0 0.5em;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
 /* A chart is drawn on a canvas of 360 units, with text of 12: wider than 30rem it is blown up
    to text that is too large for a card, so it stops there. */
 .card .chart {
   max-width: 30rem;
   margin: 0.25rem 0 0.5rem;
+}
+
+/* What is told apart on the chart of the months, and what it is: the key is the colour of the month
+   that is not over, with what has been spent in it, said in words beside the chart. The line along
+   zero is seen, and the dashed one is the height that the largest month reaches. */
+.chart-key {
+  margin: 0 0 0.25rem;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.chart-key strong {
+  margin-left: 0.4rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.key-swatch {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-right: 0.4rem;
+  border-radius: 2px;
+  background: var(--bar-hl);
+  vertical-align: -0.05em;
+}
+
+.chart .chart-axis {
+  stroke: var(--muted);
+  stroke-width: 1;
+}
+
+.chart .chart-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.chart text.chart-scale,
+.chart text.chart-sub {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+/* A chart is drawn twice, for a wide screen and, on a canvas of 240 units, for a phone, where the
+   text of 12 units is a third bigger: one is shown and the other is not, so that a reader of the
+   page has one chart. Neither is wider than the room a phone has. */
+.chart-pair .chart-narrow {
+  display: none;
+}
+
+@media (max-width: 30rem) {
+  .chart-pair .chart {
+    display: none;
+  }
+
+  .chart-pair .chart-narrow {
+    display: block;
+    max-width: 20rem;
+  }
+}
+
+/* A link is at least 24px high to be touched, by a padding that a negative margin takes back, so
+   that the line it is in is as high as the text. */
+.card-link,
+.due-line a,
+.hero-note a,
+.stat-sub a,
+.card-details th a,
+.zero-accounts li a,
+.in-card .balances th a {
+  display: inline-block;
+  padding: 0.3rem 0.35rem;
+  margin: -0.3rem -0.35rem;
+}
+
+/* The name of an account is free text. A name that cannot be broken would widen the table and
+   push the amounts out of the card: it is broken anywhere when there is no other place to. */
+.in-card .balances th {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .card-details {

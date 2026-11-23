@@ -692,7 +692,7 @@ var numeric = regexp.MustCompile(`^\d+(\.\d)?$`)
 var allowedAttrs = map[string]bool{
 	"xmlns": true, "viewBox": true, "class": true, "role": true, "aria-labelledby": true, "id": true,
 	"x": true, "y": true, "width": true, "height": true, "x1": true, "y1": true, "x2": true, "y2": true,
-	"text-anchor": true, "href": true,
+	"text-anchor": true, "href": true, "textLength": true, "lengthAdjust": true,
 }
 
 var allowedElements = map[string]bool{
@@ -712,9 +712,13 @@ func checkSafe(t *testing.T, root *node) {
 				t.Errorf("attribute %s on <%s> is not allowed", name, n.name)
 			}
 			switch name {
-			case "x", "y", "width", "height", "x1", "y1", "x2", "y2":
+			case "x", "y", "width", "height", "x1", "y1", "x2", "y2", "textLength":
 				if !numeric.MatchString(v) {
 					t.Errorf("<%s %s=%q> is not a plain number", n.name, name, v)
+				}
+			case "lengthAdjust":
+				if v != "spacingAndGlyphs" {
+					t.Errorf("lengthAdjust = %q", v)
 				}
 			case "href":
 				if !strings.HasPrefix(v, "/") || strings.HasPrefix(v, "//") {
@@ -936,5 +940,204 @@ func TestColumnsValueTextOverTallestColumn(t *testing.T) {
 	v := checkValueTexts(t, withValues([]string{"20", "20", "100", "20", "20"}, 2))[0]
 	if v.attrs["text-anchor"] != "middle" || v.attrs["y"] != "32" {
 		t.Errorf("text anchor=%s y=%s, want middle 32", v.attrs["text-anchor"], v.attrs["y"])
+	}
+}
+
+// The line along zero is drawn whatever the columns are, even when there is no column to be
+// seen: a chart of nothing still shows what it is a chart of.
+func TestColumnsHaveALineAlongZero(t *testing.T) {
+	for name, bars := range corpus() {
+		root := parse(t, svgchart.Columns(chart, bars))
+		axis := root.byClass(svgchart.ClassAxis)
+		if len(axis) != 1 {
+			t.Errorf("%s: %d lines along zero, want 1", name, len(axis))
+			continue
+		}
+		got := []string{axis[0].attrs["x1"], axis[0].attrs["y1"], axis[0].attrs["x2"], axis[0].attrs["y2"]}
+		if !equal(got, []string{"4", "140", "356", "140"}) {
+			t.Errorf("%s: the line along zero is %v, want from 4,140 to 356,140", name, got)
+		}
+	}
+	if axis := parse(t, svgchart.HBars(chart, vals("1", "2"))).byClass(svgchart.ClassAxis); len(axis) != 0 {
+		t.Errorf("a chart of bars has %d lines along zero", len(axis))
+	}
+}
+
+// MarkMax says what the largest column is, over a line across the height it reaches, so that a
+// column is read against it; the first of the columns that are as large is the one it names.
+func TestMarkMaxWritesTheLargestColumnOverALineAtItsHeight(t *testing.T) {
+	bars := vals("3", "9", "5", "9")
+	bars[1].Text, bars[3].Text = "nine", "also nine"
+	root := parse(t, svgchart.Columns(svgchart.Chart{ID: "c", Title: "t", MarkMax: true}, bars))
+
+	grid, scale := root.byClass(svgchart.ClassGrid), root.byClass(svgchart.ClassScale)
+	if len(grid) != 1 || len(scale) != 1 {
+		t.Fatalf("%d lines and %d texts of a scale, want 1 each", len(grid), len(scale))
+	}
+	tallest := d("140")
+	for _, r := range root.byClass(svgchart.ClassBar) {
+		tallest = decimal.Min(tallest, d(r.attrs["y"]))
+	}
+	if !tallest.Equal(d("36")) || grid[0].attrs["y1"] != "36" || grid[0].attrs["y2"] != "36" || grid[0].attrs["x1"] != "4" || grid[0].attrs["x2"] != "356" {
+		t.Errorf("the line is %v at height %s, want across the top of the tallest column, at 36",
+			[]string{grid[0].attrs["x1"], grid[0].attrs["y1"], grid[0].attrs["x2"], grid[0].attrs["y2"]}, tallest)
+	}
+	if scale[0].text != "nine" || scale[0].attrs["x"] != "4" || scale[0].attrs["y"] != "32" || scale[0].attrs["text-anchor"] != "start" {
+		t.Errorf("the text is %q at %s,%s anchored %s, want the first of the largest, over the left end of the line",
+			scale[0].text, scale[0].attrs["x"], scale[0].attrs["y"], scale[0].attrs["text-anchor"])
+	}
+
+	for name, tt := range map[string]struct {
+		chart svgchart.Chart
+		bars  []svgchart.Bar
+	}{
+		"not asked for":   {chart, bars},
+		"nothing reaches": {svgchart.Chart{ID: "c", Title: "t", MarkMax: true}, vals("0", "0", "-1")},
+	} {
+		root := parse(t, svgchart.Columns(tt.chart, tt.bars))
+		if got := len(root.byClass(svgchart.ClassGrid)) + len(root.byClass(svgchart.ClassScale)); got != 0 {
+			t.Errorf("%s: %d lines and texts of a scale, want none", name, got)
+		}
+	}
+}
+
+// A Sub is a smaller line under its column's label, on the same centre; it makes the canvas taller
+// by what it needs and says itself in the description, and a chart without one is as it was.
+func TestColumnsSubIsASmallerLineUnderItsLabel(t *testing.T) {
+	bars := vals("1", "2", "3")
+	bars[0].Sub, bars[2].Sub = "2025", "2026"
+	root := parse(t, svgchart.Columns(chart, bars))
+	subs, labels := root.byClass(svgchart.ClassSub), root.byClass(svgchart.ClassLabel)
+	if got := texts(subs); !equal(got, []string{"2025", "2026"}) {
+		t.Fatalf("the lines under the labels are %v, want 2025 and 2026", got)
+	}
+	if subs[0].attrs["x"] != labels[0].attrs["x"] || subs[1].attrs["x"] != labels[2].attrs["x"] {
+		t.Errorf("the lines are at %s and %s, want the centres of the first and the last label, %s and %s",
+			subs[0].attrs["x"], subs[1].attrs["x"], labels[0].attrs["x"], labels[2].attrs["x"])
+	}
+	for _, sub := range subs {
+		if sub.attrs["y"] != "173" || sub.attrs["text-anchor"] != "middle" {
+			t.Errorf("a line under a label is at y=%s anchored %s, want 173 and middle", sub.attrs["y"], sub.attrs["text-anchor"])
+		}
+	}
+	if vb := strings.Fields(root.attrs["viewBox"]); vb[3] != "184" {
+		t.Errorf("height = %s, want the 170 of the columns and the 14 of the line", vb[3])
+	}
+	if desc := root.byName("desc")[0].text; !strings.Contains(desc, "b0 2025: 1") || !strings.Contains(desc, "b1: 2") {
+		t.Errorf("description %q does not say the year of the first column", desc)
+	}
+
+	plain := parse(t, svgchart.Columns(chart, vals("1", "2", "3")))
+	if vb := strings.Fields(plain.attrs["viewBox"]); vb[3] != "170" || len(plain.byClass(svgchart.ClassSub)) != 0 {
+		t.Errorf("columns without a line under the labels: height %s and %d lines", vb[3], len(plain.byClass(svgchart.ClassSub)))
+	}
+}
+
+// With NumbersApart the highlighted column does not show its value: the caller writes it beside
+// the chart. The description has it all the same, and the column is as highlighted as ever.
+func TestNumbersApartLeavesOutTheTextOfTheHighlightedColumn(t *testing.T) {
+	bars := vals("1", "2", "3")
+	bars[2].Highlight = true
+	root := parse(t, svgchart.Columns(svgchart.Chart{ID: "c", Title: "t", NumbersApart: true}, bars))
+	if values := root.byClass(svgchart.ClassValue); len(values) != 0 {
+		t.Errorf("%d values over the columns, want none", len(values))
+	}
+	if len(root.byClass(svgchart.ClassBarHighlight)) != 1 {
+		t.Errorf("the highlighted column is not highlighted")
+	}
+	if desc := root.byName("desc")[0].text; !strings.Contains(desc, "b2: 3") {
+		t.Errorf("description %q has not the number of the highlighted column", desc)
+	}
+}
+
+// A chart of a narrow canvas is drawn on it and says so, whatever it draws; one of the default
+// width never says so.
+func TestANarrowChartIsMarkedAndDrawnOnItsOwnCanvas(t *testing.T) {
+	narrow := svgchart.Chart{ID: "n", Title: "t", Width: 240}
+	for name, bars := range corpus() {
+		for _, r := range renderers {
+			root := parse(t, r.fn(narrow, bars))
+			if vb := strings.Fields(root.attrs["viewBox"]); vb[2] != "240" {
+				t.Errorf("%s/%s: width %s, want 240", r.name, name, vb[2])
+			}
+			if !root.hasClass(svgchart.ClassNarrow) {
+				t.Errorf("%s/%s: a narrow canvas is not marked", r.name, name)
+			}
+			if parse(t, r.fn(chart, bars)).hasClass(svgchart.ClassNarrow) {
+				t.Errorf("%s/%s: a canvas of the default width is marked as narrow", r.name, name)
+			}
+		}
+	}
+}
+
+// On a narrow canvas the columns, the line along zero and the text over the last column all stay
+// inside it, which they are placed by the width of the canvas for.
+func TestColumnsOfANarrowChartStayInsideIt(t *testing.T) {
+	narrow := svgchart.Chart{ID: "n", Title: "t", Width: 240, MarkMax: true}
+	for _, n := range []int{1, 2, 12} {
+		bars := make([]svgchart.Bar, n)
+		for i := range bars {
+			bars[i] = svgchart.Bar{Label: "m", Value: decimal.NewFromInt(int64(n - i)), Text: "123,456.00 TWD", Highlight: i == n-1}
+		}
+		root := parse(t, svgchart.Columns(narrow, bars))
+		for _, r := range root.byClass(svgchart.ClassBar) {
+			if x, w := d(r.attrs["x"]), d(r.attrs["width"]); x.Sign() < 0 || x.Add(w).GreaterThan(d("240")) {
+				t.Errorf("n=%d: a column at x=%s w=%s leaves the canvas", n, x, w)
+			}
+		}
+		if axis := root.byClass(svgchart.ClassAxis)[0]; axis.attrs["x2"] != "236" {
+			t.Errorf("n=%d: the line along zero ends at %s, want 236", n, axis.attrs["x2"])
+		}
+		for _, v := range root.byClass(svgchart.ClassValue) {
+			if from, to := valueBox(t, v); from.Sign() < 0 || to.GreaterThan(d("240")) {
+				t.Errorf("n=%d: the text of the highlighted column covers %s to %s, outside 0 to 240", n, from, to)
+			}
+		}
+	}
+}
+
+// What the widest value leaves of a narrow canvas is the track of the bars, so that no value runs over
+// its bar; at the default width it is the 240 that it always was, whatever the values are.
+func TestHBarsValueNeverRunsOverItsBarOnANarrowCanvas(t *testing.T) {
+	bars := []svgchart.Bar{
+		{Label: "訂閱服務", Value: d("60000000"), Text: "60,000,000.00 TWD"},
+		{Label: "房租", Value: d("5"), Text: "5.00 TWD"},
+	}
+	root := parse(t, svgchart.HBars(svgchart.Chart{ID: "n", Title: "t", Width: 240}, bars))
+	tracks, values := root.byClass(svgchart.ClassTrack), root.byClass(svgchart.ClassValue)
+	if len(tracks) != 2 || len(values) != 2 {
+		t.Fatalf("%d tracks and %d values, want 2 each", len(tracks), len(values))
+	}
+	for i := range tracks {
+		from, _ := valueBox(t, values[i])
+		if end := d(tracks[i].attrs["x"]).Add(d(tracks[i].attrs["width"])); end.GreaterThan(from) {
+			t.Errorf("row %d: the track ends at %s and the value begins at %s", i, end, from)
+		}
+	}
+	if w := tracks[0].attrs["width"]; w != "112" {
+		t.Errorf("track = %s, want the 240 of the canvas less the 120 of the widest value and 8", w)
+	}
+	if w := parse(t, svgchart.HBars(chart, bars)).byClass(svgchart.ClassTrack)[0].attrs["width"]; w != "240" {
+		t.Errorf("track at the default width = %s, want 240", w)
+	}
+}
+
+// A label that is estimated wider than the canvas is squeezed to fit it, and one that fits is not.
+func TestALabelWiderThanTheCanvasIsFittedToIt(t *testing.T) {
+	narrow := svgchart.Chart{ID: "n", Title: "t", Width: 240}
+	root := parse(t, svgchart.HBars(narrow, []svgchart.Bar{
+		{Label: strings.Repeat("長", 30), Value: d("1")},
+		{Label: strings.Repeat("長", 20), Value: d("1")},
+		{Label: "短", Value: d("1")},
+	}))
+	labels := root.byClass(svgchart.ClassLabel)
+	if labels[0].attrs["textLength"] != "240" || labels[0].attrs["lengthAdjust"] != "spacingAndGlyphs" {
+		t.Errorf("a label of 360 units: textLength=%q lengthAdjust=%q, want 240 and spacingAndGlyphs",
+			labels[0].attrs["textLength"], labels[0].attrs["lengthAdjust"])
+	}
+	for _, fits := range labels[1:] {
+		if _, fitted := fits.attrs["textLength"]; fitted {
+			t.Errorf("label %q fits the canvas and is fitted to it", fits.text)
+		}
 	}
 }

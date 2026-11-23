@@ -78,6 +78,20 @@ const (
 	PreviewBasisDrafts PreviewBasis = "drafts"
 )
 
+// PreviewBasisOf is the basis that a name says, the names being those that the domain gives to
+// what a figure is made of: "confirmed", "both" and "drafts". A name that is not one of them is
+// what no draft changes, of which nothing is said. It is the one mapping from the names of the
+// domain to the words of this port, which the use case and whoever stands in for it use alike,
+// so that the port says nothing of the domain's own type.
+func PreviewBasisOf(name string) PreviewBasis {
+	switch basis := PreviewBasis(name); basis {
+	case PreviewBasisBoth, PreviewBasisDrafts:
+		return basis
+	default:
+		return PreviewBasisConfirmed
+	}
+}
+
 // PreviewFigure is one figure of a balance, as it would be once the drafts are confirmed.
 type PreviewFigure struct {
 	// Total is what the figure would be with every draft confirmed: Confirmed and Drafts

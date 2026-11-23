@@ -36,7 +36,7 @@ func part(role, target string) string {
 // words of the port are the model's, as the tests of the use case show.
 func figure(confirmed, drafts string) usecase.PreviewFigure {
 	f := model.PreviewFigure{Confirmed: dec(confirmed), Drafts: dec(drafts)}
-	return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: usecase.PreviewBasis(f.Basis())}
+	return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: usecase.PreviewBasisOf(string(f.Basis()))}
 }
 
 // held is a balance that no draft changes: what an account holds of an instrument, with
