@@ -284,6 +284,43 @@ func (r *TransactionRepo) Balances(ctx context.Context, filter repo.BalanceFilte
 	return balances, nil
 }
 
+// PreviewBalances adds up, for each account and instrument, the postings of the
+// confirmed transactions that happened on or before the day, which is what Balances
+// says, beside the postings of the drafts that happened on or before it, which is what
+// confirming them would add: the account book to what the account holds, and the
+// instalment book to what is not yet due. ListPreviewBalances reads them in one
+// statement, and CountDrafts how many drafts wait; both in one snapshot (see
+// WithinSnapshot in pkg/postgres), so that the balances and the count are of one
+// moment.
+func (r *TransactionRepo) PreviewBalances(ctx context.Context, day time.Time) (model.BalancePreview, error) {
+	var preview model.BalancePreview
+	err := r.db.WithinSnapshot(ctx, func(ctx context.Context) error {
+		rows, err := r.q.ListPreviewBalances(ctx, day)
+		if err != nil {
+			return fmt.Errorf("list the balances with the drafts: %w", err)
+		}
+		preview.Balances = make([]model.PreviewBalance, len(rows))
+		for i, row := range rows {
+			preview.Balances[i] = model.PreviewBalance{
+				AccountID:    row.AccountID,
+				InstrumentID: row.InstrumentID,
+				Held:         model.PreviewFigure{Confirmed: row.Confirmed, Drafts: row.Drafts},
+				Unbilled:     model.PreviewFigure{Confirmed: row.UnbilledConfirmed, Drafts: row.UnbilledDrafts},
+			}
+		}
+		n, err := r.q.CountDrafts(ctx)
+		if err != nil {
+			return fmt.Errorf("count the drafts: %w", err)
+		}
+		preview.Drafts = int(n)
+		return nil
+	})
+	if err != nil {
+		return model.BalancePreview{}, err
+	}
+	return preview, nil
+}
+
 // PendingDrafts counts the drafts that happened on or before the day and have a
 // posting to the account in the instrument.
 func (r *TransactionRepo) PendingDrafts(ctx context.Context, accountID, instrumentID uuid.UUID, day time.Time) (int, error) {

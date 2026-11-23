@@ -32,7 +32,7 @@ type Ports struct {
 	// the timezone it is read in is the one dates are shown in.
 	Clock clock.Clock
 
-	GetBalances         usecase.GetBalances
+	GetPreviewBalances  usecase.GetPreviewBalances
 	GetDealings         usecase.GetDealings
 	ListTransactions    usecase.ListTransactions
 	GetTransaction      usecase.GetTransaction

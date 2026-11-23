@@ -164,6 +164,29 @@ type TransactionRepo interface {
 	// account and instrument with a posting of either, however they add up. The
 	// filter's account and instrument limit it, each when set.
 	Balances(ctx context.Context, filter BalanceFilter) ([]model.Balance, error)
+	// PreviewBalances returns what each account would hold of each instrument on the
+	// day if every draft were confirmed, and how many drafts wait. For each account
+	// and instrument it has, in each of the two figures that Balances has, what
+	// Balances says, and, apart from it, what the drafts that happened on or before
+	// the day add to it, by account name and then instrument code: the account
+	// postings of the drafts to what the account holds, and their instalment
+	// postings to the principal that has not fallen due. The drafts are the
+	// transactions in the status draft, the periods of draft plans among them, which
+	// are drafts of their own in the store; the postings of the account book are what
+	// SummarizeDrafts adds up into the amounts of an account. So a transfer between
+	// two of my accounts is in both, a period of a draft plan is in from the day it
+	// falls due, and a draft dated after the day, and a void transaction, are not in
+	// it. Once every draft is confirmed, Balances says of each account and instrument
+	// what the two figures of its balance add up to here. There is a balance for each
+	// account and instrument with a posting of either book of a confirmed
+	// transaction or of a draft, however they add up. Drafts is how many drafts wait,
+	// as SummarizeDrafts counts them: whatever day each happened on, a plan once.
+	// It reads all of it in one snapshot, so that the confirmed part, the draft part
+	// and the count are of one moment: a draft that is confirmed while it runs is in
+	// one of the parts, and never in both or in neither. Call it outside a database
+	// transaction, or inside one that is REPEATABLE READ or stricter, as for List.
+	// day is a date as model.DateOf makes it.
+	PreviewBalances(ctx context.Context, day time.Time) (model.BalancePreview, error)
 	// PendingDrafts returns how many drafts happened on or before the day and have
 	// an account posting to the account in the instrument: transactions that would
 	// change what Balances returns for them on that day once confirmed. day is a

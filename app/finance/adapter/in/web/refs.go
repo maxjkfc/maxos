@@ -187,6 +187,16 @@ func (r *refs) taken(instrument uuid.UUID, quantity decimal.Decimal) amountView 
 	return amountView{Text: webserver.FormatAmount(quantity.Neg(), decimals), Unit: i.Code}
 }
 
+// plain writes a quantity with its minus sign when it is negative and no colour for a loss.
+// A balance that was confirmed before the drafts were counted in is a reference read beside
+// another figure, and not what it is; and a balance of which none is confirmed is a draft's
+// number, which no account has lost anything to: it says what it would be, and colours
+// nothing red until there is something confirmed that it is a loss of.
+func (r *refs) plain(instrument uuid.UUID, quantity decimal.Decimal) amountView {
+	i, decimals := r.instrument(instrument)
+	return amountView{Text: webserver.FormatAmount(quantity, decimals), Unit: i.Code}
+}
+
 // base writes an amount of the base currency.
 func (r *refs) base(amount decimal.Decimal) amountView {
 	return r.money(model.BaseCurrencyID, amount)

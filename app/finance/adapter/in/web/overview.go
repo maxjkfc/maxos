@@ -11,11 +11,16 @@ import (
 	"github.com/maxjkfc/maxos/pkg/webserver"
 )
 
-// overviewView is the overview page: what the accounts hold, the instalments that
-// are not yet due, what the parties owe me and I them, and the drafts that wait.
-// There is no figure for the net worth: it needs the prices of what is held.
+// overviewView is the overview page: what the accounts hold (or would, once the drafts
+// that wait are confirmed: see Preview), the instalments that are not yet due, what
+// the parties owe me and I them, and the drafts that wait. There is no figure for the
+// net worth: it needs the prices of what is held.
 type overviewView struct {
 	Today string
+	// Preview is what the page says of the balances being what the accounts would hold
+	// with the drafts confirmed, and not what they hold: it has no count when no draft
+	// waits, and then the balances are what the accounts hold, as they always were.
+	Preview previewView
 	// Groups are the balances of the accounts by institution, the accounts that have
 	// none last; ZeroAccounts are the accounts in use that hold nothing at all,
 	// which are not worth a row each.
@@ -25,6 +30,18 @@ type overviewView struct {
 	Dealings     []dealingRow
 	ZeroParties  []string
 	Drafts       draftBox
+}
+
+// previewView is what the balances are said to be: the use case that reads them says
+// how many drafts they count in and whether anything of them is confirmed, from the
+// same read, so that the heading, the note and each line say one thing.
+type previewView struct {
+	// Count is how many drafts wait: the number the balances are said to count in.
+	Count int
+	Href  string
+	// AllDrafts is true when nothing of any balance listed is confirmed: every number
+	// is a draft's, which the note says.
+	AllDrafts bool
 }
 
 type linkView struct {
@@ -53,6 +70,17 @@ type balanceLine struct {
 	// Label is empty for a balance, and says what it is otherwise.
 	Label  string
 	Amount amountView
+	// Confirmed is the part of a figure that is confirmed, when drafts change it and
+	// something is confirmed of it: Amount is then what the account would hold with the
+	// drafts confirmed, and this is what it holds now. It is nil for a figure that no
+	// draft changes, whose Amount is what the account holds, and for a figure of which
+	// none is confirmed (Unconfirmed).
+	Confirmed *amountView
+	// Unconfirmed is true for a figure that drafts make up the whole of: none of it is
+	// confirmed, which is said in words and not as a figure of nothing, so that a list
+	// of balances that are all drafts is not a column of zeros. Its Amount is not a loss
+	// that is coloured as one: nothing is lost that was held.
+	Unconfirmed bool
 }
 
 type planRow struct {
@@ -96,13 +124,15 @@ const (
 	noInstitution = "沒有機構"
 	unbilledLabel = "未到期分期"
 	dealingLabel  = "往來"
+	draftsHref    = "/app/drafts"
 )
 
-// overview reads the balances, the plans that still have something to charge, the
-// dealings and the summary of the drafts, and the lists that name them.
+// overview reads the balances with the drafts that wait counted in, the plans that
+// still have something to charge, the dealings and the summary of the drafts, and the
+// lists that name them.
 func (h *handlers) overview(r *http.Request) (webserver.Page, error) {
 	ctx := r.Context()
-	balances, err := h.p.GetBalances.GetBalances(ctx, usecase.GetBalancesInput{})
+	preview, err := h.p.GetPreviewBalances.GetPreviewBalances(ctx, usecase.GetPreviewBalancesInput{})
 	if err != nil {
 		return webserver.Page{}, fail(err)
 	}
@@ -126,18 +156,19 @@ func (h *handlers) overview(r *http.Request) (webserver.Page, error) {
 		Name:  "overview",
 		Title: "總覽",
 		Nav:   navOverview,
-		Data:  buildOverview(names, h.today(), balances.Balances, dealings.Dealings, plans.Plans, drafts),
+		Data:  buildOverview(names, h.today(), preview, dealings.Dealings, plans.Plans, drafts),
 	}, nil
 }
 
 // buildOverview lays the answers out. An account that holds nothing, of any
-// instrument and not owing any instalment, is one line in a list that is folded; an
-// archived one that holds nothing is not shown at all.
-func buildOverview(r *refs, today time.Time, balances []usecase.Balance, dealings []usecase.Dealing, plans []usecase.InstalmentPlanSummary, drafts usecase.GetDraftSummaryOutput) overviewView {
+// instrument and not owing any instalment, and of which nothing is confirmed, is one
+// line in a list that is folded; an archived one that holds nothing is not shown at
+// all.
+func buildOverview(r *refs, today time.Time, preview usecase.GetPreviewBalancesOutput, dealings []usecase.Dealing, plans []usecase.InstalmentPlanSummary, drafts usecase.GetDraftSummaryOutput) overviewView {
 	v := overviewView{Today: webserver.FormatDate(today), Drafts: draftsBox(r, drafts)}
 
-	byAccount := make(map[uuid.UUID][]usecase.Balance)
-	for _, b := range balances {
+	byAccount := make(map[uuid.UUID][]usecase.PreviewBalance)
+	for _, b := range preview.Balances {
 		byAccount[b.AccountID] = append(byAccount[b.AccountID], b)
 	}
 	groups := make(map[uuid.UUID]*balanceGroup)
@@ -179,6 +210,7 @@ func buildOverview(r *refs, today time.Time, balances []usecase.Balance, dealing
 	if group, ok := groups[uuid.Nil]; ok {
 		v.Groups = append(v.Groups, *group)
 	}
+	v.Preview = previewView{Count: preview.DraftCount, Href: draftsHref, AllDrafts: preview.DraftCount > 0 && !preview.HasConfirmed && len(v.Groups) > 0}
 
 	for _, p := range plans {
 		next := "—"
@@ -199,15 +231,29 @@ func buildOverview(r *refs, today time.Time, balances []usecase.Balance, dealing
 	return v
 }
 
-// holdsAnything is whether an account holds or owes anything of any instrument: a
-// quantity that is not zero, or the principal of an instalment that is not yet due.
-func holdsAnything(balances []usecase.Balance) bool {
+// holdsAnything is whether an account holds or owes anything of any instrument, or
+// would: a figure that is not nothing in total, or that something is confirmed of, as
+// when the drafts take all of what an account holds. An account that does neither is
+// listed in the fold, and one of which something is confirmed is listed in the open.
+func holdsAnything(balances []usecase.PreviewBalance) bool {
 	for _, b := range balances {
-		if !b.Quantity.IsZero() || !b.UnbilledInstalment.IsZero() {
+		if hasAnything(b.Held) || hasAnything(b.Unbilled) {
 			return true
 		}
 	}
 	return false
+}
+
+// hasAnything is whether a figure is not nothing, in total or in what is confirmed.
+func hasAnything(f usecase.PreviewFigure) bool {
+	return !f.Total.IsZero() || !f.Confirmed.IsZero()
+}
+
+// shows is whether a figure is a line of its own: its total is not nothing, or drafts
+// change it, which they do when they take all of what is confirmed of it, and then the
+// line says that it is nothing, and what is confirmed.
+func shows(f usecase.PreviewFigure) bool {
+	return !f.Total.IsZero() || !f.Drafts.IsZero()
 }
 
 // balanceLines is a line for each instrument an account holds, in the order the use
@@ -215,18 +261,34 @@ func holdsAnything(balances []usecase.Balance) bool {
 // which is not what it holds and is told apart by its label. An instrument whose
 // quantity is nothing and which only has instalments not yet due has just that
 // line.
-func balanceLines(r *refs, balances []usecase.Balance) []balanceLine {
+func balanceLines(r *refs, balances []usecase.PreviewBalance) []balanceLine {
 	var lines []balanceLine
 	for _, b := range balances {
-		owes := !b.UnbilledInstalment.IsZero()
-		if !b.Quantity.IsZero() || !owes {
-			lines = append(lines, balanceLine{Amount: r.money(b.InstrumentID, b.Quantity)})
+		owes := shows(b.Unbilled)
+		if shows(b.Held) || !owes {
+			lines = append(lines, figureLine(r, "", b.InstrumentID, b.Held))
 		}
 		if owes {
-			lines = append(lines, balanceLine{Label: unbilledLabel, Amount: r.money(b.InstrumentID, b.UnbilledInstalment)})
+			lines = append(lines, figureLine(r, unbilledLabel, b.InstrumentID, b.Unbilled))
 		}
 	}
 	return lines
+}
+
+// figureLine writes a figure as what it is made of says: what no draft changes is the
+// amount, as it always was; what is confirmed in part and changed by drafts is the
+// amount it would be, with what is confirmed of it beside; and what drafts make the
+// whole of is the amount, with none of it confirmed, and without the colour of a loss,
+// for nothing is lost that was held.
+func figureLine(r *refs, label string, instrument uuid.UUID, f usecase.PreviewFigure) balanceLine {
+	switch f.Basis {
+	case usecase.PreviewBasisDrafts:
+		return balanceLine{Label: label, Amount: r.plain(instrument, f.Total), Unconfirmed: true}
+	case usecase.PreviewBasisBoth:
+		return balanceLine{Label: label, Amount: r.money(instrument, f.Total), Confirmed: new(r.plain(instrument, f.Confirmed))}
+	default:
+		return balanceLine{Label: label, Amount: r.money(instrument, f.Total)}
+	}
 }
 
 // dealingRows is a row for each party that owes me or that I owe anything, with a
@@ -275,7 +337,7 @@ func dealingMeaning(d usecase.Dealing) string {
 
 // draftsBox is the count of the drafts and what they would change in the balances.
 func draftsBox(r *refs, drafts usecase.GetDraftSummaryOutput) draftBox {
-	box := draftBox{Count: drafts.Count, OwnTransfers: drafts.OwnTransfers, Href: "/app/drafts"}
+	box := draftBox{Count: drafts.Count, OwnTransfers: drafts.OwnTransfers, Href: draftsHref}
 	for _, a := range drafts.Amounts {
 		box.Amounts = append(box.Amounts, draftAmountOf(r, a))
 	}

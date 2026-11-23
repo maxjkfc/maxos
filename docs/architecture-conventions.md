@@ -118,7 +118,7 @@ adapter  →  usecase  →  domain
   - 版本固定，透過 `make sqlc` 執行。
   - `make check` 會重新產生並要求無差異。
 - **手寫 SQL 的例外**：有可選篩選條件的動態查詢，可以在同一個 adapter 裡手寫，集中在 `queries.go`。
-- **交易邊界**由 use case 決定，repo 不自行開交易。唯一的例外是需要用同一份快照讀好幾條語句的唯讀 repo 方法，它可以用 `DB.WithinSnapshot` 開唯讀的 `REPEATABLE READ` 交易（目前是 finance 的 `TransactionRepo.List` 與 `TransactionRepo.Statement`）；寫入一律由 use case 決定。
+- **交易邊界**由 use case 決定，repo 不自行開交易。唯一的例外是需要用同一份快照讀好幾條語句的唯讀 repo 方法，它可以用 `DB.WithinSnapshot` 開唯讀的 `REPEATABLE READ` 交易（目前是 finance 的 `TransactionRepo.List`、`TransactionRepo.Statement` 與 `TransactionRepo.PreviewBalances`）；寫入一律由 use case 決定。
   - `pkg/postgres` 的 `DB` 是 repo 執行 SQL 的入口（`dbgen.New(postgres.NewDB(pool))`）：語句會自動加入 context 帶著的交易，沒有交易就直接走連線池，所以 repo 不需要知道交易的存在。
   - `DB.WithinTx(ctx, fn)` 開啟交易，並把交易放進傳給 `fn` 的 context；`fn` 回傳 `nil` 才提交，回傳錯誤或 panic 就回滾。**不巢狀**：`fn` 裡呼叫的任何東西都不能再開交易（`fn` 可以呼叫別的 use case，例如 finance 經 catalog 的 `VerifyReferences` 驗證參照，只要它們自己不開交易）；傳給 `WithinTx` 的 context 已帶著交易時，它回傳 `ErrNestedTx`，不執行 `fn`、不送任何語句，開著的交易照舊。呼叫它的 `fn` 把這個錯誤原樣回傳，整個交易回滾：這是寫錯程式的訊號，不是要處理的情況。
   - use case 不能 import `pkg/`：需要交易的 use case 在自己 context 的 `usecase/port/out/` 宣告只有 `WithinTx(ctx context.Context, fn func(ctx context.Context) error) error` 的介面（finance 的是 `usecase/port/out/tx` 的 `Transactor`），由 `cmd/` 把 `*postgres.DB` 注入。介面的註解寫明 `fn` 裡不能再開交易，否則 `WithinTx` 回傳 `ErrNestedTx`（use case 不 import 它，也不處理它，只把錯誤往上傳）。
@@ -191,7 +191,7 @@ adapter  →  usecase  →  domain
 
 - **只讀。** 只服務 GET 與 HEAD，其他方法回 405。之後要加寫入的動作，在 `webserver` 加 `Post` 與一個檢查來源（`Origin`、`Sec-Fetch-Site`）與 token 的 middleware，頁面的 handler 不必動；做法寫在 `docs/design/web-readonly.md`。
 - **一頁的 use case 呼叫數固定，不隨列數增加。** 列出來的東西（交易、草稿、帳單……）一次取得，名稱用的參考清單（帳戶、類別、領域……）每種一次；不在迴圈裡呼叫 use case。要的資料 use case 給不出來時，加 use case，不在 adapter 裡逐筆查。唯一隨數量增減的是信用卡帳單總覽：每張設了結帳日的卡一次 `ListCardStatements`（帳單的日子是各卡自己的），那是卡的張數，不是帳本的筆數。
-- **頁面只排版：不加總，不分攤，不判斷。** 頁面做的是：金額的小數位數、千分位與正負號（一個 use case 給的數寫成「從合計扣掉」時前面的負號也是格式，如草稿頁「自己帳戶之間的轉帳」那一列）、日期、把代碼換成用語、列的順序（照 use case 給的；把它給的幾列併進同一個表時照金額排）、某個數字占它的總額的百分比、同一個回答裡兩個數字的差（預算與已花之間的「還剩」與「超支多少」）。這些不是頁面的：把幾筆加起來（一張帳單的消費依頂層類別、一個類別連同子類別的合計、草稿的流出與流入）、把一個數字分到各項、判斷一個狀態（超支、超過分配）、決定什麼算一筆草稿。缺的時候加 use case：這些現在分別在 `GetCardStatement` 的 `Charges`、`GetSpending` 的 `TopLevel`、預算的 `Over`（領域、專案與每一個分配）、`GetDraftSummary`（含 `OwnTransferAmounts`，讓表上每一欄加得起來）。
+- **頁面只排版：不加總，不分攤，不判斷。** 頁面做的是：金額的小數位數、千分位與正負號（一個 use case 給的數寫成「從合計扣掉」時前面的負號也是格式，如草稿頁「自己帳戶之間的轉帳」那一列）、日期、把代碼換成用語、列的順序（照 use case 給的；把它給的幾列併進同一個表時照金額排）、某個數字占它的總額的百分比、同一個回答裡兩個數字的差（預算與已花之間的「還剩」與「超支多少」）。這些不是頁面的：把幾筆加起來（一張帳單的消費依頂層類別、一個類別連同子類別的合計、草稿的流出與流入、已確認的餘額加上草稿的變動）、把一個數字分到各項、判斷一個狀態（超支、超過分配、一個餘額是已確認的、是草稿的還是兩者都有、帳本裡有沒有已確認的）、決定什麼算一筆草稿、數有幾筆草稿。缺的時候加 use case：這些現在分別在 `GetCardStatement` 的 `Charges`、`GetSpending` 的 `TopLevel`、預算的 `Over`（領域、專案與每一個分配）、`GetDraftSummary`（含 `OwnTransferAmounts`，讓表上每一欄加得起來）、`GetPreviewBalances`（預覽餘額 ＝ 已確認的餘額加草稿的變動：每個數字的 `Total`、`Confirmed`、`Drafts` 與它是什麼構成的 `Basis`，加上草稿的張數 `DraftCount` 與 `HasConfirmed`，一次讀取給出；頁面照寫，標題、說明與每個數字因此說的是同一件事，頁面不從數字自己推「這是不是草稿」）。哪些帳戶收進摺疊的「餘額皆為零」清單，是排版：它只看數字是不是零，不決定任何狀態。
 - **「今天」只來自時鐘 port**，時區是 `MAXOS_TIMEZONE`。交易的日期是帳本裡的日曆日，原樣顯示、不轉時區；建立、確認、作廢與發生的時刻（有時分的）才轉成這個時區顯示。
 - **查詢參數要讀得出來，讀不出來是 400。** 查詢字串用 `url.ParseQuery` 讀，壞的跳脫與分號是 400，一頁收的參數給了不只一次也是 400（各頁共用一個 `queryOf`），不能像 `URL.Query()` 那樣悄悄丟掉讀不懂的，讓一個壞的月份看起來像本月。400 的頁面說參數該是什麼，不重複收到的值。
 - **沒有外部資源。** 模板與唯一的一份樣式表以 `go:embed` 內嵌，圖表是伺服器產生的 inline SVG，沒有 JavaScript；每個回應帶 `Content-Security-Policy: default-src 'self'` 等標頭（`webserver.Secure`）。

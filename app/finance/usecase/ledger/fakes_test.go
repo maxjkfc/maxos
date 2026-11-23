@@ -130,6 +130,10 @@ type fakeTransactions struct {
 	// readErr is what it returns too.
 	draftRows  []model.DraftTransaction
 	draftReads int
+	// preview is what PreviewBalances returns, and previewAsked lists the days it was
+	// asked for, in order; readErr is what it returns too.
+	preview      model.BalancePreview
+	previewAsked []time.Time
 }
 
 func newFakeTransactions() *fakeTransactions {
@@ -511,6 +515,18 @@ func (f *fakeTransactions) DraftTransactions(context.Context) ([]model.DraftTran
 		return nil, f.readErr
 	}
 	return f.draftRows, nil
+}
+
+// PreviewBalances records the day it was asked for, and returns preview, as the test set
+// it: which postings it adds up is what the repo's tests show, and a test of the use case
+// only needs to see what it was asked with and what it makes of what it gets.
+func (f *fakeTransactions) PreviewBalances(_ context.Context, day time.Time) (model.BalancePreview, error) {
+	f.log.note("read the preview balances")
+	f.previewAsked = append(f.previewAsked, day)
+	if f.readErr != nil {
+		return model.BalancePreview{}, f.readErr
+	}
+	return f.preview, nil
 }
 
 // fakeAccounts is an in-memory repo.AccountRepo of which only Get and Lock are

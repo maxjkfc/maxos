@@ -40,7 +40,7 @@ type financeWebPorts struct {
 
 	Clock financeclock.Clock
 
-	GetBalances         usecase.GetBalances
+	GetPreviewBalances  usecase.GetPreviewBalances
 	GetDealings         usecase.GetDealings
 	ListTransactions    usecase.ListTransactions
 	GetTransaction      usecase.GetTransaction
@@ -68,7 +68,7 @@ type financeWebPorts struct {
 func newFinanceWebRegistrar(p financeWebPorts) webserver.Registrar {
 	return financeweb.NewRegistrar(financeweb.Ports{
 		Clock:               p.Clock,
-		GetBalances:         p.GetBalances,
+		GetPreviewBalances:  p.GetPreviewBalances,
 		GetDealings:         p.GetDealings,
 		ListTransactions:    p.ListTransactions,
 		GetTransaction:      p.GetTransaction,

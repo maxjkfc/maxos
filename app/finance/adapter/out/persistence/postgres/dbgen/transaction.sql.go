@@ -14,6 +14,24 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+const countDrafts = `-- name: CountDrafts :one
+SELECT count(*)
+FROM fin_transaction t
+WHERE t.status = 'draft' AND (t.plan_seq IS NULL OR t.plan_seq = 0)
+`
+
+// How many drafts wait, as SummarizeDrafts counts them: every transaction in the
+// status draft, whatever day it happened on and whatever it moves, a plan once, by
+// its origin. The periods of a plan are drafts of their own in the table, and are
+// not counted: the origin stands for the plan, which is confirmed, discarded and
+// voided as one.
+func (q *Queries) CountDrafts(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countDrafts)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countPendingDrafts = `-- name: CountPendingDrafts :one
 SELECT count(DISTINCT t.id)
 FROM fin_posting p
@@ -657,6 +675,76 @@ func (q *Queries) ListPostings(ctx context.Context, transactionIds []uuid.UUID) 
 			&i.Memo,
 			&i.PartyID,
 			&i.Discount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPreviewBalances = `-- name: ListPreviewBalances :many
+SELECT a.id AS account_id, i.id AS instrument_id,
+       COALESCE(sum(p.quantity) FILTER (WHERE t.status = 'confirmed' AND p.book = 'account'), 0)::numeric AS confirmed,
+       COALESCE(sum(p.quantity) FILTER (WHERE t.status = 'draft' AND p.book = 'account'), 0)::numeric AS drafts,
+       COALESCE(sum(p.quantity) FILTER (WHERE t.status = 'confirmed' AND p.book = 'instalment'), 0)::numeric AS unbilled_confirmed,
+       COALESCE(sum(p.quantity) FILTER (WHERE t.status = 'draft' AND p.book = 'instalment'), 0)::numeric AS unbilled_drafts
+FROM fin_posting p
+JOIN fin_transaction t ON t.id = p.transaction_id
+JOIN fin_account a ON a.id = p.account_id
+JOIN fin_instrument i ON i.id = p.instrument_id
+WHERE t.status IN ('confirmed', 'draft') AND p.book IN ('account', 'instalment')
+  AND t.occurred_on <= $1
+GROUP BY a.id, a.name, i.id, i.code
+ORDER BY a.name, a.id, i.code, i.id
+`
+
+type ListPreviewBalancesRow struct {
+	AccountID         uuid.UUID
+	InstrumentID      uuid.UUID
+	Confirmed         decimal.Decimal
+	Drafts            decimal.Decimal
+	UnbilledConfirmed decimal.Decimal
+	UnbilledDrafts    decimal.Decimal
+}
+
+// What each account would hold of each instrument on a day if every draft were
+// confirmed: ListBalances, with the drafts added in beside what is confirmed, in
+// each of its two figures. confirmed and unbilled_confirmed are its quantity and
+// its unbilled_instalment, the confirmed postings of the account book and of the
+// instalment book added up. drafts and unbilled_drafts are what confirming the
+// drafts that happened on or before the day (the day itself is in) would add to
+// them: the postings of the same two books of the transactions in the status
+// draft, added up. The periods of a draft plan are drafts of their own in the
+// table, so one that has fallen due is in and one that has not is not, as it is
+// dated, and the origin of a plan owes its principal from its day, as it does
+// once it is confirmed (ListBalances); a draft dated after the day and a void
+// transaction are not in. Once every draft is confirmed, ListBalances says of an
+// account and instrument what the two figures here add up to. The postings of the
+// account book are the ones that SummarizeDrafts makes the amounts of an account
+// of, in all the months, and the tests hold the two to each other. There is a row
+// for each account and instrument with a posting of either book of a confirmed
+// transaction or of a draft, however they add up. It is one statement, so what is
+// confirmed and the drafts are of one snapshot.
+func (q *Queries) ListPreviewBalances(ctx context.Context, day time.Time) ([]ListPreviewBalancesRow, error) {
+	rows, err := q.db.Query(ctx, listPreviewBalances, day)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPreviewBalancesRow
+	for rows.Next() {
+		var i ListPreviewBalancesRow
+		if err := rows.Scan(
+			&i.AccountID,
+			&i.InstrumentID,
+			&i.Confirmed,
+			&i.Drafts,
+			&i.UnbilledConfirmed,
+			&i.UnbilledDrafts,
 		); err != nil {
 			return nil, err
 		}

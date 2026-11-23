@@ -13,6 +13,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
+	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
 )
 
@@ -30,17 +31,37 @@ func part(role, target string) string {
 	return `<th scope="row" role="rowheader">` + role + "</th>\n" + `<td role="cell" data-label="帳戶、類別或對象">` + target + `</td>`
 }
 
+// figure is a figure of a preview balance as the use case says it: what is confirmed of it and
+// what the drafts add, with the total and what it is made of, as the model works them out. The
+// words of the port are the model's, as the tests of the use case show.
+func figure(confirmed, drafts string) usecase.PreviewFigure {
+	f := model.PreviewFigure{Confirmed: dec(confirmed), Drafts: dec(drafts)}
+	return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: usecase.PreviewBasis(f.Basis())}
+}
+
+// held is a balance that no draft changes: what an account holds of an instrument, with
+// nothing of it waiting to be confirmed, and nothing unbilled.
+func held(account, instrument uuid.UUID, quantity string) usecase.PreviewBalance {
+	return usecase.PreviewBalance{AccountID: account, InstrumentID: instrument, Held: figure(quantity, "0"), Unbilled: figure("0", "0")}
+}
+
+// owing is a balance of an account that holds nothing of an instrument and owes some of the principal
+// of its instalment plans that is not yet due, that no draft changes.
+func owing(account, instrument uuid.UUID, unbilled string) usecase.PreviewBalance {
+	return usecase.PreviewBalance{AccountID: account, InstrumentID: instrument, Held: figure("0", "0"), Unbilled: figure(unbilled, "0")}
+}
+
 func TestTheOverview(t *testing.T) {
 	f := newFake()
-	f.balances = []usecase.Balance{
-		{AccountID: cash, InstrumentID: twd, Quantity: dec("1234567.5")},
-		{AccountID: checking, InstrumentID: twd, Quantity: dec("-120")},
-		{AccountID: checking, InstrumentID: jpy, Quantity: dec("1500")},
-		{AccountID: checking, InstrumentID: btc, Quantity: dec("0.12345678")},
-		{AccountID: card, InstrumentID: twd, Quantity: dec("0"), UnbilledInstalment: dec("-11000")},
-		{AccountID: emptyAcct, InstrumentID: twd, Quantity: dec("0")},
-		{AccountID: spareCard, InstrumentID: usd, Quantity: dec("0")},
-		{AccountID: oldSaving, InstrumentID: twd, Quantity: dec("0")},
+	f.balances = []usecase.PreviewBalance{
+		held(cash, twd, "1234567.5"),
+		held(checking, twd, "-120"),
+		held(checking, jpy, "1500"),
+		held(checking, btc, "0.12345678"),
+		owing(card, twd, "-11000"),
+		held(emptyAcct, twd, "0"),
+		held(spareCard, usd, "0"),
+		held(oldSaving, twd, "0"),
 	}
 	f.dealings = []usecase.Dealing{
 		{PartyID: alice, InstrumentID: twd, Quantity: dec("300")},
@@ -90,10 +111,10 @@ func TestTheOverview(t *testing.T) {
 	})
 	t.Run("the drafts that wait, and what confirming them today would change", func(t *testing.T) {
 		wantIn(t, page,
-			"有 <strong>3</strong> 筆草稿等著確認", `<a href="/app/drafts">查看草稿</a>`,
+			"有 <strong>3</strong> 筆草稿等著確認", `href="/app/drafts">查看草稿</a>`,
 			"<caption>如果這些草稿今天全部確認，帳戶的餘額今天會有這些變動</caption>",
 			amount("1,500.00", "TWD"), amount("200.00", "TWD"), amount("−1,300.00", "TWD"),
-			"還沒到期的分期各期要到扣款日才會影響餘額",
+			"還沒到期的分期各期",
 			// What only moves between my own accounts is a line of its own.
 			"自己帳戶之間的轉帳：1 筆。錢只是從一個帳戶移到另一個，不計入上面的流出和流入。",
 		)
@@ -126,7 +147,7 @@ func TestTheOverviewWhenThereIsNothing(t *testing.T) {
 
 func TestAnArchivedAccountThatHoldsSomethingIsShown(t *testing.T) {
 	f := newFake()
-	f.balances = []usecase.Balance{{AccountID: oldSaving, InstrumentID: twd, Quantity: dec("5")}}
+	f.balances = []usecase.PreviewBalance{held(oldSaving, twd, "5")}
 	page := f.site(t).page("/app/")
 	wantIn(t, page, "舊存摺", `<span class="badge">已封存</span>`, amount("5.00", "TWD"))
 }

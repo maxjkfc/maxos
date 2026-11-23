@@ -3,8 +3,9 @@
 // trades, dealings, rewards, opening balances and bill instalments as drafts, and
 // reconciling accounts; confirming, discarding and voiding the drafts, an
 // instalment plan as a whole; setting the posting date of a transaction; and
-// reading transactions, instalment plans, balances, dealings, the drafts that are
-// waiting, and the statements of cards.
+// reading transactions, instalment plans, balances (and what they would be with
+// the drafts confirmed), dealings, the drafts that are waiting, and the statements
+// of cards.
 package ledger
 
 import (
@@ -27,8 +28,8 @@ import (
 // RecordExchange, RecordTrade, RecordDealing, RecordReward, RecordBillInstalment,
 // SetOpeningBalance, Reconcile, ConfirmTransactions, DiscardDraft,
 // VoidTransaction, SetPostingDate, GetTransaction, ListTransactions,
-// GetInstalmentPlan, ListInstalmentPlans, GetBalances, GetDealings,
-// GetDraftSummary, GetCardStatement and ListCardStatements.
+// GetInstalmentPlan, ListInstalmentPlans, GetBalances, GetPreviewBalances,
+// GetDealings, GetDraftSummary, GetCardStatement and ListCardStatements.
 //
 // Every use case that writes does all of it, the reads that check the request
 // included, in one database transaction. What today is, for the reads that count
@@ -65,6 +66,7 @@ var (
 	_ usecase.GetInstalmentPlan    = (*Service)(nil)
 	_ usecase.ListInstalmentPlans  = (*Service)(nil)
 	_ usecase.GetBalances          = (*Service)(nil)
+	_ usecase.GetPreviewBalances   = (*Service)(nil)
 	_ usecase.GetDealings          = (*Service)(nil)
 	_ usecase.GetDraftSummary      = (*Service)(nil)
 	_ usecase.SetPostingDate       = (*Service)(nil)

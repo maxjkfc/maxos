@@ -28,9 +28,10 @@ import (
 type draftsApp struct {
 	fx.In
 
-	GetDraftSummary usecase.GetDraftSummary
-	RecordIncome    usecase.RecordIncome
-	RecordExchange  usecase.RecordExchange
+	GetDraftSummary    usecase.GetDraftSummary
+	GetPreviewBalances usecase.GetPreviewBalances
+	RecordIncome       usecase.RecordIncome
+	RecordExchange     usecase.RecordExchange
 }
 
 // draftsWorld is the ledger with what the tests of the drafts refer to: four accounts,
