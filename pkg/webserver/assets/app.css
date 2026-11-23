@@ -3,10 +3,10 @@
  * security policy that forbids it), so every look is a class.
  *
  * Mobile first: the base is one column that fits a phone, and the rules in the
- * media queries at the end only add room. Light and dark follow the system
- * (prefers-color-scheme). Numbers use tabular figures and are right-aligned, and a
- * negative amount is written with its sign: colour is only a second cue, never the
- * only one.
+ * media queries (at the end, or right after the rules they widen) only add room.
+ * Light and dark follow the system (prefers-color-scheme). Numbers use tabular
+ * figures and are right-aligned, and a negative amount is written with its sign:
+ * colour is only a second cue, never the only one.
  */
 
 :root {
@@ -21,7 +21,7 @@
   --neg: #a8281f;
   --draft-bg: #fff6dc;
   --draft-edge: #c99a1b;
-  --void-text: #6b7480;
+  --void-text: #626b77;
   --bar: #3b78d4;
   --bar-hl: #d96f00;
   --track: #e3e8ee;
@@ -29,6 +29,9 @@
   --over-bg: #fde8e6;
   --ok-bg: #e5f4ea;
   --focus: #1d5fc2;
+  --pos: #157347;
+  --on-accent: #ffffff;
+  --hover: rgb(0 0 0 / 0.035);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -51,6 +54,9 @@
     --over-bg: #3a1d1a;
     --ok-bg: #16301f;
     --focus: #7db1ff;
+    --pos: #6fdc9a;
+    --on-accent: #0b1220;
+    --hover: rgb(255 255 255 / 0.045);
   }
 }
 
@@ -302,7 +308,8 @@ button:hover {
 .button-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
+  font-weight: 600;
 }
 
 .button-primary:hover {
@@ -314,47 +321,113 @@ button:hover {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem 0.75rem;
+  gap: 0.5rem 0.6rem;
   margin: 0.25rem 0 1rem;
 }
 
-.month-nav strong {
-  font-size: 1.1rem;
-  min-width: 5.5rem;
-  text-align: center;
+.month-nav .button {
+  padding: 0.4rem 1rem;
+  border-radius: 999px;
 }
 
+.month-nav strong {
+  font-size: 1.25rem;
+  min-width: 6rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The filters are a toolbar: a labelled field for each, and the buttons last. The
+   fields are plain boxes (the chevron is drawn with gradients: the content security
+   policy lets no image in, not even a data: one). On a phone the account, whose names
+   are the long ones, has a row of its own. */
 .filters {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: end;
-  gap: 0.6rem 0.9rem;
+  gap: 0.75rem;
   margin: 0 0 1rem;
+  padding: 0.85rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
 }
 
 .filters label {
   display: grid;
-  gap: 0.2rem;
-  font-size: 0.85rem;
+  gap: 0.3rem;
+  min-width: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   color: var(--muted);
 }
 
+.filters label:first-of-type,
+.filter-actions {
+  grid-column: 1 / -1;
+}
+
 .filters select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  min-height: 2.5rem;
+  padding: 0.5rem 2.25rem 0.5rem 0.75rem;
   font: inherit;
+  font-weight: 400;
+  letter-spacing: 0;
   color: var(--text);
-  background: var(--surface);
+  background-color: var(--bg);
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 1.2rem) 52%, calc(100% - 0.9rem) 52%;
+  background-size: 0.3rem 0.3rem;
+  background-repeat: no-repeat;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.35rem 0.5rem;
-  min-width: 8rem;
-  max-width: 100%;
+  border-radius: 8px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.filters select:hover {
+  border-color: var(--muted);
+}
+
+.filters .button-primary {
+  min-height: 2.5rem;
+  padding: 0.5rem 1.25rem;
+  border-radius: 8px;
+}
+
+.filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
 }
 
 .pager {
   display: flex;
-  gap: 0.75rem;
+  gap: 1rem;
   align-items: center;
-  margin: 0.75rem 0;
+  justify-content: center;
+  margin: 1rem 0;
+}
+
+.pager .button {
+  padding: 0.4rem 1rem;
+  border-radius: 999px;
+}
+
+@media (min-width: 48rem) {
+  .filters {
+    grid-template-columns: minmax(0, 1.6fr) repeat(2, minmax(0, 1fr)) auto;
+  }
+
+  .filters label:first-of-type,
+  .filter-actions {
+    grid-column: auto;
+  }
 }
 
 /* Tables */
@@ -504,6 +577,71 @@ th.num {
   background: var(--ok-bg);
 }
 
+/* The pill says a status and the chip names an area or a project: small, rounded and
+   quiet. What they say is in their text; the colour of the dot only repeats it. */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.05rem 0.7rem 0.05rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.55;
+  white-space: nowrap;
+}
+
+.pill::before {
+  content: "";
+  flex: none;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.pill-draft {
+  background: var(--draft-bg);
+  border-color: var(--draft-edge);
+}
+
+.pill-draft::before {
+  background: var(--draft-edge);
+}
+
+.pill-confirmed {
+  background: var(--ok-bg);
+  border-color: transparent;
+}
+
+.pill-confirmed::before {
+  background: var(--pos);
+}
+
+.pill-void {
+  color: var(--void-text);
+}
+
+.pill-void::before {
+  background: var(--void-text);
+}
+
+.chip {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0.1rem 0.45rem;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
 tr.draft > td,
 tr.draft > th {
   background: var(--draft-bg);
@@ -631,6 +769,18 @@ table.wide {
     padding: 0.55rem 0.5rem;
   }
 
+  .month-nav {
+    gap: 0.5rem;
+  }
+
+  .month-nav .button {
+    padding: 0.4rem 0.8rem;
+  }
+
+  .month-nav strong {
+    min-width: 0;
+  }
+
   table.wide {
     min-width: 0;
   }
@@ -734,6 +884,326 @@ table.wide {
   }
 }
 
+/* The list of transactions: for each row what a brokerage app shows for a trade, what
+   it was (the title) over what it was of (the details), and the amount, big, on the
+   right, in the colour of what it did. Up to 60rem a row is a card, a grid of its own,
+   whose whole face is the link; from there on the list is a table with fixed columns.
+   Chinese is not broken into one character a line at any width: a title, which is
+   free text, wraps as Chinese does in a cell that is never narrow, and the names
+   (details, labels of amounts, chips) are kept whole by keep-all, so that a line
+   breaks between them. Only a name wider than its whole cell is broken, by
+   overflow-wrap, as the last resort. */
+
+.tx-wrap {
+  border-radius: 12px;
+}
+
+.tx {
+  overflow-wrap: anywhere;
+}
+
+.tx,
+.tx tbody,
+.tx tr,
+.tx th,
+.tx td {
+  display: block;
+}
+
+.tx thead {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.tx th,
+.tx td {
+  padding: 0;
+  border: 0;
+  font-weight: 400;
+}
+
+.tx tbody tr {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) fit-content(45%);
+  grid-template-areas:
+    "main main amount"
+    "main main status"
+    "date tags tags";
+  align-items: start;
+  gap: 0.35rem 0.75rem;
+  padding: 0.75rem 1rem;
+  border-left: 4px solid transparent;
+  border-bottom: 1px solid var(--border);
+}
+
+.tx tbody tr:last-child {
+  border-bottom: 0;
+}
+
+.tx .tx-main {
+  grid-area: main;
+  min-width: 0;
+}
+
+.tx .tx-amount {
+  grid-area: amount;
+  text-align: right;
+}
+
+.tx tbody .tx-amount {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.tx .tx-status {
+  grid-area: status;
+  align-self: center;
+  justify-self: end;
+}
+
+.tx .tx-date {
+  grid-area: date;
+  align-self: center;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.tx tbody .tx-date {
+  font-size: 0.8125rem;
+}
+
+.tx .tx-tags {
+  grid-area: tags;
+  align-self: center;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.tx .tx-tags:empty {
+  display: none;
+}
+
+.tx-title {
+  display: block;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+/* The link is what is cut to two lines, and not a box around it: an outline is not
+   cut by the box it is drawn around, and the ring of the focus must show. */
+.tx-title a {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  color: var(--text);
+  text-decoration: none;
+  text-wrap: pretty;
+}
+
+.tx-title a::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+}
+
+.tx-sub {
+  display: block;
+  margin-top: 0.1rem;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.tx-sub > span {
+  word-break: keep-all;
+}
+
+.tx-posted {
+  display: block;
+  font-size: 0.75rem;
+}
+
+.tx-move {
+  display: block;
+}
+
+.tx-move + .tx-move {
+  margin-top: 0.2rem;
+}
+
+.tx-move .where {
+  display: block;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1.4;
+  word-break: keep-all;
+}
+
+.tx-move .amt {
+  color: var(--pos);
+}
+
+.tx-move .amt.neg {
+  color: var(--neg);
+}
+
+.tx tr.draft {
+  background: var(--draft-bg);
+  border-left: 4px dashed var(--draft-edge);
+}
+
+.tx tr.draft > td,
+.tx tr.draft > th {
+  background: transparent;
+}
+
+.tx tr.draft > :first-child {
+  border-left: 0;
+}
+
+.tx tr.void .tx-title a,
+.tx tr.void .tx-move .amt {
+  color: var(--void-text);
+  text-decoration: line-through;
+}
+
+.tx tbody tr:hover,
+.tx tbody tr:focus-within {
+  background-image: linear-gradient(var(--hover), var(--hover));
+}
+
+@media (min-width: 60rem) {
+  .tx {
+    display: table;
+    table-layout: fixed;
+  }
+
+  .tx thead {
+    display: table-header-group;
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+  }
+
+  .tx tbody {
+    display: table-row-group;
+  }
+
+  .tx tr,
+  .tx tbody tr {
+    display: table-row;
+    padding: 0;
+    border-left: 0;
+    border-bottom: 0;
+  }
+
+  .tx th,
+  .tx td {
+    display: table-cell;
+    padding: 0.8rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: baseline;
+  }
+
+  .tx tbody tr:last-child > * {
+    border-bottom: 0;
+  }
+
+  .tx thead th {
+    padding: 0.65rem 0.75rem;
+    color: var(--muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-align: left;
+    vertical-align: middle;
+    white-space: nowrap;
+    background: var(--surface);
+  }
+
+  .tx thead .tx-date {
+    width: 8rem;
+  }
+
+  .tx thead .tx-tags {
+    width: 13rem;
+  }
+
+  .tx thead .tx-status {
+    width: 5.75rem;
+  }
+
+  .tx thead .tx-amount {
+    width: 12.75rem;
+    text-align: right;
+  }
+
+  .tx tbody .tx-date {
+    font-size: 0.875rem;
+  }
+
+  .tx .tx-tags,
+  .tx .tx-tags:empty {
+    display: table-cell;
+  }
+
+  .tx .tx-tags .chip {
+    margin: 0 0.35rem 0.35rem 0;
+  }
+
+  .tx-title a::after {
+    content: none;
+  }
+
+  .tx-title a:hover {
+    text-decoration: underline;
+  }
+
+  .tx tr > :first-child {
+    border-left: 4px solid transparent;
+  }
+
+  .tx tr.draft {
+    background: none;
+    border-left: 0;
+  }
+
+  .tx tr.draft > td,
+  .tx tr.draft > th {
+    background: var(--draft-bg);
+  }
+
+  .tx tr.draft > :first-child {
+    border-left: 4px dashed var(--draft-edge);
+  }
+
+  .tx tbody tr:hover,
+  .tx tbody tr:focus-within {
+    background-image: none;
+  }
+
+  .tx tbody tr:hover > *,
+  .tx tbody tr:focus-within > * {
+    background-image: linear-gradient(var(--hover), var(--hover));
+  }
+}
+
 @media (min-width: 52rem) {
   main {
     padding-top: 1rem;
@@ -757,5 +1227,14 @@ table.wide {
   .site-nav,
   .skip-link {
     display: none;
+  }
+}
+
+/* Where the system sets the colours (high contrast), what a pill or a chip is must not
+   rest on a background that is gone. */
+@media (forced-colors: active) {
+  .pill,
+  .chip {
+    border: 1px solid CanvasText;
   }
 }
