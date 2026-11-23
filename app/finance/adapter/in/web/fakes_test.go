@@ -86,8 +86,17 @@ func (f *fake) total() int {
 	return n
 }
 
+// GetPreviewBalances says what the real use case does of the ledger the test sets up: the balances
+// it was given, how many drafts wait (as many as the summary of the drafts counts, which is the same
+// number by what the use case is) and whether any figure of any balance has something confirmed.
 func (f *fake) GetPreviewBalances(context.Context, usecase.GetPreviewBalancesInput) (usecase.GetPreviewBalancesOutput, error) {
-	return usecase.GetPreviewBalancesOutput{Balances: f.balances}, f.call("GetPreviewBalances")
+	out := usecase.GetPreviewBalancesOutput{Balances: f.balances, DraftCount: f.drafts.Count}
+	for _, b := range f.balances {
+		if !b.Held.Confirmed.IsZero() || !b.Unbilled.Confirmed.IsZero() {
+			out.HasConfirmed = true
+		}
+	}
+	return out, f.call("GetPreviewBalances")
 }
 
 func (f *fake) GetDealings(context.Context, usecase.GetDealingsInput) (usecase.GetDealingsOutput, error) {

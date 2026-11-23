@@ -339,9 +339,11 @@ func TestPagesIssueAFixedNumberOfCalls(t *testing.T) {
 			f.listed = append(f.listed, tx)
 			f.byID[tx.ID] = tx
 			// Drafts wait for every other account, and the count of them is not nil, so the
-			// overview is of the balances with the drafts counted in, as it is when any wait.
+			// overview is of the balances with the drafts counted in, as it is when any wait;
+			// a draft plan is owed to by the same ones.
 			f.balances = append(f.balances, usecase.PreviewBalance{
-				AccountID: seqID(2000 + i), InstrumentID: twd, Quantity: dec("1"), Confirmed: dec(fmt.Sprint(i % 2)), Drafts: dec(fmt.Sprint(1 - i%2)),
+				AccountID: seqID(2000 + i), InstrumentID: twd,
+				Held: figure(fmt.Sprint(i%2), fmt.Sprint(1-i%2)), Unbilled: figure("0", fmt.Sprint(i%2-1)),
 			})
 			f.dealings = append(f.dealings, usecase.Dealing{PartyID: seqID(3000 + i), InstrumentID: twd, Quantity: dec("5")})
 			f.plans = append(f.plans, usecase.InstalmentPlanSummary{PlanID: seqID(4000 + i), AccountID: card, InstrumentID: twd})

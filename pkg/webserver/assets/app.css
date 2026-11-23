@@ -532,6 +532,12 @@ th.num {
   margin-top: 0.4rem;
 }
 
+/* The code of an instrument in a small line under a balance is read as much as the one in
+   the balance: at the 0.8em of the unit it is the size of a footnote, and this is not one. */
+.line.muted.small .unit {
+  font-size: 1em;
+}
+
 /* Read by a screen reader, not seen: the caption of a table whose heading says it. */
 .sr-only {
   position: absolute;
@@ -889,6 +895,49 @@ table.wide {
 
   .stack tr.draft > :first-child {
     border-left: 0;
+  }
+}
+
+/* The balances of the overview: the name of an account is free text, and beside amounts that
+   have a line of what is confirmed under each, on a phone it is broken into a character or
+   two a line. Below this width the name has the whole width of its row, and the amounts are
+   under it, as in a .stack: the table is the same, with its parts seen as the blocks that
+   they are (the roles are in the markup, for a screen reader that no longer sees a table). */
+@media (max-width: 30rem) {
+  table.balances,
+  .balances tbody,
+  .balances tr,
+  .balances th,
+  .balances td {
+    display: block;
+  }
+
+  .balances caption:not(.sr-only) {
+    display: block;
+    padding: 0.6rem 0.8rem 0.2rem;
+  }
+
+  .balances thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .balances tr {
+    padding: 0.6rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .balances tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  .balances th,
+  .balances td {
+    border: 0;
+    padding: 0.15rem 0;
   }
 }
 

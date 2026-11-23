@@ -14,16 +14,17 @@ import (
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/out/repo"
 )
 
-// A preview balance is what an account would hold once the drafts were confirmed: what it holds
-// now and what the drafts add to it. The statement that reads it is one SQL query that adds up
-// the postings of the confirmed transactions and of the drafts, by the day; the rules of which
-// postings are the drafts' are those of model.SummarizeDrafts, which adds them up too, by month
-// and account. These tests show the rows of the query, and hold it to the summary and to the
-// balances.
+// A preview balance is what an account would hold, and owe in instalments that are not yet due, once
+// the drafts were confirmed: each of the two figures of a balance as it is now, and what the drafts add
+// to it. The statement that reads it is one SQL query that adds up the postings of the confirmed
+// transactions and of the drafts, by the day, in the two books a balance is made of; the rules of which
+// postings of the account book are the drafts' are those of model.SummarizeDrafts, which adds them up
+// too, by month and account. These tests show the rows of the query, and hold it to the summary and to
+// the balances: what GetBalances says once every draft is confirmed is what the preview said before.
 
 // previewOn reads the preview balances on the day and writes each as a line, such as
-// "cash TWD 680 = confirmed 800 + drafts -120", with " unbilled -11000" when something is unbilled,
-// in the order the repo gives them.
+// "cash TWD 680 = confirmed 800 + drafts -120", with " | unbilled -11000 = confirmed 0 + drafts -11000"
+// when something is unbilled, in the order the repo gives them.
 func (e *ledgerEnv) previewOn(day time.Time) []string {
 	e.t.Helper()
 	got, err := e.txns.PreviewBalances(context.Background(), day)
@@ -31,11 +32,11 @@ func (e *ledgerEnv) previewOn(day time.Time) []string {
 		e.t.Fatalf("PreviewBalances: %v", err)
 	}
 	names := e.names()
-	lines := make([]string, len(got))
-	for i, b := range got {
-		lines[i] = fmt.Sprintf("%s %s %s = confirmed %s + drafts %s", names[b.AccountID], names[b.InstrumentID], b.Quantity(), b.Confirmed, b.Drafts)
-		if !b.UnbilledInstalment.IsZero() {
-			lines[i] += fmt.Sprintf(" unbilled %s", b.UnbilledInstalment)
+	lines := make([]string, len(got.Balances))
+	for i, b := range got.Balances {
+		lines[i] = fmt.Sprintf("%s %s %s = confirmed %s + drafts %s", names[b.AccountID], names[b.InstrumentID], b.Held.Total(), b.Held.Confirmed, b.Held.Drafts)
+		if !b.Unbilled.Confirmed.IsZero() || !b.Unbilled.Drafts.IsZero() {
+			lines[i] += fmt.Sprintf(" | unbilled %s = confirmed %s + drafts %s", b.Unbilled.Total(), b.Unbilled.Confirmed, b.Unbilled.Drafts)
 		}
 	}
 	return lines
@@ -49,23 +50,23 @@ func (e *ledgerEnv) wantPreview(day time.Time, want ...string) {
 	}
 }
 
-// previews reads the preview balances on the day, by account and instrument, and fails the test
-// when it cannot.
-func (e *ledgerEnv) previews(day time.Time) map[accountInstrument]model.PreviewBalance {
+// previews reads the preview balances on the day, by account and instrument, and the number of
+// drafts that wait, and fails the test when it cannot.
+func (e *ledgerEnv) previews(day time.Time) (map[accountInstrument]model.PreviewBalance, int) {
 	e.t.Helper()
 	got, err := e.txns.PreviewBalances(context.Background(), day)
 	if err != nil {
 		e.t.Fatalf("PreviewBalances: %v", err)
 	}
-	byKey := make(map[accountInstrument]model.PreviewBalance, len(got))
-	for _, p := range got {
+	byKey := make(map[accountInstrument]model.PreviewBalance, len(got.Balances))
+	for _, p := range got.Balances {
 		k := accountInstrument{p.AccountID, p.InstrumentID}
 		if _, again := byKey[k]; again {
 			e.t.Errorf("%s %s is in the preview balances twice", e.names()[k.account], e.names()[k.instrument])
 		}
 		byKey[k] = p
 	}
-	return byKey
+	return byKey, got.Drafts
 }
 
 // accountInstrument is what a balance is of.
@@ -123,12 +124,21 @@ func TestPreviewBalancesAddWhatTheDraftsWouldChangeToWhatIsConfirmedByTheDayAndL
 		"cash TWD 600 = confirmed 800 + drafts -200",
 	)
 
+	// The five drafts wait, whatever day they are of and whatever they move: the one of the 15th, the
+	// one of December and the one that a party paid are waiting and in no figure on the 14th.
+	if _, drafts := e.previews(nov(14)); drafts != 5 {
+		t.Errorf("%d drafts wait, want 5", drafts)
+	}
+
 	// Confirming a draft moves it from the one part to the other, and the balance is as it was.
 	e.setStatus(lunch.ID, model.StatusConfirmed)
 	e.wantPreview(nov(14),
 		"bank TWD 50000 = confirmed 0 + drafts 50000",
 		"cash TWD 680 = confirmed 680 + drafts 0",
 	)
+	if _, drafts := e.previews(nov(14)); drafts != 4 {
+		t.Errorf("%d drafts wait once one is confirmed, want 4", drafts)
+	}
 }
 
 // A transfer between two of my accounts moves both of them: what leaves the one and what arrives in
@@ -153,56 +163,98 @@ func TestPreviewBalancesHaveATransferBetweenMyOwnAccountsInBothOfThemAndOnlyTheF
 	// All together the drafts take away 25, the two fees: the rest of what leaves one of the
 	// accounts arrives in another.
 	total := decimal.Zero
-	for _, p := range e.previews(nov(14)) {
-		total = total.Add(p.Drafts)
+	byKey, _ := e.previews(nov(14))
+	for _, p := range byKey {
+		total = total.Add(p.Held.Drafts)
 	}
 	if !total.Equal(dec("-25")) {
 		t.Errorf("the drafts change the accounts by %s all together, want -25: the two fees", total)
 	}
 }
 
-// A draft plan changes the balance of its account from the day each period falls due, as the
-// summary of the drafts says: the origin of a purchase paid in instalments posts to the instalment
-// book only, and a period charges the account its principal and its interest. What is unbilled is of
-// confirmed plans, so a draft plan has none to list, and the balance there will be once it is
-// confirmed is the same, with the unbilled instalment beside it.
-func TestPreviewBalancesHaveAPeriodOfADraftPlanFromTheDayItFallsDueAndTheUnbilledInstalmentOnlyOnceThePlanIsConfirmed(t *testing.T) {
+// A draft plan changes what the account holds from the day each period falls due, as the summary of the
+// drafts says, and what it owes in instalments from the day of the origin: the origin of a purchase paid
+// in instalments posts to the instalment book only, and a period gives back to the instalment book what it
+// charges the account, its principal, and charges the account its interest too. Once it is confirmed, the
+// balance there will be is what the preview said of it.
+func TestPreviewBalancesHaveAPeriodOfADraftPlanFromTheDayItFallsDueAndWhatItStillOwesFromTheDayOfItsOrigin(t *testing.T) {
 	e := newLedgerEnv(t)
 	plan := e.storePlan(e.planOf("prev-plan-00000001")) // 12,000 on the card on the 14th; the 5th of each month from December
 
-	// Nothing is charged to the card before the first period falls due, whatever the origin of the
-	// plan says of the principal that is not due.
-	e.wantPreview(nov(14))
-	e.wantPreview(on(2026, time.December, 4))
-	// The first period falls due on the 5th of December: its principal and its interest.
-	e.wantPreview(on(2026, time.December, 5), "card TWD -1030 = confirmed 0 + drafts -1030")
-	e.wantPreview(on(2027, time.January, 4), "card TWD -1030 = confirmed 0 + drafts -1030")
-	e.wantPreview(on(2027, time.January, 5), "card TWD -2030 = confirmed 0 + drafts -2030")
+	// The card owes the whole principal from the day of the origin, and holds nothing of it: nothing
+	// is charged to the card until the first period falls due.
+	e.wantPreview(nov(14), "card TWD 0 = confirmed 0 + drafts 0 | unbilled -12000 = confirmed 0 + drafts -12000")
+	e.wantPreview(on(2026, time.December, 4), "card TWD 0 = confirmed 0 + drafts 0 | unbilled -12000 = confirmed 0 + drafts -12000")
+	// The first period falls due on the 5th of December: its principal and its interest are charged,
+	// and the principal is no longer to come.
+	e.wantPreview(on(2026, time.December, 5), "card TWD -1030 = confirmed 0 + drafts -1030 | unbilled -11000 = confirmed 0 + drafts -11000")
+	e.wantPreview(on(2027, time.January, 4), "card TWD -1030 = confirmed 0 + drafts -1030 | unbilled -11000 = confirmed 0 + drafts -11000")
+	e.wantPreview(on(2027, time.January, 5), "card TWD -2030 = confirmed 0 + drafts -2030 | unbilled -10000 = confirmed 0 + drafts -10000")
+	// Every period has fallen due: what is left to come is nothing, and nothing is said of it.
 	e.wantPreview(on(2027, time.November, 5), "card TWD -12030 = confirmed 0 + drafts -12030")
 
 	// Confirmed, the plan is in the balances, and what the preview said of the card is what is
-	// confirmed; the unbilled instalment is there now, and was not before.
+	// confirmed, in both figures.
 	e.setPlanStatus(plan, model.StatusConfirmed)
-	e.wantPreview(on(2026, time.December, 5), "card TWD -1030 = confirmed -1030 + drafts 0 unbilled -11000")
-	e.wantPreview(nov(14), "card TWD 0 = confirmed 0 + drafts 0 unbilled -12000")
+	e.wantPreview(on(2026, time.December, 5), "card TWD -1030 = confirmed -1030 + drafts 0 | unbilled -11000 = confirmed -11000 + drafts 0")
+	e.wantPreview(nov(14), "card TWD 0 = confirmed 0 + drafts 0 | unbilled -12000 = confirmed -12000 + drafts 0")
 
 	// A voided plan is in neither.
 	e.setPlanStatus(plan, model.StatusVoid)
 	e.wantPreview(on(2026, time.December, 5))
 }
 
-// The conversion of a bill into instalments pays the bill off with a posting of the account book
-// on the day it is made, and then charges each period: the origin of this plan changes a balance
-// as a period does.
-func TestPreviewBalancesHaveTheOriginOfADraftBillInstalmentAndItsPeriodsDueByTheDay(t *testing.T) {
+// The conversion of a bill into instalments pays the bill off with a posting of the account book on the
+// day it is made, owes the principal again with one of the instalment book, and each period gives back
+// what it charges. An account that owes 3,000, and converts it in a draft into three periods of 1,000, owes
+// 3,000 until the day of the origin, and from then on what it holds and what it has still to pay are two
+// figures: a preview that left the second out would say that it owes less than it will. The conversion
+// makes no debt, and moves it from the one figure to the other, so that the drafts of the two add up to
+// nothing.
+func TestPreviewBalancesHaveTheDebtOfADraftBillInstalmentInBothFiguresAndItMovesBetweenThemAndNeverMakesAny(t *testing.T) {
 	e := newLedgerEnv(t)
-	e.storePlan(e.billInstalmentOf("prev-bill-000001")) // the bank's 3,000, on the 16th; 1,000 due on the 20th of November, December and January
+	e.storeConfirmed(e.openingOn("prev-owed-0000001", nov(1), e.bank, e.twd, "-3000")) // the bank account owes 3,000
+	plan := e.storePlan(e.billInstalmentOf("prev-bill-000001"))                        // converted on the 16th; 1,000 due on the 20th of November, December and January
 
-	e.wantPreview(nov(15))
-	e.wantPreview(nov(16), "bank TWD 3000 = confirmed 0 + drafts 3000")
-	e.wantPreview(nov(19), "bank TWD 3000 = confirmed 0 + drafts 3000")
-	e.wantPreview(nov(20), "bank TWD 2000 = confirmed 0 + drafts 2000")
-	e.wantPreview(on(2027, time.January, 20), "bank TWD 0 = confirmed 0 + drafts 0")
+	e.wantPreview(nov(15), "bank TWD -3000 = confirmed -3000 + drafts 0")
+	e.wantPreview(nov(16), "bank TWD 0 = confirmed -3000 + drafts 3000 | unbilled -3000 = confirmed 0 + drafts -3000")
+	e.wantPreview(nov(19), "bank TWD 0 = confirmed -3000 + drafts 3000 | unbilled -3000 = confirmed 0 + drafts -3000")
+	// The first period falls due on the 20th: the account holds -1,000, and 2,000 is still to come.
+	e.wantPreview(nov(20), "bank TWD -1000 = confirmed -3000 + drafts 2000 | unbilled -2000 = confirmed 0 + drafts -2000")
+	e.wantPreview(on(2026, time.December, 20), "bank TWD -2000 = confirmed -3000 + drafts 1000 | unbilled -1000 = confirmed 0 + drafts -1000")
+	e.wantPreview(on(2027, time.January, 20), "bank TWD -3000 = confirmed -3000 + drafts 0")
+
+	// The drafts of a conversion cancel in the two figures, on every day: what it pays off is what it owes
+	// again, and a period gives back what it charges.
+	days := map[time.Time][2]string{
+		nov(16): {"0", "-3000"}, nov(20): {"-1000", "-2000"}, on(2026, time.December, 20): {"-2000", "-1000"}, on(2027, time.January, 20): {"-3000", "0"},
+	}
+	previews := map[time.Time]model.PreviewBalance{}
+	for day := range days {
+		byKey, _ := e.previews(day)
+		p := byKey[accountInstrument{e.bank.ID, e.twd.ID}]
+		previews[day] = p
+		if sum := p.Held.Drafts.Add(p.Unbilled.Drafts); !sum.IsZero() {
+			t.Errorf("%s: the drafts of the conversion add %s to what the account holds and %s to what it owes in instalments, which make %s, want nothing",
+				day.Format(time.DateOnly), p.Held.Drafts, p.Unbilled.Drafts, sum)
+		}
+	}
+
+	// Once the plan is confirmed, the balances say of the account on each day what the two figures of the
+	// preview added up to, in both.
+	e.setPlanStatus(plan, model.StatusConfirmed)
+	for day, pair := range days {
+		got, err := e.txns.Balances(context.Background(), repo.BalanceFilter{AccountID: &e.bank.ID, Day: day})
+		if err != nil || len(got) != 1 {
+			t.Fatalf("Balances on %s = %v, %v, want one", day.Format(time.DateOnly), got, err)
+		}
+		p := previews[day]
+		if !got[0].Quantity.Equal(dec(pair[0])) || !got[0].UnbilledInstalment.Equal(dec(pair[1])) ||
+			!got[0].Quantity.Equal(p.Held.Total()) || !got[0].UnbilledInstalment.Equal(p.Unbilled.Total()) {
+			t.Errorf("%s: the balance is %s and %s unbilled once the plan is confirmed, and the preview said %s and %s, want %s and %s",
+				day.Format(time.DateOnly), got[0].Quantity, got[0].UnbilledInstalment, p.Held.Total(), p.Unbilled.Total(), pair[0], pair[1])
+		}
+	}
 }
 
 // aWorldOfEveryKindOfDraft stores a draft of each of the ten kinds, a purchase in instalments and a
@@ -229,9 +281,10 @@ var daysOfTheWorld = []time.Time{
 }
 
 // The preview and the summary of the drafts are two sums of the same postings, and are one rule:
-// of every account and instrument, the drafts of the preview are the net of the amounts of the
+// of every account and instrument, the drafts of what it holds are the net of the amounts of the
 // summary of all the months, and of all the accounts together they are the net of the drafts. The
-// confirmed part and the unbilled instalment are what the balances say.
+// confirmed part of each figure is what the balances say, the number of drafts is the one the summary
+// counts, and the figures of the instalment book are the same sum of the instalment postings.
 func TestPreviewBalancesAreTheBalancesAndTheNetOfTheSummaryOfTheDraftsAccountByAccountOnEveryDay(t *testing.T) {
 	e := newLedgerEnv(t)
 	e.aWorldOfEveryKindOfDraft()
@@ -259,12 +312,12 @@ func TestPreviewBalancesAreTheBalancesAndTheNetOfTheSummaryOfTheDraftsAccountByA
 					}
 				}
 			}
-			previews := e.previews(day)
+			previews, drafts := e.previews(day)
 
 			// The drafts: the net of the summary, account by account.
 			for k, p := range previews {
-				if !p.Drafts.Equal(said[k]) {
-					t.Errorf("%s %s: the drafts add %s, and the summary of the drafts says a net of %s", names[k.account], names[k.instrument], p.Drafts, said[k])
+				if !p.Held.Drafts.Equal(said[k]) {
+					t.Errorf("%s %s: the drafts add %s to what it holds, and the summary of the drafts says a net of %s", names[k.account], names[k.instrument], p.Held.Drafts, said[k])
 				}
 			}
 			for k, net := range said {
@@ -276,7 +329,7 @@ func TestPreviewBalancesAreTheBalancesAndTheNetOfTheSummaryOfTheDraftsAccountByA
 			// accounts leave out, as they change nothing in all.
 			together := map[uuid.UUID]decimal.Decimal{}
 			for _, p := range previews {
-				together[p.InstrumentID] = together[p.InstrumentID].Add(p.Drafts)
+				together[p.InstrumentID] = together[p.InstrumentID].Add(p.Held.Drafts)
 			}
 			for _, a := range summary.Amounts {
 				together[a.InstrumentID] = together[a.InstrumentID].Sub(a.Net())
@@ -286,9 +339,13 @@ func TestPreviewBalancesAreTheBalancesAndTheNetOfTheSummaryOfTheDraftsAccountByA
 					t.Errorf("%s: the drafts of the accounts and the summary of the drafts differ by %s", names[instrument], rest)
 				}
 			}
+			// How many drafts wait is how many the summary counts, whatever day they are of.
+			if drafts != summary.Count {
+				t.Errorf("%d drafts wait, and the summary counts %d", drafts, summary.Count)
+			}
 
-			// What is confirmed and what is unbilled are what the balances say, and zero in a balance
-			// that only the drafts make.
+			// What is confirmed, in each figure, is what the balances say, and zero in a balance that only
+			// the drafts make.
 			balances, err := e.txns.Balances(context.Background(), repo.BalanceFilter{Day: day})
 			if err != nil {
 				t.Fatalf("Balances: %v", err)
@@ -301,14 +358,14 @@ func TestPreviewBalancesAreTheBalancesAndTheNetOfTheSummaryOfTheDraftsAccountByA
 				switch {
 				case !found:
 					t.Errorf("%s %s has a balance and no preview", names[k.account], names[k.instrument])
-				case !p.Confirmed.Equal(b.Quantity) || !p.UnbilledInstalment.Equal(b.UnbilledInstalment):
+				case !p.Held.Confirmed.Equal(b.Quantity) || !p.Unbilled.Confirmed.Equal(b.UnbilledInstalment):
 					t.Errorf("%s %s: the preview has %s confirmed and %s unbilled, the balances say %s and %s",
-						names[k.account], names[k.instrument], p.Confirmed, p.UnbilledInstalment, b.Quantity, b.UnbilledInstalment)
+						names[k.account], names[k.instrument], p.Held.Confirmed, p.Unbilled.Confirmed, b.Quantity, b.UnbilledInstalment)
 				}
 			}
 			for k, p := range previews {
-				if _, found := held[k]; !found && (!p.Confirmed.IsZero() || !p.UnbilledInstalment.IsZero()) {
-					t.Errorf("%s %s has no balance, and the preview has %s confirmed and %s unbilled", names[k.account], names[k.instrument], p.Confirmed, p.UnbilledInstalment)
+				if _, found := held[k]; !found && p.HasConfirmed() {
+					t.Errorf("%s %s has no balance, and the preview has %s confirmed and %s unbilled", names[k.account], names[k.instrument], p.Held.Confirmed, p.Unbilled.Confirmed)
 				}
 			}
 			// The check is of something: once everything has happened the drafts make balances that
@@ -320,10 +377,11 @@ func TestPreviewBalancesAreTheBalancesAndTheNetOfTheSummaryOfTheDraftsAccountByA
 	}
 }
 
-// Confirming every draft there is changes no quantity: what was the drafts' is then confirmed, which
-// is what a preview says. The unbilled instalment of the plans that were drafts is listed then, which
-// it was not before: a plan has it once it is confirmed.
-func TestConfirmingEveryDraftLeavesThePreviewQuantitiesAsTheyWereAndMakesThemConfirmed(t *testing.T) {
+// Confirming every draft there is changes no figure: what was the drafts' is then confirmed, which is
+// what a preview says, and the balances say of each account and instrument, in both figures, what the
+// preview said before: the debt in instalments that a draft plan makes is in it from the day of its
+// origin, and is not left to appear when the plan is confirmed.
+func TestConfirmingEveryDraftMakesTheBalancesWhatThePreviewSaidInBothFigures(t *testing.T) {
 	e := newLedgerEnv(t)
 	e.aWorldOfEveryKindOfDraft()
 	rows, err := e.txns.DraftTransactions(context.Background())
@@ -332,7 +390,7 @@ func TestConfirmingEveryDraftLeavesThePreviewQuantitiesAsTheyWereAndMakesThemCon
 	}
 	before := make([]map[accountInstrument]model.PreviewBalance, len(daysOfTheWorld))
 	for i, day := range daysOfTheWorld {
-		before[i] = e.previews(day)
+		before[i], _ = e.previews(day)
 	}
 
 	// Confirmed as the use case does, in one database transaction, a plan by its origin and then
@@ -352,22 +410,47 @@ func TestConfirmingEveryDraftLeavesThePreviewQuantitiesAsTheyWereAndMakesThemCon
 
 	names := e.names()
 	for i, day := range daysOfTheWorld {
-		after := e.previews(day)
+		after, drafts := e.previews(day)
+		if drafts != 0 {
+			t.Errorf("%s: %d drafts wait once every draft is confirmed", day.Format(time.DateOnly), drafts)
+		}
+		balances, err := e.txns.Balances(context.Background(), repo.BalanceFilter{Day: day})
+		if err != nil {
+			t.Fatalf("Balances: %v", err)
+		}
+		held := map[accountInstrument]model.Balance{}
+		for _, b := range balances {
+			held[accountInstrument{b.AccountID, b.InstrumentID}] = b
+		}
 		for k, b := range before[i] {
-			a, found := after[k]
-			switch {
-			case !found:
-				t.Errorf("%s: %s %s had a balance of %s, and has none once the drafts are confirmed", day.Format(time.DateOnly), names[k.account], names[k.instrument], b.Quantity())
-			case !a.Quantity().Equal(b.Quantity()) || !a.Drafts.IsZero() || !a.Confirmed.Equal(b.Quantity()):
-				t.Errorf("%s: %s %s was %s (%s confirmed and %s of drafts), and is %s once they are confirmed (%s and %s): want the same, all confirmed",
-					day.Format(time.DateOnly), names[k.account], names[k.instrument], b.Quantity(), b.Confirmed, b.Drafts, a.Quantity(), a.Confirmed, a.Drafts)
+			name := day.Format(time.DateOnly) + ": " + names[k.account] + " " + names[k.instrument]
+			// The balances say what the preview said, in both figures.
+			got, found := held[k]
+			if !found {
+				t.Errorf("%s: the preview had a balance of %s and %s unbilled, and the balances have none once the drafts are confirmed", name, b.Held.Total(), b.Unbilled.Total())
+				continue
+			}
+			if !got.Quantity.Equal(b.Held.Total()) || !got.UnbilledInstalment.Equal(b.Unbilled.Total()) {
+				t.Errorf("%s: the preview said %s held and %s unbilled, and the balances say %s and %s once every draft is confirmed",
+					name, b.Held.Total(), b.Unbilled.Total(), got.Quantity, got.UnbilledInstalment)
+			}
+			// And the preview then is all confirmed, and is the same.
+			a := after[k]
+			if !a.Held.Drafts.IsZero() || !a.Unbilled.Drafts.IsZero() || !a.Held.Confirmed.Equal(b.Held.Total()) || !a.Unbilled.Confirmed.Equal(b.Unbilled.Total()) {
+				t.Errorf("%s: %s held and %s unbilled confirmed, and %s and %s of drafts, once every draft is confirmed, want %s and %s, all confirmed",
+					name, a.Held.Confirmed, a.Unbilled.Confirmed, a.Held.Drafts, a.Unbilled.Drafts, b.Held.Total(), b.Unbilled.Total())
 			}
 		}
-		// A balance that is new is of an unbilled instalment only: a plan whose periods are not due.
+		// A balance that is new has nothing in it: the drafts that make a balance are of the instalment
+		// book or of the account book, and either is in the row of the preview from the day it counts.
 		for k, a := range after {
-			if _, found := before[i][k]; !found && !a.Quantity().IsZero() {
-				t.Errorf("%s: %s %s holds %s once the drafts are confirmed, and had no balance before", day.Format(time.DateOnly), names[k.account], names[k.instrument], a.Quantity())
+			if _, found := before[i][k]; !found && (!a.Held.Total().IsZero() || !a.Unbilled.Total().IsZero()) {
+				t.Errorf("%s: %s %s holds %s and owes %s in instalments once the drafts are confirmed, and had no balance before",
+					day.Format(time.DateOnly), names[k.account], names[k.instrument], a.Held.Total(), a.Unbilled.Total())
 			}
+		}
+		if len(after) != len(before[i]) {
+			t.Errorf("%s: %d balances before the drafts were confirmed and %d after", day.Format(time.DateOnly), len(before[i]), len(after))
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	catalogusecase "github.com/maxjkfc/maxos/app/catalog/usecase/port/in/usecase"
+	"github.com/maxjkfc/maxos/app/finance/domain/model"
 	"github.com/maxjkfc/maxos/app/finance/usecase/port/in/usecase"
 )
 
@@ -30,10 +31,23 @@ func part(role, target string) string {
 	return `<th scope="row" role="rowheader">` + role + "</th>\n" + `<td role="cell" data-label="帳戶、類別或對象">` + target + `</td>`
 }
 
+// figure is a figure of a preview balance as the use case says it: what is confirmed of it and
+// what the drafts add, with the total and what it is made of, as the model works them out.
+func figure(confirmed, drafts string) usecase.PreviewFigure {
+	f := model.PreviewFigure{Confirmed: dec(confirmed), Drafts: dec(drafts)}
+	return usecase.PreviewFigure{Total: f.Total(), Confirmed: f.Confirmed, Drafts: f.Drafts, Basis: string(f.Basis())}
+}
+
 // held is a balance that no draft changes: what an account holds of an instrument, with
-// nothing of it waiting to be confirmed.
+// nothing of it waiting to be confirmed, and nothing unbilled.
 func held(account, instrument uuid.UUID, quantity string) usecase.PreviewBalance {
-	return usecase.PreviewBalance{AccountID: account, InstrumentID: instrument, Quantity: dec(quantity), Confirmed: dec(quantity)}
+	return usecase.PreviewBalance{AccountID: account, InstrumentID: instrument, Held: figure(quantity, "0"), Unbilled: figure("0", "0")}
+}
+
+// owing is a balance of an account that holds nothing of an instrument and owes some of the principal
+// of its instalment plans that is not yet due, that no draft changes.
+func owing(account, instrument uuid.UUID, unbilled string) usecase.PreviewBalance {
+	return usecase.PreviewBalance{AccountID: account, InstrumentID: instrument, Held: figure("0", "0"), Unbilled: figure(unbilled, "0")}
 }
 
 func TestTheOverview(t *testing.T) {
@@ -43,7 +57,7 @@ func TestTheOverview(t *testing.T) {
 		held(checking, twd, "-120"),
 		held(checking, jpy, "1500"),
 		held(checking, btc, "0.12345678"),
-		{AccountID: card, InstrumentID: twd, Quantity: dec("0"), Confirmed: dec("0"), UnbilledInstalment: dec("-11000")},
+		owing(card, twd, "-11000"),
 		held(emptyAcct, twd, "0"),
 		held(spareCard, usd, "0"),
 		held(oldSaving, twd, "0"),
@@ -99,7 +113,7 @@ func TestTheOverview(t *testing.T) {
 			"有 <strong>3</strong> 筆草稿等著確認", `<a href="/app/drafts">查看草稿</a>`,
 			"<caption>如果這些草稿今天全部確認，帳戶的餘額今天會有這些變動</caption>",
 			amount("1,500.00", "TWD"), amount("200.00", "TWD"), amount("−1,300.00", "TWD"),
-			"還沒到期的分期各期要到扣款日才會影響餘額",
+			"還沒到期的分期各期",
 			// What only moves between my own accounts is a line of its own.
 			"自己帳戶之間的轉帳：1 筆。錢只是從一個帳戶移到另一個，不計入上面的流出和流入。",
 		)
